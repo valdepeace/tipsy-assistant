@@ -120,6 +120,18 @@ language = "es-ES"
     }
 
     #[test]
+    fn overriding_one_builtin_keeps_the_other_eight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[personas]]\nid = \"compae\"\nname = \"Mi Compae\"\n").unwrap();
+        let config = load_or_create(&path).unwrap().config;
+        assert_eq!(config.personas.len(), 9, "the override must not remove the other built-ins");
+        let compaes: Vec<&Persona> = config.personas.iter().filter(|p| p.id == "compae").collect();
+        assert_eq!(compaes.len(), 1);
+        assert_eq!(compaes[0].name, "Mi Compae");
+    }
+
+    #[test]
     fn corrupt_file_is_backed_up_and_reset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");

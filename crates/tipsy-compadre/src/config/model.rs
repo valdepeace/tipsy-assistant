@@ -130,6 +130,9 @@ pub struct Persona {
     pub voice_instructions: String,
     pub greeting: String,
     pub wake_word: String,
+    /// Keyed by connector name (`ProviderConfig::voice_key`); the value is a human-written voice
+    /// name or id. Empty means "use the provider's own default": a connector resolves a missing
+    /// entry itself and never fails for it.
     pub voices: BTreeMap<String, String>,
 }
 
@@ -162,5 +165,40 @@ impl Config {
             }
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_nine_builtins_are_present_in_the_order_of_the_spec() {
+        let ids: Vec<String> = crate::config::personas::builtin_personas().iter().map(|p| p.id.clone()).collect();
+        assert_eq!(
+            ids,
+            [
+                "compae", "meigo", "chulapo", "senyor", "good_ol_boy", "hustler", "mate", "bloke", "polite_one"
+            ]
+        );
+    }
+
+    #[test]
+    fn wake_words_are_distinct_because_they_are_spoken_aloud() {
+        let mut words: Vec<String> =
+            crate::config::personas::builtin_personas().iter().map(|p| p.wake_word.clone()).collect();
+        let before = words.len();
+        words.sort();
+        words.dedup();
+        assert_eq!(words.len(), before, "two personas share a wake word");
+    }
+
+    #[test]
+    fn a_persona_without_a_voice_for_the_connector_falls_back_to_the_provider_default() {
+        let config = Config::default();
+        let mut eleven = config.providers.speech.clone();
+        eleven.kind = ProviderKind::Elevenlabs;
+        let meigo = crate::config::personas::builtin_personas().into_iter().find(|p| p.id == "meigo").unwrap();
+        assert_eq!(meigo.voice_for(&eleven), None, "no entry means the connector's own default voice");
     }
 }

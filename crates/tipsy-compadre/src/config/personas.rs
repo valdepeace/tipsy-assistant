@@ -1,4 +1,18 @@
 //! Built-in personas. Each persona's texts are written in its own language.
+//!
+//! The nine are ordered exactly as spec §8.3 lists them.
+//!
+//! Every prompt states spec §8.3's four rules in the persona's own language: it always ends up
+//! giving a correct, useful answer even after dodging; it has no access to Jira, GitHub, GitLab or
+//! the user's code, never invents their contents and asks the user for them instead; it answers in
+//! two or three short sentences with no Markdown, lists, emojis or stage directions; and it is an
+//! original character that never claims to be a real person or a character from another work.
+//!
+//! An empty `voices` table means "use the provider's own default": the connectors resolve a missing
+//! entry themselves and never fail for it, so only `compae` recommends voices today.
+//!
+//! The wake words are provisional until the wake-word spike of Plan 4 verifies them. `senyor` and
+//! `oi bloke` in particular are ordinary words and may false-trigger.
 
 use std::collections::BTreeMap;
 
