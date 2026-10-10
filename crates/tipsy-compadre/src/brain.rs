@@ -240,6 +240,13 @@ impl Brain {
                 }
             }
 
+            // A cancelled turn is over: it neither waits for the sentences already being
+            // synthesised nor plays them, so nothing is heard after the cancellation.
+            if state.aborted {
+                state.abort_pending();
+                return state.turn();
+            }
+
             if finished || state.closed() {
                 break;
             }
@@ -253,13 +260,7 @@ impl Brain {
         }
 
         state.stop();
-
-        Turn {
-            aborted: state.aborted,
-            text: clean_for_speech(&state.text),
-            spoken: state.spoken,
-            first_audio_ms: state.first_audio_ms,
-        }
+        state.turn()
     }
 
     /// Calls the chat provider once, retrying a rate-limited request once after the backoff.
@@ -400,6 +401,22 @@ impl Started {
         self.speech = None;
         for handle in self.pending.drain(..) {
             handle.abort();
+        }
+    }
+
+    /// Discards every queued sentence without playing any of it. Used when a turn is cancelled:
+    /// a sentence synthesised before the cancellation is audio the user asked not to hear.
+    fn abort_pending(&mut self) {
+        self.stop();
+    }
+
+    /// The outcome of the turn so far.
+    fn turn(&self) -> Turn {
+        Turn {
+            aborted: self.aborted,
+            text: clean_for_speech(&self.text),
+            spoken: self.spoken.clone(),
+            first_audio_ms: self.first_audio_ms,
         }
     }
 }
