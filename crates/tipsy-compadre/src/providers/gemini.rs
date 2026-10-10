@@ -11,6 +11,8 @@
 //! mistake and not something to rewrite here; the configuration screen fixes the trap in Plan 2B.
 //! This connector sends the id it is given, verbatim.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -244,16 +246,24 @@ impl ChatProvider for GeminiChat {
         let resp = GeminiHttp::check(resp).await?;
 
         let mut parser = GeminiSse::new();
-        let mut finished = false;
+        // Shared with the tail below: `flat_map` cannot see the end of the body, so completion is
+        // recorded here and checked once the body has ended.
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
         let stream = resp
             .bytes_stream()
             .map(move |chunk| -> Vec<Result<String, ProviderError>> {
-                if finished {
+                if flag.load(Ordering::Relaxed) {
                     return Vec::new();
                 }
                 let bytes = match chunk {
                     Ok(bytes) => bytes,
-                    Err(e) => return vec![Err(ProviderError::from(e))],
+                    // The transport failed mid-reply: stop and record it, so the tail below does not
+                    // report a second, invented failure for the same truncation.
+                    Err(e) => {
+                        flag.store(true, Ordering::Relaxed);
+                        return vec![Err(ProviderError::from(e))];
+                    }
                 };
                 let mut out = Vec::new();
                 for event in parser.push(&bytes) {
@@ -262,12 +272,12 @@ impl ChatProvider for GeminiChat {
                         // HTTP stayed 200: stop reading and surface the provider's message rather
                         // than letting the truncated stream look like a finished reply.
                         GeminiEvent::Error { code, message } => {
-                            finished = true;
+                            flag.store(true, Ordering::Relaxed);
                             out.push(Err(stream_error(&code, &message)));
                             break;
                         }
                         GeminiEvent::Done => {
-                            finished = true;
+                            flag.store(true, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -275,7 +285,20 @@ impl ChatProvider for GeminiChat {
                 out
             })
             .flat_map(futures::stream::iter);
-        Ok(stream.boxed())
+        // Over HTTP/2 an early `END_STREAM` is a clean close, so "the body ended" says nothing by
+        // itself: only the completion event does. A body that ends without one is a truncated
+        // reply, and it must reach the brain as a failure rather than as a stream that finished
+        // normally, which would speak the half-reply and record it in history.
+        let tail = futures::stream::iter(std::iter::once_with(move || {
+            if finished.load(Ordering::Relaxed) {
+                Vec::new()
+            } else {
+                vec![Err(ProviderError::BadResponse(
+                    "the reply stream ended before the completion event".into(),
+                ))]
+            }
+        }).flatten());
+        Ok(stream.chain(tail).boxed())
     }
 }
 
@@ -526,5 +549,30 @@ mod tests {
         assert_eq!(first_sentence("una sola frase sin punto"), "una sola frase sin punto");
         assert_eq!(first_sentence(""), "");
         assert_eq!(first_sentence("¿Qué pasa? Y ya está."), "¿Qué pasa?");
+    }
+
+    /// The same condenser over all nine built-in briefs, structurally: the style sent to the API
+    /// must exist, must not end in whitespace (it is concatenated into a JSON annotation) and must
+    /// be something the API would read as one short style rather than the whole paragraph. No
+    /// persona's wording is asserted, so the copy stays the user's to reword.
+    ///
+    /// This is what catches a future brief whose first sentence lost its full stop (the style would
+    /// swallow the whole paragraph) and one that is blank (the style would be empty, sending an
+    /// annotation with no style at all).
+    #[test]
+    fn every_builtin_brief_condenses_to_a_single_non_empty_style() {
+        for persona in crate::config::personas::builtin_personas() {
+            let brief = persona.voice_instructions.as_str();
+            assert!(!brief.trim().is_empty(), "{} has no voice brief", persona.id);
+            let style = first_sentence(brief);
+            assert!(!style.is_empty(), "{} condenses to an empty style", persona.id);
+            assert_eq!(style, style.trim_end(), "{}'s style has trailing whitespace", persona.id);
+            assert!(
+                style.len() < brief.trim().len(),
+                "{} condenses to the whole brief ({} characters): its first sentence has no terminator",
+                persona.id,
+                style.len()
+            );
+        }
     }
 }
