@@ -78,7 +78,8 @@ pub enum ProviderError {
 impl ProviderError {
     /// Maps an HTTP error status and its body to an error, extracting `error.message` from a JSON
     /// body when present. ElevenLabs reports the array form `detail[]` instead of the string
-    /// `/detail/message` the other providers use, so the first entry's `message` is read too.
+    /// `/detail/message` the other providers use, and the entry it puts there names its field
+    /// `msg` — the key the plan's recorded fixture carries — so both spellings are read.
     pub fn from_status(status: u16, body: &str) -> Self {
         let message = serde_json::from_str::<serde_json::Value>(body)
             .ok()
@@ -87,6 +88,7 @@ impl ProviderError {
                     .or_else(|| v.pointer("/message"))
                     .or_else(|| v.pointer("/detail/message"))
                     .or_else(|| v.pointer("/detail/0/message"))
+                    .or_else(|| v.pointer("/detail/0/msg"))
                     .and_then(|m| m.as_str().map(str::to_string))
                     .filter(|m| !m.is_empty())
             })
@@ -264,10 +266,19 @@ mod tests {
         );
     }
 
-    /// ElevenLabs answers 422 with `detail` as an **array** of objects, so the single string path
-    /// (`/detail/message`) cannot read it and the first entry's `message` is used instead.
+    /// ElevenLabs answers 422 with `detail` as an **array** of objects whose message field is
+    /// `msg`, the key the plan's recorded fixture carries (`tests/elevenlabs.rs`), so the single
+    /// string path (`/detail/message`) cannot read it and the first entry's `msg` is used instead.
     #[test]
     fn status_mapping_reads_the_first_detail_array_message() {
+        assert_eq!(
+            ProviderError::from_status(
+                422,
+                r#"{"detail":[{"type":"invalid_request","code":"voice_not_found","msg":"voice not found"}]}"#
+            ),
+            ProviderError::BadResponse("HTTP 422: voice not found".into())
+        );
+        // The `message` spelling is kept too: a provider that answers with it must not regress.
         assert_eq!(
             ProviderError::from_status(
                 422,
@@ -277,13 +288,17 @@ mod tests {
         );
     }
 
-    /// The array form is used only when its first entry really carries a non-empty `message`:
-    /// anything else falls back to the body, which is still never an empty message.
+    /// The array form is used only when its first entry really carries a non-empty `msg` (or
+    /// `message`): anything else falls back to the body, which is still never an empty message.
     #[test]
     fn detail_arrays_without_a_message_keep_the_body_fallback() {
         assert_eq!(
-            ProviderError::from_status(422, r#"{"detail":[{"msg":"nope"}]}"#),
-            ProviderError::BadResponse(r#"HTTP 422: {"detail":[{"msg":"nope"}]}"#.into())
+            ProviderError::from_status(422, r#"{"detail":[{"reason":"nope"}]}"#),
+            ProviderError::BadResponse(r#"HTTP 422: {"detail":[{"reason":"nope"}]}"#.into())
+        );
+        assert_eq!(
+            ProviderError::from_status(422, r#"{"detail":[{"msg":""}]}"#),
+            ProviderError::BadResponse(r#"HTTP 422: {"detail":[{"msg":""}]}"#.into())
         );
         assert_eq!(
             ProviderError::from_status(500, r#"{"detail":[{"message":""}]}"#),
