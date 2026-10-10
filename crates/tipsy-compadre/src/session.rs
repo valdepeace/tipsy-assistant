@@ -15,10 +15,15 @@ use crate::audio::device::MIC_SAMPLE_RATE;
 use crate::audio::pcm::{i16_to_f32, Pcm};
 use crate::brain::{Brain, BrainConfig, TurnInput, TurnPersona};
 use crate::config::Config;
-use crate::providers::{ChatMessage, Providers};
+use crate::providers::{ChatMessage, Providers, Role};
 
 /// The session id reported to clients. There is one session per process for now.
 const SESSION_ID: u64 = 1;
+
+/// How much conversation the session keeps. An exchange is a question and its reply, so this is 20
+/// exchanges: deep enough that a follow-up can still refer to what was said a while ago, shallow
+/// enough that the prompt — and what every turn costs — stops growing with the life of the session.
+const HISTORY_MAX_MESSAGES: usize = 40;
 
 /// Starts a session on its own task and returns the two ends of its channels.
 pub fn spawn_session(
@@ -162,6 +167,7 @@ impl Session {
         if let Some(history) = produced {
             if turn.generation == self.generation {
                 self.history = history;
+                trim_history(&mut self.history);
             }
         }
     }
@@ -311,6 +317,27 @@ impl Session {
     }
 }
 
+/// Trims the stored conversation to its most recent [`HISTORY_MAX_MESSAGES`] messages, dropping the
+/// oldest first.
+///
+/// The history is what every turn clones and what the brain prepends to the prompt, so without a cap
+/// both the prompt and its cost would grow for the life of the session. The system message is not
+/// part of what is stored here — the brain builds it from the persona prompt on every request — so
+/// trimming the tail can never drop it.
+///
+/// A cancelled turn that never spoke leaves a question with no reply behind it, which can put the
+/// cut on the reply that follows it. The window is then moved forward to the next question, so it
+/// always opens with something the user asked rather than with an answer to a question that is gone.
+fn trim_history(history: &mut Vec<ChatMessage>) {
+    let excess = history.len().saturating_sub(HISTORY_MAX_MESSAGES);
+    if excess > 0 {
+        history.drain(..excess);
+    }
+    if history.first().is_some_and(|message| message.role == Role::Assistant) {
+        history.remove(0);
+    }
+}
+
 /// A status event with no detail.
 fn status(state: AssistantState) -> ToClient {
     ToClient::Event(Event::Status { state, detail: None })
@@ -319,4 +346,71 @@ fn status(state: AssistantState) -> ToClient {
 /// Sending to a closed client is not an error: the client simply left.
 fn send(out: &UnboundedSender<ToClient>, message: ToClient) {
     let _ = out.send(message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One question and its reply, numbered so a window can be checked message by message.
+    fn exchange(n: usize) -> [ChatMessage; 2] {
+        [
+            ChatMessage::user(format!("pregunta {n}")),
+            ChatMessage::assistant(format!("respuesta {n}")),
+        ]
+    }
+
+    fn history_of(exchanges: usize) -> Vec<ChatMessage> {
+        (0..exchanges).flat_map(exchange).collect()
+    }
+
+    #[test]
+    fn a_history_under_the_cap_is_left_alone() {
+        let mut history = history_of(3);
+        let before = history.clone();
+        trim_history(&mut history);
+        assert_eq!(history, before);
+    }
+
+    #[test]
+    fn the_oldest_exchanges_are_the_ones_dropped() {
+        // Fifty exchanges against a forty-message cap: the newest twenty exchanges are what stays.
+        let mut history = history_of(50);
+        assert_eq!(history.len(), 100);
+
+        trim_history(&mut history);
+
+        assert_eq!(history.len(), HISTORY_MAX_MESSAGES);
+        assert_eq!(history[0], ChatMessage::user("pregunta 30"));
+        assert_eq!(history.last().unwrap(), &ChatMessage::assistant("respuesta 49"));
+        assert!(!history.iter().any(|m| m.content == "pregunta 0"), "{history:#?}");
+    }
+
+    #[test]
+    fn a_long_conversation_stops_growing_the_prompt() {
+        // The cap is what keeps the prompt — and what every turn costs — flat for the life of the
+        // session, however long the conversation runs.
+        let mut history = Vec::new();
+        for n in 0..500 {
+            history.extend(exchange(n));
+            trim_history(&mut history);
+            assert!(history.len() <= HISTORY_MAX_MESSAGES, "{n}: {}", history.len());
+        }
+        assert_eq!(history.last().unwrap(), &ChatMessage::assistant("respuesta 499"));
+    }
+
+    #[test]
+    fn the_window_opens_with_a_question() {
+        // A cancelled turn that never spoke leaves a question with no reply behind it, so an odd
+        // history can put the cut on a reply whose question fell off the front.
+        let mut history = history_of(21);
+        history.push(ChatMessage::user("pregunta sin respuesta"));
+        assert_eq!(history.len(), 43);
+
+        trim_history(&mut history);
+
+        assert_eq!(history[0].role, Role::User, "the window must open with a question: {history:#?}");
+        assert_eq!(history.last().unwrap().content, "pregunta sin respuesta");
+        assert!(history.len() <= HISTORY_MAX_MESSAGES);
+    }
 }
