@@ -6,11 +6,12 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use super::sse::{SseItem, SseParser};
-use super::{ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest, TextStream};
-use crate::audio::pcm::{decode_audio, pcm_s16le_to_pcm, Pcm};
+use super::{ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest, TextStream, TranscribeProvider};
+use crate::audio::pcm::{decode_audio, encode_wav_16k, pcm_s16le_to_pcm, Pcm};
 
 const CHAT_TIMEOUT: Duration = Duration::from_secs(30);
 const SPEECH_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct OpenAiCompat {
     client: reqwest::Client,
@@ -154,5 +155,32 @@ impl SpeechProvider for OpenAiCompat {
             SpeechFormat::Pcm24k => Ok(pcm_s16le_to_pcm(&bytes, 24000)),
             SpeechFormat::Mp3 => decode_audio(bytes.to_vec()).map_err(ProviderError::BadResponse),
         }
+    }
+}
+
+#[async_trait]
+impl TranscribeProvider for OpenAiCompat {
+    async fn transcribe(&self, pcm: Pcm, language: &str) -> Result<String, ProviderError> {
+        let primary = language.split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
+        let file = reqwest::multipart::Part::bytes(encode_wav_16k(&pcm))
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+        let mut form = reqwest::multipart::Form::new().text("model", self.model.clone()).part("file", file);
+        if !primary.is_empty() {
+            form = form.text("language", primary);
+        }
+        let resp = self
+            .authed(self.client.post(self.url("audio/transcriptions")))
+            .timeout(TRANSCRIBE_TIMEOUT)
+            .multipart(form)
+            .send()
+            .await?;
+        let value: serde_json::Value = Self::check(resp).await?.json().await?;
+        value
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(|t| t.trim().to_string())
+            .ok_or_else(|| ProviderError::BadResponse(format!("no text in transcription response: {value}")))
     }
 }

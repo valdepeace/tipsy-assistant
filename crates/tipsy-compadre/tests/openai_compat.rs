@@ -1,7 +1,8 @@
 use futures::StreamExt;
+use tipsy_compadre::audio::pcm::Pcm;
 use tipsy_compadre::providers::openai_compat::{speech_quirks, OpenAiCompat, SpeechFormat};
 use tipsy_compadre::providers::{
-    ChatMessage, ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest,
+    ChatMessage, ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest, TranscribeProvider,
 };
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -220,4 +221,51 @@ async fn speech_errors_are_mapped() {
         .await
         .unwrap_err();
     assert!(matches!(err, ProviderError::BadResponse(m) if m.contains("only supports")));
+}
+
+#[tokio::test]
+async fn transcription_sends_multipart_wav_and_language() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": "  ¿y el ticket?  "})))
+        .mount(&server)
+        .await;
+    let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "openai/whisper-large-v3", Some("k".into()));
+    let pcm = Pcm { samples: vec![0.1; 48000], sample_rate: 48000 };
+    assert_eq!(p.transcribe(pcm, "es-ES").await.unwrap(), "¿y el ticket?");
+
+    let req = &server.received_requests().await.unwrap()[0];
+    let content_type = req.headers.get("content-type").unwrap().to_str().unwrap().to_string();
+    assert!(content_type.starts_with("multipart/form-data"), "{content_type}");
+    let body = String::from_utf8_lossy(&req.body);
+    assert!(body.contains("name=\"model\"") && body.contains("openai/whisper-large-v3"));
+    assert!(body.contains("name=\"language\"") && body.contains("\r\n\r\nes\r\n"));
+    assert!(body.contains("filename=\"audio.wav\"") && body.contains("RIFF"));
+}
+
+#[tokio::test]
+async fn transcription_errors_are_mapped() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(429).set_body_string(r#"{"error":{"message":"slow down"}}"#))
+        .mount(&server)
+        .await;
+    let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "m", None);
+    let err = p.transcribe(Pcm { samples: vec![0.0; 160], sample_rate: 16000 }, "en-GB").await.unwrap_err();
+    assert_eq!(err, ProviderError::RateLimited("slow down".into()));
+}
+
+#[tokio::test]
+async fn transcription_rejects_responses_without_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"nope": 1})))
+        .mount(&server)
+        .await;
+    let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "m", None);
+    let err = p.transcribe(Pcm { samples: vec![0.0; 160], sample_rate: 16000 }, "es").await.unwrap_err();
+    assert!(matches!(err, ProviderError::BadResponse(_)));
 }
