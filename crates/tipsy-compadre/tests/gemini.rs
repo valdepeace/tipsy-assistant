@@ -322,6 +322,39 @@ async fn chat_surfaces_a_mid_stream_error_that_arrived_with_http_200() {
     assert!(out.last().unwrap().is_err(), "the error must end the reply, not complete it");
 }
 
+/// The other half of the truncation story: HTTP/2 delivers the whole body and then closes the
+/// stream cleanly (`END_STREAM`), so a body that simply stops after a delta is a clean HTTP
+/// success with no transport error anywhere. A proxy or a cut network that truncates the reply
+/// this way must not be spoken as a complete one: the reader yields the deltas it read and then
+/// one error, and the consumer has an error in hand — never a normal end.
+#[tokio::test]
+async fn chat_reports_a_stream_that_ends_without_its_completion_event() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "event: step.delta\n",
+        "data: {\"index\":1,\"delta\":{\"text\":\"Ozú, quillo\",\"type\":\"text\"},\"event_type\":\"step.delta\"}\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1beta/interactions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let p = GeminiChat::new(server.uri(), "gemini-3.8-flash", None);
+
+    let out = items(&p, simple()).await;
+    assert_eq!(out.first(), Some(&Ok("Ozú, quillo".to_string())), "the deltas that did arrive are kept");
+    match out.last() {
+        Some(Err(ProviderError::BadResponse(message))) => {
+            assert!(message.contains("before the completion event"), "unhelpful message: {message}")
+        }
+        other => panic!("a truncated reply must end in an error, not a clean end: {other:?}"),
+    }
+    assert!(
+        !out.iter().all(|item| item.is_ok()),
+        "the half-reply must never be presented as a complete one: {out:?}"
+    );
+}
+
 #[tokio::test]
 async fn speech_sends_the_style_the_persona_voice_and_the_audio_format() {
     let server = MockServer::start().await;
