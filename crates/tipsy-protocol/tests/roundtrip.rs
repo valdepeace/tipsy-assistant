@@ -21,7 +21,7 @@ fn commands_roundtrip() {
     roundtrip_command(Command::ListenStop);
     roundtrip_command(Command::Cancel);
     roundtrip_command(Command::Reset);
-    roundtrip_command(Command::SetPersona { id: "compae".into() });
+    roundtrip_command(Command::SetProfile { id: "compae".into() });
     roundtrip_command(Command::SetListeningMode { mode: ListeningMode::HandsFree });
 }
 
@@ -29,7 +29,7 @@ fn commands_roundtrip() {
 fn events_roundtrip() {
     roundtrip_event(Event::Welcome {
         session_id: 7,
-        persona: PersonaView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+        profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
         ui_language: UiLanguage::Es,
         listening_mode: ListeningMode::Push,
         web_bundle: false,

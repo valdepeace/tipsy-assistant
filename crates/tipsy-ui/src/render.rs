@@ -74,7 +74,7 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
     hits
 }
 
-/// Badge with the persona's title, then whatever the assistant is doing.
+/// Badge with the profile's title, then whatever the assistant is doing.
 fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str) {
     let strings = state.strings();
     let spin = SPINNER[(state.elapsed_ms / 150) as usize % SPINNER.len()];

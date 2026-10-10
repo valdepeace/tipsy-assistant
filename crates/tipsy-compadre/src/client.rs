@@ -291,7 +291,7 @@ fn starts_turn(command: &Command) -> bool {
         Command::Hello { .. }
         | Command::ListenStart
         | Command::Cancel
-        | Command::SetPersona { .. }
+        | Command::SetProfile { .. }
         | Command::SetListeningMode { .. } => false,
     }
 }
@@ -307,7 +307,7 @@ fn interrupts_playback(command: &Command) -> bool {
 /// Draws one frame and reports where its clickable titles landed.
 fn draw_frame(terminal: &mut ratatui::DefaultTerminal, state: &UiState) -> Result<Vec<Hit>, String> {
     let clock = clock_view();
-    let title = state.persona.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+    let title = state.profile.as_ref().map(|p| p.name.clone()).unwrap_or_default();
     let mut hits = Vec::new();
     terminal
         .draw(|frame| {
@@ -392,7 +392,7 @@ mod tests {
             Command::ListenStart,
             Command::Ask { text: String::new() },
             Command::Say { text: "   ".into() },
-            Command::SetPersona { id: "compae".into() },
+            Command::SetProfile { id: "compae".into() },
         ] {
             assert!(!interrupts_playback(&command), "{command:?} leaves the reply alone");
         }

@@ -34,7 +34,7 @@ const CHAT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 30 s for a whole sentence of speech. Speech is a unary request, so this one goes on the request
 /// builder rather than around `send()`.
 const SPEECH_TIMEOUT: Duration = Duration::from_secs(30);
-/// The voice sent when the persona's `voices` table has no `gemini` entry. `Kore` is the voice the
+/// The voice sent when the profile's `voices` table has no `gemini` entry. `Kore` is the voice the
 /// API documentation's own request example uses and the only prebuilt name the research note
 /// confirms; the full list of 30 names is unconfirmed, and the note never shows a request without
 /// `speech_config`, so this default is sent rather than omitting the field.
@@ -302,7 +302,7 @@ impl ChatProvider for GeminiChat {
     }
 }
 
-/// The voice name the API takes (`Kore`, `Puck`, …). The persona's `voices["gemini"]` entry is
+/// The voice name the API takes (`Kore`, `Puck`, …). The profile's `voices["gemini"]` entry is
 /// used verbatim: it is a *name*, not an id to look up. A Voice Library id or a designed
 /// `voice_…` would also be accepted in this field, so a user's own entry keeps working.
 fn voice_name(voice: Option<&str>) -> &str {
@@ -312,9 +312,9 @@ fn voice_name(voice: Option<&str>) -> &str {
     }
 }
 
-/// The one-line `style`: the first sentence of the persona's `voice_instructions`. The API wants a
+/// The one-line `style`: the first sentence of the profile's `voice_instructions`. The API wants a
 /// short style and Google's guidance says a long style paragraph is the commonest cause of voice
-/// drift, so the voice-designer brief is condensed here instead of in the persona cards.
+/// drift, so the voice-designer brief is condensed here instead of in the profile cards.
 fn first_sentence(text: &str) -> &str {
     let trimmed = text.trim();
     trimmed
@@ -554,23 +554,23 @@ mod tests {
     /// The same condenser over all nine built-in briefs, structurally: the style sent to the API
     /// must exist, must not end in whitespace (it is concatenated into a JSON annotation) and must
     /// be something the API would read as one short style rather than the whole paragraph. No
-    /// persona's wording is asserted, so the copy stays the user's to reword.
+    /// profile's wording is asserted, so the copy stays the user's to reword.
     ///
     /// This is what catches a future brief whose first sentence lost its full stop (the style would
     /// swallow the whole paragraph) and one that is blank (the style would be empty, sending an
     /// annotation with no style at all).
     #[test]
     fn every_builtin_brief_condenses_to_a_single_non_empty_style() {
-        for persona in crate::config::personas::builtin_personas() {
-            let brief = persona.voice_instructions.as_str();
-            assert!(!brief.trim().is_empty(), "{} has no voice brief", persona.id);
+        for profile in crate::config::profiles::builtin_profiles() {
+            let brief = profile.voice_instructions.as_str();
+            assert!(!brief.trim().is_empty(), "{} has no voice brief", profile.id);
             let style = first_sentence(brief);
-            assert!(!style.is_empty(), "{} condenses to an empty style", persona.id);
-            assert_eq!(style, style.trim_end(), "{}'s style has trailing whitespace", persona.id);
+            assert!(!style.is_empty(), "{} condenses to an empty style", profile.id);
+            assert_eq!(style, style.trim_end(), "{}'s style has trailing whitespace", profile.id);
             assert!(
                 style.len() < brief.trim().len(),
                 "{} condenses to the whole brief ({} characters): its first sentence has no terminator",
-                persona.id,
+                profile.id,
                 style.len()
             );
         }

@@ -1,8 +1,8 @@
-//! Built-in personas. Each persona's texts are written in its own language.
+//! Built-in profiles. Each profile's texts are written in its own language.
 //!
 //! The nine are ordered exactly as spec §8.3 lists them.
 //!
-//! Every prompt states spec §8.3's four rules in the persona's own language: it always ends up
+//! Every prompt states spec §8.3's four rules in the profile's own language: it always ends up
 //! giving a correct, useful answer even after dodging; it has no access to Jira, GitHub, GitLab or
 //! the user's code, never invents their contents and asks the user for them instead; it answers in
 //! two or three short sentences with no Markdown, lists, emojis or stage directions; and it is an
@@ -16,14 +16,14 @@
 
 use std::collections::BTreeMap;
 
-use super::model::Persona;
+use super::model::Profile;
 
-pub fn builtin_personas() -> Vec<Persona> {
+pub fn builtin_profiles() -> Vec<Profile> {
     vec![compae(), meigo(), chulapo(), senyor(), good_ol_boy(), hustler(), mate(), bloke(), polite_one()]
 }
 
-fn compae() -> Persona {
-    Persona {
+fn compae() -> Profile {
+    Profile {
         id: "compae".into(),
         name: "El Compae".into(),
         language: "es-ES".into(),
@@ -78,8 +78,8 @@ fn compae() -> Persona {
     }
 }
 
-fn meigo() -> Persona {
-    Persona {
+fn meigo() -> Profile {
+    Profile {
         id: "meigo".into(),
         name: "O Meigo".into(),
         language: "es-ES".into(),
@@ -126,8 +126,8 @@ fn meigo() -> Persona {
     }
 }
 
-fn chulapo() -> Persona {
-    Persona {
+fn chulapo() -> Profile {
+    Profile {
         id: "chulapo".into(),
         name: "El Chulapo".into(),
         language: "es-ES".into(),
@@ -173,8 +173,8 @@ fn chulapo() -> Persona {
     }
 }
 
-fn senyor() -> Persona {
-    Persona {
+fn senyor() -> Profile {
+    Profile {
         id: "senyor".into(),
         name: "El Senyor".into(),
         language: "es-ES".into(),
@@ -222,8 +222,8 @@ fn senyor() -> Persona {
     }
 }
 
-fn good_ol_boy() -> Persona {
-    Persona {
+fn good_ol_boy() -> Profile {
+    Profile {
         id: "good_ol_boy".into(),
         name: "The Good Ol' Boy".into(),
         language: "en-US".into(),
@@ -269,8 +269,8 @@ fn good_ol_boy() -> Persona {
     }
 }
 
-fn hustler() -> Persona {
-    Persona {
+fn hustler() -> Profile {
+    Profile {
         id: "hustler".into(),
         name: "The Hustler".into(),
         language: "en-US".into(),
@@ -315,8 +315,8 @@ fn hustler() -> Persona {
     }
 }
 
-fn mate() -> Persona {
-    Persona {
+fn mate() -> Profile {
+    Profile {
         id: "mate".into(),
         name: "The Mate".into(),
         language: "en-AU".into(),
@@ -360,8 +360,8 @@ fn mate() -> Persona {
 }
 
 
-fn bloke() -> Persona {
-    Persona {
+fn bloke() -> Profile {
+    Profile {
         id: "bloke".into(),
         name: "The Bloke".into(),
         language: "en-GB".into(),
@@ -405,8 +405,8 @@ fn bloke() -> Persona {
     }
 }
 
-fn polite_one() -> Persona {
-    Persona {
+fn polite_one() -> Profile {
+    Profile {
         id: "polite_one".into(),
         name: "The Polite One".into(),
         language: "en-CA".into(),
@@ -454,16 +454,16 @@ mod tests {
 
     /// The Spanish built-ins this task adds, with the name and language each must declare. `compae`
     /// is deliberately absent: it shares the character with the user's own copy and does not follow
-    /// the Spanish texts' no-apostrophe rule, so it is guarded by `every_builtin_persona...` below
+    /// the Spanish texts' no-apostrophe rule, so it is guarded by `every_builtin_profile...` below
     /// instead of by this table's wording rules.
     const SPANISH: [(&str, &str, &str); 3] =
         [("meigo", "O Meigo", "es-ES"), ("chulapo", "El Chulapo", "es-ES"), ("senyor", "El Senyor", "es-ES")];
 
     #[test]
-    fn spanish_personas_are_registered_once_with_their_declared_language() {
-        let all = builtin_personas();
+    fn spanish_profiles_are_registered_once_with_their_declared_language() {
+        let all = builtin_profiles();
         for (id, name, language) in SPANISH {
-            let found: Vec<&Persona> = all.iter().filter(|p| p.id == id).collect();
+            let found: Vec<&Profile> = all.iter().filter(|p| p.id == id).collect();
             assert_eq!(found.len(), 1, "{id} must appear exactly once, found {}", found.len());
             assert_eq!(found[0].name, name);
             assert_eq!(found[0].language, language);
@@ -471,35 +471,35 @@ mod tests {
     }
 
     #[test]
-    fn ids_stay_unique_as_personas_are_added() {
-        let all = builtin_personas();
+    fn ids_stay_unique_as_profiles_are_added() {
+        let all = builtin_profiles();
         let mut ids: Vec<&str> = all.iter().map(|p| p.id.as_str()).collect();
         let before = ids.len();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), before, "two built-in personas share an id");
+        assert_eq!(ids.len(), before, "two built-in profiles share an id");
     }
 
     /// Deliberately shallow wording checks: the copy belongs to the user, so this must survive a
-    /// reworded sentence while still catching a persona that lost its rules or its fields.
+    /// reworded sentence while still catching a profile that lost its rules or its fields.
     #[test]
-    fn every_spanish_persona_is_complete_and_names_the_tools_it_cannot_see() {
-        let all = builtin_personas();
+    fn every_spanish_profile_is_complete_and_names_the_tools_it_cannot_see() {
+        let all = builtin_profiles();
         for (id, _, _) in SPANISH {
-            let persona = all.iter().find(|p| p.id == id).expect("registered in builtin_personas");
+            let profile = all.iter().find(|p| p.id == id).expect("registered in builtin_profiles");
             for tool in ["Jira", "GitHub", "GitLab"] {
-                assert!(persona.prompt.contains(tool), "{id} must state that it cannot see {tool}");
+                assert!(profile.prompt.contains(tool), "{id} must state that it cannot see {tool}");
             }
-            assert!(persona.prompt.split_whitespace().count() >= 150, "{id}'s prompt looks truncated");
-            assert!(!persona.voice_instructions.trim().is_empty(), "{id} needs delivery instructions");
-            assert!(!persona.greeting.trim().is_empty(), "{id} needs a greeting");
-            assert!(!persona.wake_word.trim().is_empty(), "{id} needs a wake word");
-            assert!(!persona.prompt.contains('\''), "{id}: Spanish texts carry no apostrophes");
-            assert!(!persona.voice_instructions.contains('\''), "{id}: Spanish delivery text carries no apostrophes");
+            assert!(profile.prompt.split_whitespace().count() >= 150, "{id}'s prompt looks truncated");
+            assert!(!profile.voice_instructions.trim().is_empty(), "{id} needs delivery instructions");
+            assert!(!profile.greeting.trim().is_empty(), "{id} needs a greeting");
+            assert!(!profile.wake_word.trim().is_empty(), "{id} needs a wake word");
+            assert!(!profile.prompt.contains('\''), "{id}: Spanish texts carry no apostrophes");
+            assert!(!profile.voice_instructions.contains('\''), "{id}: Spanish delivery text carries no apostrophes");
         }
     }
 
-    /// The personas this task adds, with the name and language each must declare.
+    /// The profiles this task adds, with the name and language each must declare.
     const ENGLISH: [(&str, &str, &str); 5] = [
         ("good_ol_boy", "The Good Ol' Boy", "en-US"),
         ("hustler", "The Hustler", "en-US"),
@@ -509,10 +509,10 @@ mod tests {
     ];
 
     #[test]
-    fn english_personas_are_registered_once_with_their_declared_language() {
-        let all = builtin_personas();
+    fn english_profiles_are_registered_once_with_their_declared_language() {
+        let all = builtin_profiles();
         for (id, name, language) in ENGLISH {
-            let found: Vec<&Persona> = all.iter().filter(|p| p.id == id).collect();
+            let found: Vec<&Profile> = all.iter().filter(|p| p.id == id).collect();
             assert_eq!(found.len(), 1, "{id} must appear exactly once, found {}", found.len());
             assert_eq!(found[0].name, name);
             assert_eq!(found[0].language, language);
@@ -520,32 +520,32 @@ mod tests {
     }
 
     #[test]
-    fn every_english_persona_is_complete_and_names_the_tools_it_cannot_see() {
-        let all = builtin_personas();
+    fn every_english_profile_is_complete_and_names_the_tools_it_cannot_see() {
+        let all = builtin_profiles();
         for (id, _, _) in ENGLISH {
-            let persona = all.iter().find(|p| p.id == id).expect("registered in builtin_personas");
+            let profile = all.iter().find(|p| p.id == id).expect("registered in builtin_profiles");
             for tool in ["Jira", "GitHub", "GitLab"] {
-                assert!(persona.prompt.contains(tool), "{id} must state that it cannot see {tool}");
+                assert!(profile.prompt.contains(tool), "{id} must state that it cannot see {tool}");
             }
-            assert!(persona.prompt.split_whitespace().count() >= 150, "{id}'s prompt looks truncated");
-            assert!(!persona.voice_instructions.trim().is_empty(), "{id} needs delivery instructions");
-            assert!(!persona.greeting.trim().is_empty(), "{id} needs a greeting");
-            assert!(!persona.wake_word.trim().is_empty(), "{id} needs a wake word");
+            assert!(profile.prompt.split_whitespace().count() >= 150, "{id}'s prompt looks truncated");
+            assert!(!profile.voice_instructions.trim().is_empty(), "{id} needs delivery instructions");
+            assert!(!profile.greeting.trim().is_empty(), "{id} needs a greeting");
+            assert!(!profile.wake_word.trim().is_empty(), "{id} needs a wake word");
         }
     }
 
-    /// The module doc's claim is about **all nine** personas, and the two language tables above
+    /// The module doc's claim is about **all nine** profiles, and the two language tables above
     /// cover eight of them: `compae` is the pair the user owns and is not in either table, because
     /// its prompt is the one Spanish text that does use an apostrophe (it explains the rule with
     /// `«pa'»`) and the tables' wording rules are deliberately not applied to it. So the claim is
     /// enforced here, for every built-in, by marker instead of by table.
     ///
     /// Each rule lists the spellings the corpus uses for it, in both languages, because every
-    /// persona states the rules in its own words. Only the rule-bearing fragments are quoted, not
+    /// profile states the rules in its own words. Only the rule-bearing fragments are quoted, not
     /// whole sentences, so rewording around them cannot make this test wrong. The gaps are
-    /// collected and reported, so a failure names the rule and the persona that lost it.
+    /// collected and reported, so a failure names the rule and the profile that lost it.
     #[test]
-    fn every_builtin_persona_states_the_four_rules() {
+    fn every_builtin_profile_states_the_four_rules() {
         /// One spec §8.3 rule as the markers the corpus uses to state it.
         struct Rule {
             name: &'static str,
@@ -571,28 +571,28 @@ mod tests {
             },
         ];
 
-        let all = builtin_personas();
-        assert_eq!(all.len(), 9, "the spec lists nine built-in personas");
-        for persona in &all {
-            let prompt = persona.prompt.as_str();
+        let all = builtin_profiles();
+        assert_eq!(all.len(), 9, "the spec lists nine built-in profiles");
+        for profile in &all {
+            let prompt = profile.prompt.as_str();
             for tool in ["Jira", "GitHub", "GitLab"] {
-                assert!(prompt.contains(tool), "{} must state that it cannot see {tool}", persona.id);
+                assert!(prompt.contains(tool), "{} must state that it cannot see {tool}", profile.id);
             }
             let missing: Vec<&str> = RULES
                 .iter()
                 .filter(|rule| !rule.markers.iter().any(|marker| prompt.contains(marker)))
                 .map(|rule| rule.name)
                 .collect();
-            assert!(missing.is_empty(), "{}'s prompt does not state: {}", persona.id, missing.join("; "));
-            assert!(prompt.split_whitespace().count() >= 150, "{}'s prompt looks truncated", persona.id);
-            assert!(!persona.voice_instructions.trim().is_empty(), "{} needs delivery instructions", persona.id);
+            assert!(missing.is_empty(), "{}'s prompt does not state: {}", profile.id, missing.join("; "));
+            assert!(prompt.split_whitespace().count() >= 150, "{}'s prompt looks truncated", profile.id);
+            assert!(!profile.voice_instructions.trim().is_empty(), "{} needs delivery instructions", profile.id);
             // The no-apostrophe rule is a Spanish-texts rule; the English delivery briefs spell
             // their accent with apostrophes (`dropped r's`), so it stays in the Spanish table.
-            if persona.language.starts_with("es") {
-                assert!(!persona.voice_instructions.contains('\''), "{}: delivery text carries no apostrophes", persona.id);
+            if profile.language.starts_with("es") {
+                assert!(!profile.voice_instructions.contains('\''), "{}: delivery text carries no apostrophes", profile.id);
             }
-            assert!(!persona.greeting.trim().is_empty(), "{} needs a greeting", persona.id);
-            assert!(!persona.wake_word.trim().is_empty(), "{} needs a wake word", persona.id);
+            assert!(!profile.greeting.trim().is_empty(), "{} needs a greeting", profile.id);
+            assert!(!profile.wake_word.trim().is_empty(), "{} needs a wake word", profile.id);
         }
     }
 }

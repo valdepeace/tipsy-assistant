@@ -1,4 +1,4 @@
-//! Interface strings. Spanish for Spanish-speaking personas, English for everyone else.
+//! Interface strings. Spanish for Spanish-speaking profiles, English for everyone else.
 
 use tipsy_protocol::UiLanguage;
 

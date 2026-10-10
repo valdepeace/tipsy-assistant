@@ -7,7 +7,7 @@ fn state(lang: UiLanguage) -> UiState {
     let mut s = UiState::new();
     s.apply(&Event::Welcome {
         session_id: 1,
-        persona: PersonaView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+        profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
         ui_language: lang,
         listening_mode: ListeningMode::Push,
         web_bundle: false,
