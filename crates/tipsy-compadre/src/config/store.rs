@@ -35,7 +35,7 @@ pub fn load_or_create(path: &Path) -> std::io::Result<LoadOutcome> {
     }
     let text = std::fs::read_to_string(path)?;
     match toml::from_str::<Config>(&text) {
-        Ok(config) => Ok(LoadOutcome { config: config.with_builtin_personas(), warning: None }),
+        Ok(config) => Ok(LoadOutcome { config: config.with_builtin_profiles(), warning: None }),
         Err(e) => {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -59,7 +59,7 @@ pub fn load_or_create(path: &Path) -> std::io::Result<LoadOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ProviderKind, Persona};
+    use crate::config::{ProviderKind, Profile};
     use tipsy_protocol::ListeningMode;
 
     #[test]
@@ -86,10 +86,39 @@ mod tests {
     }
 
     #[test]
-    fn partial_file_gets_defaults_and_keeps_user_personas() {
+    fn partial_file_gets_defaults_and_keeps_user_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, r#"
+active_profile = "mine"
+
+[listening]
+mode = "auto"
+
+[[profiles]]
+id = "mine"
+name = "Mi Compadre"
+language = "es-ES"
+"#).unwrap();
+        let c = load_or_create(&path).unwrap().config;
+        assert_eq!(c.listening.mode, ListeningMode::Auto);
+        assert_eq!(c.listening.silence_ms, 1000);
+        assert_eq!(c.providers.transcribe.key, "openrouter");
+        assert_eq!(c.active().name, "Mi Compadre");
+        assert!(c.profiles.iter().any(|p| p.id == "compae"), "built-in profile must be added");
+    }
+
+    /// The vocabulary the configuration uses changed; the files already on disk did not. A
+    /// `config.toml` written with `active_persona` and `[[personas]]` must load to exactly the
+    /// configuration the new spelling produces — same active profile, same nine profiles in the same
+    /// order — and a save must write the new spelling, so the alias is the only place the old words
+    /// survive.
+    #[test]
+    fn a_file_written_before_the_rename_loads_the_same_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = dir.path().join("before.toml");
+        let after = dir.path().join("after.toml");
+        std::fs::write(&before, r#"
 active_persona = "mine"
 
 [listening]
@@ -100,21 +129,42 @@ id = "mine"
 name = "Mi Compadre"
 language = "es-ES"
 "#).unwrap();
-        let c = load_or_create(&path).unwrap().config;
-        assert_eq!(c.listening.mode, ListeningMode::Auto);
-        assert_eq!(c.listening.silence_ms, 1000);
-        assert_eq!(c.providers.transcribe.key, "openrouter");
-        assert_eq!(c.active().name, "Mi Compadre");
-        assert!(c.personas.iter().any(|p| p.id == "compae"), "built-in persona must be added");
+        std::fs::write(&after, r#"
+active_profile = "mine"
+
+[listening]
+mode = "auto"
+
+[[profiles]]
+id = "mine"
+name = "Mi Compadre"
+language = "es-ES"
+"#).unwrap();
+
+        let from_before = load_or_create(&before).unwrap().config;
+        let from_after = load_or_create(&after).unwrap().config;
+        assert_eq!(from_before, from_after, "the old keys must load as the new ones do");
+        // Not merely ignored: the old keys were read, so the user's own profile is the active one.
+        assert_eq!(from_before.active().name, "Mi Compadre");
+        assert_eq!(from_before.profiles.len(), 10, "the nine built-ins join the user's own profile");
+
+        let saved = dir.path().join("saved.toml");
+        save(&saved, &from_before).unwrap();
+        let text = std::fs::read_to_string(&saved).unwrap();
+        assert!(text.contains("active_profile = \"mine\""), "{text}");
+        assert!(text.contains("[[profiles]]"), "{text}");
+        assert!(!text.contains("active_persona"), "a save writes the new spelling only: {text}");
+        assert!(!text.contains("[[personas]]"), "a save writes the new spelling only: {text}");
+        assert_eq!(load_or_create(&saved).unwrap().config, from_before);
     }
 
     #[test]
     fn user_override_of_builtin_wins() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[[personas]]\nid = \"compae\"\nname = \"Mi versión\"\n").unwrap();
+        std::fs::write(&path, "[[profiles]]\nid = \"compae\"\nname = \"Mi versión\"\n").unwrap();
         let c = load_or_create(&path).unwrap().config;
-        let compaes: Vec<&Persona> = c.personas.iter().filter(|p| p.id == "compae").collect();
+        let compaes: Vec<&Profile> = c.profiles.iter().filter(|p| p.id == "compae").collect();
         assert_eq!(compaes.len(), 1);
         assert_eq!(compaes[0].name, "Mi versión");
     }
@@ -123,10 +173,10 @@ language = "es-ES"
     fn overriding_one_builtin_keeps_the_other_eight() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[[personas]]\nid = \"compae\"\nname = \"Mi Compae\"\n").unwrap();
+        std::fs::write(&path, "[[profiles]]\nid = \"compae\"\nname = \"Mi Compae\"\n").unwrap();
         let config = load_or_create(&path).unwrap().config;
-        assert_eq!(config.personas.len(), 9, "the override must not remove the other built-ins");
-        let compaes: Vec<&Persona> = config.personas.iter().filter(|p| p.id == "compae").collect();
+        assert_eq!(config.profiles.len(), 9, "the override must not remove the other built-ins");
+        let compaes: Vec<&Profile> = config.profiles.iter().filter(|p| p.id == "compae").collect();
         assert_eq!(compaes.len(), 1);
         assert_eq!(compaes[0].name, "Mi Compae");
     }

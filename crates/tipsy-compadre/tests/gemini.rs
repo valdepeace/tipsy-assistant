@@ -105,7 +105,7 @@ fn tone(freq: f32, rate: u32, ms: u32) -> Vec<i16> {
     (0..n).map(|i| ((i as f32 * freq * std::f32::consts::TAU / rate as f32).sin() * 16_000.0) as i16).collect()
 }
 
-/// The real `compae` voice brief's first two sentences, verbatim from the persona card.
+/// The real `compae` voice brief's first two sentences, verbatim from the profile card.
 const BRIEF: &str = concat!(
     "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca. ",
     "Acento andaluz natural y bien marcado: seseo, eses aspiradas, finales relajados y musicalidad andaluza."
@@ -356,7 +356,7 @@ async fn chat_reports_a_stream_that_ends_without_its_completion_event() {
 }
 
 #[tokio::test]
-async fn speech_sends_the_style_the_persona_voice_and_the_audio_format() {
+async fn speech_sends_the_style_the_profile_voice_and_the_audio_format() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/interactions"))
@@ -394,10 +394,10 @@ async fn speech_sends_the_style_the_persona_voice_and_the_audio_format() {
     assert!(!body["input"][0]["content"][0]["text"].as_str().unwrap().contains('<'));
 }
 
-/// Review Focus 5: `voices` is a recommendation table. A persona with no `gemini` entry still
+/// Review Focus 5: `voices` is a recommendation table. A profile with no `gemini` entry still
 /// speaks, with the documented default voice instead of a failure.
 #[tokio::test]
-async fn speech_sends_kore_when_the_persona_has_no_gemini_voice() {
+async fn speech_sends_kore_when_the_profile_has_no_gemini_voice() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/interactions"))
@@ -407,7 +407,7 @@ async fn speech_sends_kore_when_the_persona_has_no_gemini_voice() {
         )
         .mount(&server)
         .await;
-    // The `voices` table of this persona is empty, so `session.rs` resolves `voice: None`.
+    // The `voices` table of this profile is empty, so `session.rs` resolves `voice: None`.
     let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", None);
     let pcm = p.synthesize(speech_request("Ozú.", "", None)).await.unwrap();
     assert_eq!(pcm.sample_rate, 24_000);

@@ -124,7 +124,7 @@ async fn speech_resolves_a_voice_name_to_its_id() {
     assert_eq!(count(&server, "/v1/voices").await, 1, "fetched once per connector: {:?}", paths(&reqs));
 }
 
-/// Review Focus 5 — a persona with no `elevenlabs` entry still speaks: the connector asks the
+/// Review Focus 5 — a profile with no `elevenlabs` entry still speaks: the connector asks the
 /// account once and reuses its first voice, including when several sentences are in flight at the
 /// same time.
 #[tokio::test]
@@ -395,7 +395,7 @@ fn upload() -> Pcm {
     Pcm { samples, sample_rate: 48_000 }
 }
 
-/// Scribe's multipart fields, and the `language_code` hint as the primary subtag of the persona's
+/// Scribe's multipart fields, and the `language_code` hint as the primary subtag of the profile's
 /// BCP 47 tag (`es-ES` → `es`, the plan's decision). The multipart body is a real form: the
 /// `file` part is a WAV that `encode_wav_16k` wrote at 16 kHz, checked from the raw body.
 #[tokio::test]
@@ -425,7 +425,7 @@ async fn transcription_uploads_a_wav_with_the_primary_subtag() {
     );
 }
 
-/// The hint is the primary subtag only, lowercased; a persona that declares no language sends no
+/// The hint is the primary subtag only, lowercased; a profile that declares no language sends no
 /// `language_code` at all, because the note says omitted means auto-detect.
 #[tokio::test]
 async fn transcription_language_hint_is_the_primary_subtag_or_omitted() {

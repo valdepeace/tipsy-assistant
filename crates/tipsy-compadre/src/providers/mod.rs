@@ -54,7 +54,7 @@ pub struct ChatRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeechRequest {
     pub text: String,
-    /// Delivery instructions (the persona's `voice_instructions`); ignored by providers without support.
+    /// Delivery instructions (the profile's `voice_instructions`); ignored by providers without support.
     pub instructions: String,
     pub voice: Option<String>,
 }

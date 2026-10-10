@@ -1,7 +1,7 @@
-//! User configuration (`config.toml`) and built-in personas.
+//! User configuration (`config.toml`) and built-in profiles.
 
 pub mod model;
-pub mod personas;
+pub mod profiles;
 pub mod store;
 
 pub use model::*;

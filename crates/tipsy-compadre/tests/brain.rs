@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use tipsy_compadre::audio::pcm::Pcm;
-use tipsy_compadre::brain::{Brain, BrainConfig, TurnInput, TurnPersona};
+use tipsy_compadre::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use tipsy_compadre::providers::*;
 use tipsy_protocol::{AssistantState, ErrorCode, Event, Frame, ToClient};
 use tokio::sync::mpsc;
@@ -90,8 +90,8 @@ impl TranscribeProvider for FakeTranscribe {
 const S1: &str = "Ozú, quillo, esto es la primera frase.";
 const S2: &str = "Y esta es la segunda frase, compadre.";
 
-fn persona() -> TurnPersona {
-    TurnPersona {
+fn profile() -> TurnProfile {
+    TurnProfile {
         prompt: "SYSTEM PROMPT".into(),
         voice_instructions: "andaluz".into(),
         voice: Some("Charon".into()),
@@ -111,7 +111,7 @@ fn config() -> BrainConfig {
 fn brain(chat: Arc<FakeChat>, speech: Arc<FakeSpeech>, transcript: &'static str) -> (Brain, Arc<FakeTranscribe>) {
     let transcribe = Arc::new(FakeTranscribe { text: transcript, languages: Mutex::new(Vec::new()) });
     let providers = Providers { chat, speech, transcribe: transcribe.clone() };
-    (Brain::new(providers, persona(), config()), transcribe)
+    (Brain::new(providers, profile(), config()), transcribe)
 }
 
 async fn run(b: &Brain, history: &mut Vec<ChatMessage>, input: TurnInput) -> Vec<ToClient> {
@@ -183,7 +183,7 @@ async fn chat_request_has_system_prompt_history_and_question() {
 }
 
 #[tokio::test]
-async fn speech_requests_are_cleaned_and_carry_persona_voice() {
+async fn speech_requests_are_cleaned_and_carry_profile_voice() {
     let chat = FakeChat::new(vec![Ok(vec!["Eso es pa' ná', **compadre**, de verdad te lo digo."])]);
     let speech = Arc::new(FakeSpeech::default());
     let (b, _) = brain(chat, speech.clone(), "");
@@ -206,7 +206,7 @@ async fn sentences_that_clean_to_nothing_are_skipped_without_using_a_seq() {
 }
 
 #[tokio::test]
-async fn utterance_is_transcribed_with_persona_language_then_answered() {
+async fn utterance_is_transcribed_with_profile_language_then_answered() {
     let chat = FakeChat::new(vec![Ok(vec![S1])]);
     let (b, transcribe) = brain(chat.clone(), Arc::new(FakeSpeech::default()), "¿y el ticket?");
     let mut history = Vec::new();

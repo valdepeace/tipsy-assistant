@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use tipsy_protocol::{AssistantState, Command, Event, ListeningMode, PersonaView, UiLanguage};
+use tipsy_protocol::{AssistantState, Command, Event, ListeningMode, ProfileView, UiLanguage};
 
 use crate::strings::{strings, Strings};
 
@@ -72,7 +72,7 @@ pub enum UiAction {
 }
 
 pub struct UiState {
-    pub persona: Option<PersonaView>,
+    pub profile: Option<ProfileView>,
     pub lang: UiLanguage,
     pub listening_mode: ListeningMode,
     pub status: AssistantState,
@@ -105,7 +105,7 @@ impl Default for UiState {
 impl UiState {
     pub fn new() -> Self {
         Self {
-            persona: None,
+            profile: None,
             lang: UiLanguage::Es,
             listening_mode: ListeningMode::Push,
             status: AssistantState::Idle,
@@ -164,8 +164,8 @@ impl UiState {
 
     pub fn apply(&mut self, ev: &Event) {
         match ev {
-            Event::Welcome { persona, ui_language, listening_mode, .. } => {
-                self.persona = Some(persona.clone());
+            Event::Welcome { profile, ui_language, listening_mode, .. } => {
+                self.profile = Some(profile.clone());
                 self.lang = *ui_language;
                 self.listening_mode = *listening_mode;
             }
@@ -364,7 +364,7 @@ mod tests {
     fn welcome(lang: UiLanguage) -> Event {
         Event::Welcome {
             session_id: 1,
-            persona: PersonaView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+            profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
             ui_language: lang,
             listening_mode: ListeningMode::Push,
             web_bundle: false,
@@ -378,10 +378,10 @@ mod tests {
     }
 
     #[test]
-    fn welcome_sets_persona_and_language() {
+    fn welcome_sets_profile_and_language() {
         let mut s = UiState::new();
         s.apply(&welcome(UiLanguage::Es));
-        assert_eq!(s.persona.as_ref().unwrap().name, "El Compae");
+        assert_eq!(s.profile.as_ref().unwrap().name, "El Compae");
         assert_eq!(s.strings().core, "NÚCLEO");
         s.apply(&welcome(UiLanguage::En));
         assert_eq!(s.strings().core, "CORE");

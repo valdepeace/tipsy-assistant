@@ -102,7 +102,7 @@ const S1: &str = "Ozú, quillo, esto es la primera frase.";
 const S2: &str = "Y esta es la segunda frase, compadre.";
 const S3: &str = "Y la tercera, mi arma.";
 
-/// A real config, so the built-in `compae` persona (and its greeting) is present.
+/// A real config, so the built-in `compae` profile (and its greeting) is present.
 fn config() -> Config {
     let dir = tempfile::tempdir().unwrap();
     store::load_or_create(&dir.path().join("config.toml")).unwrap().config
@@ -197,8 +197,8 @@ async fn welcome_then_greeting() {
 
     let first = next_matching(&mut rx, |_: &ToClient| true, 500).await;
     match first {
-        ToClient::Event(Event::Welcome { persona, ui_language, listening_mode, web_bundle, .. }) => {
-            assert_eq!(persona.id, "compae");
+        ToClient::Event(Event::Welcome { profile, ui_language, listening_mode, web_bundle, .. }) => {
+            assert_eq!(profile.id, "compae");
             assert_eq!(ui_language, UiLanguage::Es);
             assert_eq!(listening_mode, config.listening.mode);
             assert!(!web_bundle);
@@ -327,6 +327,6 @@ async fn a_long_conversation_keeps_the_prompt_bounded() {
     );
 
     let last = requests[turns - 1].messages.clone();
-    assert_eq!(last[0].role, Role::System, "the persona prompt stays first: {last:#?}");
+    assert_eq!(last[0].role, Role::System, "the profile prompt stays first: {last:#?}");
     assert_eq!(last.last().unwrap(), &ChatMessage::user(format!("pregunta {}", turns - 1)));
 }

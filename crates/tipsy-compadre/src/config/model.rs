@@ -1,28 +1,36 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use tipsy_protocol::{ListeningMode, PersonaView};
+use tipsy_protocol::{ListeningMode, ProfileView};
 
-use super::personas::builtin_personas;
+use super::profiles::builtin_profiles;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub active_persona: String,
+    /// The profile the assistant speaks as. `active_persona` was this field's name until the rename,
+    /// so the old key is a serde alias: a `config.toml` written before it still selects the same
+    /// profile, and saving always writes `active_profile`.
+    #[serde(alias = "active_persona")]
+    pub active_profile: String,
     pub server: ServerConfig,
     pub listening: ListeningConfig,
     pub providers: ProvidersConfig,
-    pub personas: Vec<Persona>,
+    /// The user's own profiles first, the built-ins `with_builtin_profiles` appends after them.
+    /// `personas` was this field's name until the rename, so the old array key is a serde alias too:
+    /// a file written with `[[personas]]` still loads, and is only ever written back as `[[profiles]]`.
+    #[serde(alias = "personas")]
+    pub profiles: Vec<Profile>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            active_persona: "compae".into(),
+            active_profile: "compae".into(),
             server: ServerConfig::default(),
             listening: ListeningConfig::default(),
             providers: ProvidersConfig::default(),
-            personas: builtin_personas(),
+            profiles: builtin_profiles(),
         }
     }
 }
@@ -83,7 +91,7 @@ impl ProviderConfig {
         }
     }
 
-    /// Which entry of `Persona::voices` applies to this speech provider.
+    /// Which entry of `Profile::voices` applies to this speech provider.
     pub fn voice_key(&self) -> &'static str {
         let model = self.model.to_ascii_lowercase();
         if self.kind == ProviderKind::Gemini || model.contains("gemini") {
@@ -122,7 +130,7 @@ impl Default for ProvidersConfig {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Persona {
+pub struct Profile {
     pub id: String,
     pub name: String,
     pub language: String,
@@ -136,32 +144,32 @@ pub struct Persona {
     pub voices: BTreeMap<String, String>,
 }
 
-impl Persona {
-    pub fn view(&self) -> PersonaView {
-        PersonaView { id: self.id.clone(), name: self.name.clone(), language: self.language.clone() }
+impl Profile {
+    pub fn view(&self) -> ProfileView {
+        ProfileView { id: self.id.clone(), name: self.name.clone(), language: self.language.clone() }
     }
 
-    /// Voice for the given speech provider, if the persona recommends one.
+    /// Voice for the given speech provider, if the profile recommends one.
     pub fn voice_for(&self, provider: &ProviderConfig) -> Option<String> {
         self.voices.get(provider.voice_key()).cloned()
     }
 }
 
 impl Config {
-    /// The active persona, or the first one if `active_persona` is unknown.
-    pub fn active(&self) -> &Persona {
-        self.personas
+    /// The active profile, or the first one if `active_profile` is unknown.
+    pub fn active(&self) -> &Profile {
+        self.profiles
             .iter()
-            .find(|p| p.id == self.active_persona)
-            .or_else(|| self.personas.first())
-            .expect("config always holds at least one persona after with_builtin_personas")
+            .find(|p| p.id == self.active_profile)
+            .or_else(|| self.profiles.first())
+            .expect("config always holds at least one profile after with_builtin_profiles")
     }
 
-    /// Adds every built-in persona the user has not overridden (same `id`).
-    pub fn with_builtin_personas(mut self) -> Self {
-        for builtin in builtin_personas() {
-            if !self.personas.iter().any(|p| p.id == builtin.id) {
-                self.personas.push(builtin);
+    /// Adds every built-in profile the user has not overridden (same `id`).
+    pub fn with_builtin_profiles(mut self) -> Self {
+        for builtin in builtin_profiles() {
+            if !self.profiles.iter().any(|p| p.id == builtin.id) {
+                self.profiles.push(builtin);
             }
         }
         self
@@ -174,7 +182,7 @@ mod tests {
 
     #[test]
     fn the_nine_builtins_are_present_in_the_order_of_the_spec() {
-        let ids: Vec<String> = crate::config::personas::builtin_personas().iter().map(|p| p.id.clone()).collect();
+        let ids: Vec<String> = crate::config::profiles::builtin_profiles().iter().map(|p| p.id.clone()).collect();
         assert_eq!(
             ids,
             [
@@ -186,27 +194,27 @@ mod tests {
     #[test]
     fn wake_words_are_distinct_because_they_are_spoken_aloud() {
         let mut words: Vec<String> =
-            crate::config::personas::builtin_personas().iter().map(|p| p.wake_word.clone()).collect();
+            crate::config::profiles::builtin_profiles().iter().map(|p| p.wake_word.clone()).collect();
         let before = words.len();
         words.sort();
         words.dedup();
-        assert_eq!(words.len(), before, "two personas share a wake word");
+        assert_eq!(words.len(), before, "two profiles share a wake word");
     }
 
-    /// A persona with no entry for the connector's `voice_key` resolves to `None`, so the connector
+    /// A profile with no entry for the connector's `voice_key` resolves to `None`, so the connector
     /// uses its own default voice. The model is set too: `voice_key` tests the model string before
     /// the kind, so an `Elevenlabs` kind carrying the default OpenRouter speech model
     /// (`google/gemini-3.8-flash-tts`) would resolve the `gemini` key and leave this guard blind —
     /// the resolved key is asserted so that can never be mistaken again. Precedence itself is Plan
     /// 1 behaviour and is not changed here (Plan 2B owns it).
     #[test]
-    fn a_persona_without_a_voice_for_the_connector_falls_back_to_the_provider_default() {
+    fn a_profile_without_a_voice_for_the_connector_falls_back_to_the_provider_default() {
         let config = Config::default();
         let mut eleven = config.providers.speech.clone();
         eleven.kind = ProviderKind::Elevenlabs;
         eleven.model = "eleven_flash_v2_5".into();
         assert_eq!(eleven.voice_key(), "elevenlabs", "this test must exercise the elevenlabs key");
-        let meigo = crate::config::personas::builtin_personas().into_iter().find(|p| p.id == "meigo").unwrap();
+        let meigo = crate::config::profiles::builtin_profiles().into_iter().find(|p| p.id == "meigo").unwrap();
         assert_eq!(meigo.voice_for(&eleven), None, "no entry means the connector's own default voice");
     }
 }

@@ -90,7 +90,7 @@ impl std::fmt::Display for Capability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersonaView {
+pub struct ProfileView {
     pub id: String,
     pub name: String,
     pub language: String,
@@ -106,7 +106,7 @@ pub enum Command {
     ListenStop,
     Cancel,
     Reset,
-    SetPersona { id: String },
+    SetProfile { id: String },
     SetListeningMode { mode: ListeningMode },
 }
 
@@ -115,7 +115,7 @@ pub enum Command {
 pub enum Event {
     Welcome {
         session_id: u64,
-        persona: PersonaView,
+        profile: ProfileView,
         ui_language: UiLanguage,
         listening_mode: ListeningMode,
         web_bundle: bool,

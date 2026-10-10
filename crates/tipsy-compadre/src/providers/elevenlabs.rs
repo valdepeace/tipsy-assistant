@@ -167,7 +167,7 @@ impl ElevenLabsSpeech {
             .ok_or_else(|| ProviderError::BadResponse(format!("no voices in the ElevenLabs voice list: {value}")))
     }
 
-    /// Turns the persona's `voices` entry into a voice id.
+    /// Turns the profile's `voices` entry into a voice id.
     ///
     /// The entry is written the way a human wrote it: El Compae ships `george`, a stock voice's
     /// *name*, and putting a name in the path would 404 every sentence. So the value is matched
@@ -277,7 +277,7 @@ impl ElevenLabsTranscribe {
     }
 }
 
-/// `es-ES` → `es`: the API takes ISO-639-1 or ISO-639-3 (the note) while our personas declare
+/// `es-ES` → `es`: the API takes ISO-639-1 or ISO-639-3 (the note) while our profiles declare
 /// BCP 47 tags (the plan's decision).
 fn primary_subtag(language: &str) -> String {
     language.split(['-', '_']).next().unwrap_or("").trim().to_ascii_lowercase()

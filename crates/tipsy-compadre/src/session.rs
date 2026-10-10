@@ -6,14 +6,14 @@
 
 use std::sync::Arc;
 
-use tipsy_protocol::{AssistantState, Command, Event, Frame, ListeningMode, PersonaView, ToClient, ToServer, UiLanguage};
+use tipsy_protocol::{AssistantState, Command, Event, Frame, ListeningMode, ProfileView, ToClient, ToServer, UiLanguage};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audio::device::MIC_SAMPLE_RATE;
 use crate::audio::pcm::{i16_to_f32, Pcm};
-use crate::brain::{Brain, BrainConfig, TurnInput, TurnPersona};
+use crate::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use crate::config::Config;
 use crate::providers::{ChatMessage, Providers, Role};
 
@@ -52,15 +52,15 @@ pub fn spawn_with_events(config: Config, providers: Providers, brain_config: Bra
     // Held so the client end only closes once the session task itself has ended.
     let keep_alive = to_client_tx.clone();
 
-    let persona = config.active().clone();
+    let profile = config.active().clone();
     let listening_mode = config.listening.mode;
     let brain = Arc::new(Brain::new(
         providers,
-        TurnPersona {
-            prompt: persona.prompt.clone(),
-            voice_instructions: persona.voice_instructions.clone(),
-            voice: persona.voice_for(&config.providers.speech),
-            language: persona.language.clone(),
+        TurnProfile {
+            prompt: profile.prompt.clone(),
+            voice_instructions: profile.voice_instructions.clone(),
+            voice: profile.voice_for(&config.providers.speech),
+            language: profile.language.clone(),
         },
         brain_config,
     ));
@@ -73,10 +73,10 @@ pub fn spawn_with_events(config: Config, providers: Providers, brain_config: Bra
         generation: 0,
         listening: false,
         mic: Vec::new(),
-        persona: persona.view(),
-        ui_language: UiLanguage::from_bcp47(&persona.language),
+        profile: profile.view(),
+        ui_language: UiLanguage::from_bcp47(&profile.language),
         listening_mode,
-        greeting: persona.greeting.clone(),
+        greeting: profile.greeting.clone(),
     };
 
     tokio::spawn(async move {
@@ -108,7 +108,7 @@ struct Session {
     listening: bool,
     /// Mono 16 kHz samples gathered while listening.
     mic: Vec<i16>,
-    persona: PersonaView,
+    profile: ProfileView,
     ui_language: UiLanguage,
     listening_mode: ListeningMode,
     greeting: String,
@@ -177,7 +177,7 @@ impl Session {
             &self.out,
             ToClient::Event(Event::Welcome {
                 session_id: SESSION_ID,
-                persona: self.persona.clone(),
+                profile: self.profile.clone(),
                 ui_language: self.ui_language,
                 listening_mode: self.listening_mode,
                 web_bundle: false,
@@ -220,8 +220,8 @@ impl Session {
             Command::ListenStop => self.listen_stop(),
             Command::Cancel => self.cancel(),
             Command::Reset => self.reset(),
-            Command::SetPersona { id } => {
-                self.persona.id = id;
+            Command::SetProfile { id } => {
+                self.profile.id = id;
             }
             Command::SetListeningMode { mode } => {
                 self.listening_mode = mode;
@@ -322,7 +322,7 @@ impl Session {
 ///
 /// The history is what every turn clones and what the brain prepends to the prompt, so without a cap
 /// both the prompt and its cost would grow for the life of the session. The system message is not
-/// part of what is stored here — the brain builds it from the persona prompt on every request — so
+/// part of what is stored here — the brain builds it from the profile prompt on every request — so
 /// trimming the tail can never drop it.
 ///
 /// A cancelled turn that never spoke leaves a question with no reply behind it, which can put the

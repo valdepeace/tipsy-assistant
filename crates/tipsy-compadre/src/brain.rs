@@ -35,7 +35,7 @@ impl Default for BrainConfig {
     }
 }
 
-pub struct TurnPersona {
+pub struct TurnProfile {
     pub prompt: String,
     pub voice_instructions: String,
     pub voice: Option<String>,
@@ -50,13 +50,13 @@ pub enum TurnInput {
 
 pub struct Brain {
     providers: Providers,
-    persona: TurnPersona,
+    profile: TurnProfile,
     config: BrainConfig,
 }
 
 impl Brain {
-    pub fn new(providers: Providers, persona: TurnPersona, config: BrainConfig) -> Self {
-        Self { providers, persona, config }
+    pub fn new(providers: Providers, profile: TurnProfile, config: BrainConfig) -> Self {
+        Self { providers, profile, config }
     }
 
     pub async fn run_turn(
@@ -177,8 +177,8 @@ impl Brain {
                 timeout: self.config.speech_timeout,
                 request: SpeechRequest {
                     text: String::new(),
-                    instructions: self.persona.voice_instructions.clone(),
-                    voice: self.persona.voice.clone(),
+                    instructions: self.profile.voice_instructions.clone(),
+                    voice: self.profile.voice.clone(),
                 },
             }),
             pending: VecDeque::new(),
@@ -298,9 +298,9 @@ impl Brain {
         }
     }
 
-    /// Transcription, bounded by `transcribe_timeout` and using the persona's language.
+    /// Transcription, bounded by `transcribe_timeout` and using the profile's language.
     async fn transcribe(&self, pcm: Pcm, cancel: &CancellationToken) -> Transcribed {
-        let language = self.persona.language.as_str();
+        let language = self.profile.language.as_str();
         let call = self.providers.transcribe.transcribe(pcm, language);
         tokio::select! {
             biased;
@@ -317,7 +317,7 @@ impl Brain {
 
     fn messages(&self, ask: &str, history: &[ChatMessage]) -> Vec<ChatMessage> {
         let mut messages = Vec::with_capacity(history.len() + 2);
-        messages.push(ChatMessage::system(self.persona.prompt.clone()));
+        messages.push(ChatMessage::system(self.profile.prompt.clone()));
         messages.extend_from_slice(history);
         messages.push(ChatMessage::user(ask));
         messages
