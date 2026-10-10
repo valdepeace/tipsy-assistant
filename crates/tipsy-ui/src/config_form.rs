@@ -160,7 +160,23 @@ impl Default for ConfigForm {
             field: 0,
             editing: None,
             active_profile: "compae".into(),
-            providers: Vec::new(),
+            // One placeholder group per capability, so the Providers tab draws a Connector, a
+            // Base URL, a Model and a Test row the moment the screen opens, before the client has
+            // answered. A form whose list is empty draws no rows at all on its own first tab, which
+            // is not a screen a user can work in. The native client replaces every field of this
+            // form from the real configuration (Task 6), so what these hold matters only until it
+            // does — and the connector is the one every group needs, because it is the row a reader
+            // knows the group by.
+            providers: [Capability::Chat, Capability::Speech, Capability::Transcribe]
+                .into_iter()
+                .map(|capability| ProviderForm {
+                    capability,
+                    kind: strings(UiLanguage::Es).kind_openai_compat.to_owned(),
+                    base_url: String::new(),
+                    model: String::new(),
+                    key_name: String::new(),
+                })
+                .collect(),
             listening: ListeningForm {
                 mode: ListeningMode::Push,
                 silence_ms: "1000".into(),
