@@ -1,5 +1,6 @@
 //! Cloud provider abstractions: one trait per capability.
 
+pub mod gemini;
 pub mod openai_compat;
 pub mod sse;
 
