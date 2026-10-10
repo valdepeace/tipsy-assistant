@@ -77,31 +77,73 @@ pub(crate) struct AccountVoice {
     pub name: String,
 }
 
+/// How long a **failed** `GET /v1/voices` is remembered before it is retried.
+///
+/// The list is a per-session lookup with no way for the user to refresh it, so a failure should not
+/// be retried on every sentence: up to four sentences are synthesised in parallel and each would
+/// re-list the voices behind the same mutex, turning one flaky call into four extra requests and
+/// surfacing the brain's 30-second timeout instead of the list's own error. The window is short
+/// relative to speech timeouts (30 s), so a transient failure still recovers on the next turn.
+const VOICES_FAILURE_TTL: Duration = Duration::from_secs(10);
+
+/// The connector's single `/v1/voices` lookup: the voice list when it was fetched, or the failure
+/// that was seen `at` so concurrent and following sentences share it.
+#[derive(Default)]
+struct VoiceCache {
+    voices: Option<Vec<AccountVoice>>,
+    failure: Option<(std::time::Instant, ProviderError)>,
+}
+
 pub struct ElevenLabsSpeech {
     http: ElevenLabsHttp,
     /// The account's voice list, resolved once per connector (Review Focus 5).
-    voices: tokio::sync::Mutex<Option<Vec<AccountVoice>>>,
+    voices: tokio::sync::Mutex<VoiceCache>,
 }
 
 impl ElevenLabsSpeech {
     /// `model` is the synthesis model id from the configuration (`eleven_flash_v2_5` is the
     /// note's realtime recommendation); `key` is the resolved key **value**, never its name.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>, key: Option<String>) -> Self {
-        Self { http: ElevenLabsHttp::new(base_url, model, key), voices: tokio::sync::Mutex::new(None) }
+        Self { http: ElevenLabsHttp::new(base_url, model, key), voices: tokio::sync::Mutex::new(VoiceCache::default()) }
     }
 
     /// The account's voices from `GET /v1/voices`, fetched once and kept for the connector's
     /// lifetime. The lock is held across the request on purpose: concurrent first sentences wait
     /// for the one fetch instead of each issuing their own.
     ///
+    /// A failure is cached for [`VOICES_FAILURE_TTL`] for the same reason, so the sentences of one
+    /// turn share a single failed attempt rather than each paying for their own.
+    ///
     /// The note records the endpoint and its `xi-api-key` header but not the response body, so
     /// `voices[].voice_id` and `voices[].name` are the field names the tests pin; a body without a
     /// readable `voices` array is `BadResponse`, never a panic.
     async fn account_voices(&self) -> Result<Vec<AccountVoice>, ProviderError> {
         let mut cache = self.voices.lock().await;
-        if let Some(voices) = cache.as_ref() {
+        if let Some(voices) = cache.voices.as_ref() {
             return Ok(voices.clone());
         }
+        let recent_failure =
+            cache.failure.as_ref().filter(|(at, _)| at.elapsed() < VOICES_FAILURE_TTL);
+        if let Some((_, failure)) = recent_failure {
+            return Err(failure.clone());
+        }
+        let fetched = self.fetch_voices().await;
+        match fetched {
+            Ok(voices) => {
+                cache.voices = Some(voices.clone());
+                cache.failure = None;
+                Ok(voices)
+            }
+            Err(failure) => {
+                cache.failure = Some((std::time::Instant::now(), failure.clone()));
+                Err(failure)
+            }
+        }
+    }
+
+    /// The one `GET /v1/voices` request. Kept separate so `account_voices` can cache either
+    /// outcome without holding the lock across two error paths.
+    async fn fetch_voices(&self) -> Result<Vec<AccountVoice>, ProviderError> {
         let resp = self
             .http
             .authed(self.http.client.get(self.http.url("v1/voices")))
@@ -109,7 +151,7 @@ impl ElevenLabsSpeech {
             .send()
             .await?;
         let value: serde_json::Value = ElevenLabsHttp::check(resp).await?.json().await?;
-        let voices = value
+        value
             .get("voices")
             .and_then(|v| v.as_array())
             .map(|list| {
@@ -122,9 +164,7 @@ impl ElevenLabsSpeech {
                     })
                     .collect::<Vec<_>>()
             })
-            .ok_or_else(|| ProviderError::BadResponse(format!("no voices in the ElevenLabs voice list: {value}")))?;
-        *cache = Some(voices.clone());
-        Ok(voices)
+            .ok_or_else(|| ProviderError::BadResponse(format!("no voices in the ElevenLabs voice list: {value}")))
     }
 
     /// Turns the persona's `voices` entry into a voice id.
