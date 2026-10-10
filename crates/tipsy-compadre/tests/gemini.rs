@@ -2,8 +2,10 @@
 
 use futures::StreamExt;
 use serde_json::{json, Value};
-use tipsy_compadre::providers::gemini::GeminiChat;
-use tipsy_compadre::providers::{ChatMessage, ChatProvider, ChatRequest, ProviderError};
+use tipsy_compadre::providers::gemini::{GeminiChat, GeminiSpeech};
+use tipsy_compadre::providers::{
+    ChatMessage, ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest,
+};
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -55,6 +57,85 @@ async fn stream_error(provider: &GeminiChat, req: ChatRequest) -> ProviderError 
         Ok(_) => panic!("expected the request to fail"),
         Err(e) => e,
     }
+}
+
+/// Base64 encoder for fixtures. The API answers with base64 audio and the connector decodes it
+/// with its own decoder (this plan adds no dependency), so the test needs the inverse.
+fn b64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = ((chunk[0] as u32) << 16)
+            | ((*chunk.get(1).unwrap_or(&0) as u32) << 8)
+            | *chunk.get(2).unwrap_or(&0) as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// A minimal 16-bit mono RIFF/WAVE container at the rate the test asks for. The production code
+/// has no generic WAV encoder (`encode_wav_16k` always resamples to 16 kHz) and this task must put
+/// the container's rate wherever Review Focus 3 needs it.
+fn wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    out
+}
+
+fn tone(freq: f32, rate: u32, ms: u32) -> Vec<i16> {
+    let n = (rate as u64 * ms as u64 / 1000) as usize;
+    (0..n).map(|i| ((i as f32 * freq * std::f32::consts::TAU / rate as f32).sin() * 16_000.0) as i16).collect()
+}
+
+/// The real `compae` voice brief's first two sentences, verbatim from the persona card.
+const BRIEF: &str = concat!(
+    "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca. ",
+    "Acento andaluz natural y bien marcado: seseo, eses aspiradas, finales relajados y musicalidad andaluza."
+);
+/// The plan's decision: the first sentence of `voice_instructions` is the `style` sent to the API.
+const STYLE: &str = "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca.";
+
+fn speech_request(text: &str, instructions: &str, voice: Option<&str>) -> SpeechRequest {
+    SpeechRequest { text: text.into(), instructions: instructions.into(), voice: voice.map(str::to_string) }
+}
+
+/// A unary TTS interaction as the note records it: one `model_output` step whose content block is
+/// the audio, with `mime_type`, `channels`, `sample_rate` and base64 `data`.
+fn audio_response(mime: &str, sample_rate: u32, bytes: &[u8]) -> Value {
+    json!({
+        "id": "v1_tts",
+        "status": "completed",
+        "model": "gemini-3.8-flash-tts",
+        "object": "interaction",
+        "steps": [{
+            "type": "model_output",
+            "content": [{
+                "type": "audio",
+                "mime_type": mime,
+                "data": b64(bytes),
+                "channels": 1,
+                "sample_rate": sample_rate
+            }]
+        }]
+    })
 }
 
 #[tokio::test]
@@ -239,4 +320,179 @@ async fn chat_surfaces_a_mid_stream_error_that_arrived_with_http_200() {
         ]
     );
     assert!(out.last().unwrap().is_err(), "the error must end the reply, not complete it");
+}
+
+#[tokio::test]
+async fn speech_sends_the_style_the_persona_voice_and_the_audio_format() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/interactions"))
+        .and(header("x-goog-api-key", "k123"))
+        .and(body_partial_json(json!({
+            "model": "gemini-3.8-flash-tts",
+            "input": [{ "type": "user_input", "content": [{
+                "type": "text",
+                "text": "Ozú, quillo.",
+                "annotations": [{ "type": "speech_metadata", "style": STYLE }]
+            }]}],
+            "response_format": { "type": "audio" },
+            "generation_config": { "speech_config": [{ "voice": "Puck" }] },
+            "stream": false,
+            "store": false
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(audio_response("audio/wav", 24_000, &wav(&tone(440.0, 24_000, 10), 24_000))),
+        )
+        .mount(&server)
+        .await;
+    let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", Some("k123".into()));
+    let pcm = p.synthesize(speech_request("Ozú, quillo.", BRIEF, Some("Puck"))).await.unwrap();
+
+    assert_eq!(pcm.sample_rate, 24_000);
+    assert_eq!(pcm.samples.len(), 240);
+
+    let body: Value = serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(body["input"][0]["content"][0]["text"], "Ozú, quillo.");
+    // The note's uncertainty list leaves it open whether a TTS interaction accepts
+    // `system_instruction`, so a speech request must never carry one.
+    assert!(body.get("system_instruction").is_none(), "speech must not send a system instruction: {body}");
+    // `text` is the verbatim transcript: the connector never adds `<sigh>`-style tags of its own.
+    assert!(!body["input"][0]["content"][0]["text"].as_str().unwrap().contains('<'));
+}
+
+/// Review Focus 5: `voices` is a recommendation table. A persona with no `gemini` entry still
+/// speaks, with the documented default voice instead of a failure.
+#[tokio::test]
+async fn speech_sends_kore_when_the_persona_has_no_gemini_voice() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/interactions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(audio_response("audio/wav", 24_000, &wav(&tone(440.0, 24_000, 10), 24_000))),
+        )
+        .mount(&server)
+        .await;
+    // The `voices` table of this persona is empty, so `session.rs` resolves `voice: None`.
+    let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", None);
+    let pcm = p.synthesize(speech_request("Ozú.", "", None)).await.unwrap();
+    assert_eq!(pcm.sample_rate, 24_000);
+
+    let body: Value = serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(body["generation_config"]["speech_config"][0]["voice"], "Kore");
+    // With no delivery instructions there is no style to send, so the annotations array is absent
+    // rather than an empty string the API would have to interpret.
+    assert!(body["input"][0]["content"][0].get("annotations").is_none(), "{body}");
+}
+
+/// Streaming audio is headerless `audio/l16` (raw signed 16-bit LE) and must never be handed to the
+/// WAV decoder; the rate comes from the block.
+#[tokio::test]
+async fn speech_decodes_headerless_l16_at_the_rate_the_response_declares() {
+    let mut raw = Vec::new();
+    for sample in [16_384i16, -16_384i16] {
+        raw.extend_from_slice(&sample.to_le_bytes());
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/interactions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(audio_response("audio/l16", 24_000, &raw)))
+        .mount(&server)
+        .await;
+    let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", None);
+    let pcm = p.synthesize(speech_request("Ozú.", "", None)).await.unwrap();
+
+    assert_eq!(pcm.sample_rate, 24_000);
+    assert_eq!(pcm.samples.len(), 2);
+    assert!((pcm.samples[0] - 0.5).abs() < 0.001 && (pcm.samples[1] + 0.5).abs() < 0.001);
+}
+
+/// Review Focus 3: the note lists `audio/mulaw` and `audio/alaw` as accepted `response_format`
+/// values, so a response can legitimately arrive in a container this connector cannot read. A
+/// wrong container reported is worth more than a wrong container played.
+#[tokio::test]
+async fn speech_reports_an_unsupported_container_instead_of_playing_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/interactions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(audio_response(
+            "audio/mulaw",
+            24_000,
+            &wav(&tone(440.0, 24_000, 10), 24_000),
+        )))
+        .mount(&server)
+        .await;
+    let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", None);
+    let err = p.synthesize(speech_request("Ozú.", BRIEF, None)).await.unwrap_err();
+
+    let ProviderError::BadResponse(message) = &err else { panic!("expected BadResponse, got {err:?}") };
+    assert!(message.contains("audio/mulaw"), "the message must name the container: {message}");
+}
+
+/// Review Focus 3 again: the container says 16 kHz and the block claims 24 kHz. Playing it at the
+/// declared rate would pitch the voice wrong and speed it up; the mismatch is an error.
+#[tokio::test]
+async fn speech_reports_a_container_rate_that_contradicts_the_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/interactions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(audio_response(
+            "audio/wav",
+            24_000,
+            &wav(&tone(440.0, 16_000, 10), 16_000),
+        )))
+        .mount(&server)
+        .await;
+    let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", None);
+    let err = p.synthesize(speech_request("Ozú.", BRIEF, None)).await.unwrap_err();
+
+    let ProviderError::BadResponse(message) = &err else { panic!("expected BadResponse, got {err:?}") };
+    assert!(message.contains("24000") && message.contains("16000"), "both rates must appear: {message}");
+}
+
+/// Review Focus 1 for the speech path: same mapping as chat, same never-empty message.
+#[tokio::test]
+async fn speech_maps_auth_rate_limit_and_server_errors_with_the_provider_message() {
+    let cases = [
+        (
+            401u16,
+            "authentication",
+            "API key not valid. Please pass a valid API key.",
+            ProviderError::Auth("API key not valid. Please pass a valid API key.".to_string()),
+        ),
+        (
+            429u16,
+            "rate_limit_exceeded",
+            "Quota exceeded for quota metric 'generate requests'.",
+            ProviderError::RateLimited("Quota exceeded for quota metric 'generate requests'.".to_string()),
+        ),
+        (
+            500u16,
+            "api_error",
+            "Internal error encountered.",
+            ProviderError::BadResponse("HTTP 500: Internal error encountered.".to_string()),
+        ),
+    ];
+    for (status, code, message, expected) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1beta/interactions"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_string(json!({"error": {"code": code, "message": message}}).to_string()),
+            )
+            .mount(&server)
+            .await;
+        let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", Some("nope".into()));
+        let err = p.synthesize(speech_request("Ozú.", "", None)).await.unwrap_err();
+        assert_eq!(err, expected, "status {status}");
+
+        let carried = match &err {
+            ProviderError::Auth(m) | ProviderError::RateLimited(m) | ProviderError::BadResponse(m) => m,
+            other => panic!("status {status} produced {other:?}"),
+        };
+        assert!(!carried.trim().is_empty(), "status {status} carried an empty message");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1, "status {status} was retried");
+    }
 }

@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::{ChatProvider, ChatRequest, ProviderError, Role, TextStream};
+use super::{ChatProvider, ChatRequest, ProviderError, Role, SpeechProvider, SpeechRequest, TextStream};
+use crate::audio::pcm::{decode_audio, pcm_s16le_to_pcm, Pcm};
 
 /// Every Gemini request carries the key in this header. `Authorization: Bearer` is the
 /// OpenAI-compatibility layer's style, and the legacy `?key=` query string leaks into logs.
@@ -27,6 +28,15 @@ const INTERACTIONS_PATH: &str = "v1beta/interactions";
 /// 30 s for the response headers of a chat stream. The body is read *after* this future resolves,
 /// so the timeout wraps `send()`; a request-builder timeout would cut the stream off mid-reply.
 const CHAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 30 s for a whole sentence of speech. Speech is a unary request, so this one goes on the request
+/// builder rather than around `send()`.
+const SPEECH_TIMEOUT: Duration = Duration::from_secs(30);
+/// The voice sent when the persona's `voices` table has no `gemini` entry. `Kore` is the voice the
+/// API documentation's own request example uses and the only prebuilt name the research note
+/// confirms; the full list of 30 names is unconfirmed, and the note never shows a request without
+/// `speech_config`, so this default is sent rather than omitting the field.
+const DEFAULT_VOICE: &str = "Kore";
 
 /// The parts of the connector chat and speech share: the endpoint, the API-key header, the
 /// interaction envelope (`store: false` on every request) and the status → error mapping.
@@ -269,6 +279,157 @@ impl ChatProvider for GeminiChat {
     }
 }
 
+/// The voice name the API takes (`Kore`, `Puck`, …). The persona's `voices["gemini"]` entry is
+/// used verbatim: it is a *name*, not an id to look up. A Voice Library id or a designed
+/// `voice_…` would also be accepted in this field, so a user's own entry keeps working.
+fn voice_name(voice: Option<&str>) -> &str {
+    match voice.map(str::trim) {
+        Some(name) if !name.is_empty() => name,
+        _ => DEFAULT_VOICE,
+    }
+}
+
+/// The one-line `style`: the first sentence of the persona's `voice_instructions`. The API wants a
+/// short style and Google's guidance says a long style paragraph is the commonest cause of voice
+/// drift, so the voice-designer brief is condensed here instead of in the persona cards.
+fn first_sentence(text: &str) -> &str {
+    let trimmed = text.trim();
+    trimmed
+        .char_indices()
+        .find(|(_, c)| matches!(c, '.' | '!' | '?' | '…'))
+        .map(|(i, c)| &trimmed[..i + c.len_utf8()])
+        .unwrap_or(trimmed)
+}
+
+/// Standard base64 (`A–Z a–z 0–9 + /`, `=` padding), written here because this plan adds no
+/// dependency for it. Padding and line breaks are ignored; any other byte is an error.
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for byte in input.bytes() {
+        if matches!(byte, b'=' | b'\n' | b'\r' | b' ' | b'\t') {
+            continue;
+        }
+        let value = sextet(byte).ok_or_else(|| format!("invalid base64 byte {byte} in the audio data"))?;
+        acc = (acc << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1; // keep only the bits that are still pending
+        }
+    }
+    Ok(out)
+}
+
+/// The audio block of the response: the note's jq filter, in Rust — the **last** `model_output`
+/// step's `audio` content.
+fn audio_block(value: &Value) -> Result<&Value, ProviderError> {
+    value
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|step| step.get("type").and_then(Value::as_str) == Some("model_output"))
+        .filter_map(|step| step.get("content").and_then(Value::as_array))
+        .flatten()
+        .rfind(|content| content.get("type").and_then(Value::as_str) == Some("audio"))
+        .ok_or_else(|| ProviderError::BadResponse(format!("no audio block in the synthesis response: {value}")))
+}
+
+/// Turns the audio block into PCM. The two containers the note documents are never mixed up: the
+/// unary default `audio/wav` is self-describing and carries its own rate, while `audio/l16` is
+/// headerless raw 16-bit signed LE that must be decoded at the rate the block declares.
+fn audio_block_to_pcm(block: &Value, bytes: Vec<u8>) -> Result<Pcm, ProviderError> {
+    let mime_type = block.get("mime_type").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    let declared = block.get("sample_rate").and_then(Value::as_u64).map(|rate| rate as u32);
+
+    let pcm = match mime_type.as_str() {
+        "audio/l16" => pcm_s16le_to_pcm(&bytes, declared.unwrap_or(24_000)),
+        "audio/wav" | "audio/x-wav" | "audio/wave" => {
+            decode_audio(bytes).map_err(|e| ProviderError::BadResponse(format!("undecodable audio/wav: {e}")))?
+        }
+        other => {
+            return Err(ProviderError::BadResponse(format!(
+                "unsupported audio container `{other}` in the synthesis response: the request asked \
+                 for `{{\"type\":\"audio\"}}`, whose unary default is `audio/wav`"
+            )))
+        }
+    };
+
+    if let Some(declared) = declared
+        && declared != pcm.sample_rate
+    {
+        return Err(ProviderError::BadResponse(format!(
+            "the synthesis response declares {declared} Hz but the container is {} Hz",
+            pcm.sample_rate
+        )));
+    }
+    if pcm.samples.is_empty() {
+        return Err(ProviderError::BadResponse("the synthesis response contained no samples".into()));
+    }
+    Ok(pcm)
+}
+
+/// Speech over the same endpoint. Unary (`"stream": false`): one request per sentence, one response
+/// carrying the whole utterance, and the sample rate travels with the bytes.
+pub struct GeminiSpeech {
+    http: GeminiHttp,
+    model: String,
+}
+
+impl GeminiSpeech {
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>, key: Option<String>) -> Self {
+        Self { http: GeminiHttp::new(base_url, key), model: model.into() }
+    }
+
+    /// The TTS shape the note records: the verbatim transcript with a `speech_metadata` annotation
+    /// carrying the one-line style, audio as the response format, and the voice name in
+    /// `generation_config`. No `system_instruction`: whether a TTS interaction accepts one is
+    /// unconfirmed.
+    fn request_body(&self, req: &SpeechRequest) -> Value {
+        let style = first_sentence(&req.instructions);
+        let mut text = json!({ "type": "text", "text": req.text });
+        if !style.is_empty() {
+            text["annotations"] = json!([{ "type": "speech_metadata", "style": style }]);
+        }
+        let input = json!([{ "type": "user_input", "content": [text] }]);
+        let mut body = GeminiHttp::body(&self.model, input, false);
+        body["response_format"] = json!({ "type": "audio" });
+        body["generation_config"] = json!({ "speech_config": [{ "voice": voice_name(req.voice.as_deref()) }] });
+        body
+    }
+}
+
+#[async_trait]
+impl SpeechProvider for GeminiSpeech {
+    async fn synthesize(&self, req: SpeechRequest) -> Result<Pcm, ProviderError> {
+        let body = self.request_body(&req);
+        let resp = self.http.post(&body).timeout(SPEECH_TIMEOUT).send().await?;
+        let value: Value = GeminiHttp::check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| ProviderError::BadResponse(format!("the synthesis response was not JSON: {e}")))?;
+
+        let block = audio_block(&value)?;
+        let data = block.get("data").and_then(Value::as_str).unwrap_or("");
+        let bytes = decode_base64(data).map_err(ProviderError::BadResponse)?;
+        audio_block_to_pcm(block, bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +502,29 @@ mod tests {
         assert_eq!(stream_error("rate_limit_exceeded", ""), ProviderError::RateLimited("rate_limit_exceeded".into()));
         assert_eq!(stream_error("permission_denied", "denied"), ProviderError::Auth("denied".into()));
         assert_eq!(stream_error("", ""), ProviderError::BadResponse("stream error".into()));
+    }
+
+    const BRIEF: &str = concat!(
+        "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca. ",
+        "Acento andaluz natural y bien marcado: seseo, eses aspiradas, finales relajados y musicalidad andaluza."
+    );
+    const STYLE: &str = "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca.";
+
+    #[test]
+    fn decode_base64_decodes_standard_base64() {
+        assert_eq!(decode_base64("AAECAw==").unwrap(), vec![0, 1, 2, 3]);
+        assert_eq!(decode_base64("T3rDug==").unwrap(), "Ozú".as_bytes()); // multi-byte UTF-8 bytes
+        assert_eq!(decode_base64("").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode_base64("AA\nEC\r\nAw==").unwrap(), vec![0, 1, 2, 3]); // line breaks tolerated
+        assert!(decode_base64("AAEC*").is_err());
+    }
+
+    #[test]
+    fn condenses_the_voice_brief_to_its_first_sentence() {
+        assert_eq!(first_sentence(BRIEF), STYLE);
+        assert_eq!(first_sentence("  Ozú, quillo.  "), "Ozú, quillo.");
+        assert_eq!(first_sentence("una sola frase sin punto"), "una sola frase sin punto");
+        assert_eq!(first_sentence(""), "");
+        assert_eq!(first_sentence("¿Qué pasa? Y ya está."), "¿Qué pasa?");
     }
 }
