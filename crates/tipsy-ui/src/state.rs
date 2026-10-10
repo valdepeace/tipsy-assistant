@@ -60,7 +60,7 @@ pub enum KeyInput {
 pub enum UiAction {
     Send(Command),
     Quit,
-    /// Replay the audio of the log entry at this index (handled by the client, which kept the audio).
+    /// Replay the audio of the last completed reply (handled by the client, which kept it).
     Replay(usize),
 }
 
