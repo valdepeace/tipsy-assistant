@@ -25,6 +25,28 @@ pub fn save(path: &Path, config: &Config) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
+/// Bytes of OS entropy behind one token: 128 bits, i.e. 32 lowercase hex characters.
+const TOKEN_BYTES: usize = 16;
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// A fresh `server.token`: [`TOKEN_BYTES`] bytes from the operating system's cryptographic
+/// generator (`getrandom` 0.4.3, already in `Cargo.lock` through `rand` 0.10.3, so this adds no
+/// crate to the workspace) rendered as 32 lowercase hex characters, alphabet `0-9a-f`.
+///
+/// Called only when someone asks: the configuration screen's **Regenerate** button
+/// (`ConfigEffect::RegenerateToken`, Task 6) or a user pasting a value of their own. Nothing calls
+/// it while loading, so an empty `token` stays empty until then (`ServerConfig::has_token`).
+pub fn new_token() -> std::io::Result<String> {
+    let mut bytes = [0u8; TOKEN_BYTES];
+    getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
+    let mut token = String::with_capacity(TOKEN_BYTES * 2);
+    for byte in bytes {
+        token.push(HEX[(byte >> 4) as usize] as char);
+        token.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(token)
+}
+
 /// Loads the config, creating it with defaults if missing. A corrupt file is renamed to
 /// `config.toml.bad-<unix seconds>` and replaced by defaults, never overwritten in place.
 pub fn load_or_create(path: &Path) -> std::io::Result<LoadOutcome> {
@@ -59,7 +81,7 @@ pub fn load_or_create(path: &Path) -> std::io::Result<LoadOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ProviderKind, Profile};
+    use crate::config::{ProviderKind, Profile, ServerConfig};
     use tipsy_protocol::ListeningMode;
 
     #[test]
@@ -207,5 +229,133 @@ language = "es-ES"
         assert_eq!(c.active().voice_for(&eleven), Some("george".to_string()));
         eleven.model = "deepgram/aura-2".into();
         assert_eq!(c.active().voice_for(&eleven), None);
+    }
+
+    /// Review Focus 3, first half: a `config.toml` written by Plan 1 (no `token`, no
+    /// `mic_device`) is a valid file, not a corrupt one: it loads, nothing else moves, and the two
+    /// new fields come up at their defaults.
+    #[test]
+    fn plan_1_file_without_token_or_mic_device_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, r#"
+active_profile = "compae"
+
+[server]
+bind = "127.0.0.1:7070"
+lan = false
+
+[listening]
+mode = "auto"
+silence_ms = 1500
+mic_gain = 9.5
+"#).unwrap();
+
+        let out = load_or_create(&path).unwrap();
+        assert!(out.warning.is_none(), "an old file is not a corrupt file: {:?}", out.warning);
+        assert!(out.config.server.token.is_empty(), "the token defaults in empty, never generated");
+        assert!(!out.config.server.has_token(), "an empty token means no token yet");
+        assert!(out.config.listening.mic_device.is_none(), "no device is configured by default");
+        // Nothing else moved.
+        assert_eq!(out.config.server.bind, "127.0.0.1:7070");
+        assert!(!out.config.server.lan);
+        assert_eq!(out.config.listening.mode, ListeningMode::Auto);
+        assert_eq!(out.config.listening.silence_ms, 1500);
+        assert_eq!(out.config.listening.mic_gain, 9.5);
+        // Loading is not a migration: the user's file is left exactly as it was.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("token"), "loading must not rewrite the file, got:\n{text}");
+    }
+
+    /// Review Focus 3, second half: nothing is cached between loads, so a file edited while the app
+    /// runs is seen the next time the screen opens one — including a token pasted in by hand.
+    #[test]
+    fn a_file_edited_after_the_first_load_is_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nbind = \"127.0.0.1:7070\"\n").unwrap();
+        assert!(load_or_create(&path).unwrap().config.server.token.is_empty());
+
+        std::fs::write(&path, "[server]\nbind = \"127.0.0.1:7070\"\ntoken = \"pasted-by-hand\"\n").unwrap();
+        let again = load_or_create(&path).unwrap().config;
+        assert_eq!(again.server.token, "pasted-by-hand");
+        assert!(again.server.has_token());
+    }
+
+    /// The value the WebSocket server will require in Plan 3 is the one that comes back from the
+    /// file, spelled the same way.
+    #[test]
+    fn token_survives_a_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.server.token = "0123456789abcdef0123456789abcdef".into();
+        c.server.lan = true;
+        c.listening.mic_device = Some("Rode NT-USB".into());
+        save(&path, &c).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("token = \"0123456789abcdef0123456789abcdef\""),
+            "the token must be written under [server], got:\n{text}"
+        );
+        assert!(
+            text.contains("mic_device = \"Rode NT-USB\""),
+            "the device must be written under [listening], got:\n{text}"
+        );
+        assert_eq!(load_or_create(&path).unwrap().config, c);
+    }
+
+    /// `mic_device` is an `Option` because toml skips a `None` field instead of refusing to write
+    /// the file, and because "no device chosen" must not be spelled as an empty device name.
+    #[test]
+    fn absent_mic_device_is_none_and_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let c = Config::default();
+        save(&path, &c).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("mic_device"), "a None device is skipped, got:\n{text}");
+        assert!(text.contains("mic_gain = 12.0"), "the rest of [listening] is still written:\n{text}");
+
+        let back = load_or_create(&path).unwrap().config;
+        assert!(back.listening.mic_device.is_none());
+        assert_eq!(back, c);
+    }
+
+    /// The documented shape of a generated token: 32 lowercase hex characters, and two calls do not
+    /// collide. The shape is the contract the screen's row and Plan 3's handshake rely on.
+    #[test]
+    fn new_token_has_the_documented_shape_and_differs_between_calls() {
+        let first = new_token().unwrap();
+        let second = new_token().unwrap();
+        assert_eq!(first.len(), 32, "16 bytes as lowercase hex, got {first:?}");
+        assert!(
+            first.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "the alphabet is 0-9a-f, got {first:?}"
+        );
+        assert_ne!(first, second, "two generations must not return the same token");
+        let server = ServerConfig { token: first.clone(), ..ServerConfig::default() };
+        assert!(server.has_token(), "a generated token counts as configured");
+    }
+
+    /// An empty token is a state, not an error: it is what a fresh install and every file written
+    /// before this plan carry, and loading never fills it in — only the screen's Regenerate button
+    /// (or the user's own paste) does.
+    #[test]
+    fn empty_token_is_a_state_and_is_never_filled_in_on_load() {
+        assert!(!ServerConfig::default().has_token());
+        assert!(!Config::default().server.has_token());
+        let blank = ServerConfig { token: "   ".into(), ..ServerConfig::default() };
+        assert!(!blank.has_token(), "a hand-edited blank token is not a token");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nbind = \"0.0.0.0:7070\"\nlan = true\n").unwrap();
+        let loaded = load_or_create(&path).unwrap();
+        assert!(loaded.warning.is_none(), "a missing token is not a corrupt file");
+        assert!(loaded.config.server.token.is_empty(), "nothing is generated on load");
+        assert!(!loaded.config.server.has_token());
     }
 }

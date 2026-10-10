@@ -40,11 +40,24 @@ impl Default for Config {
 pub struct ServerConfig {
     pub bind: String,
     pub lan: bool,
+    /// The token the WebSocket server will require (spec §9; Plan 3 puts it to use). Empty means
+    /// "none generated yet": the screen shows the unset state and its Regenerate button fills it
+    /// in. It is *our* bearer token, not a provider key, so the file is its home — and it still
+    /// never belongs in an event, a notice or a log line.
+    pub token: String,
+}
+
+impl ServerConfig {
+    /// False while no token has been generated: a fresh install, or a file written before this
+    /// plan. A whitespace-only value (a hand-edited file) counts as no token.
+    pub fn has_token(&self) -> bool {
+        !self.token.trim().is_empty()
+    }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { bind: "127.0.0.1:7070".into(), lan: false }
+        Self { bind: "127.0.0.1:7070".into(), lan: false, token: String::new() }
     }
 }
 
@@ -54,11 +67,15 @@ pub struct ListeningConfig {
     pub mode: ListeningMode,
     pub silence_ms: u32,
     pub mic_gain: f32,
+    /// Input device for the native client (spec §9). `None` — the default, and the only value the
+    /// web client can have — means the system default device; the serializer leaves the key out
+    /// rather than writing an empty name.
+    pub mic_device: Option<String>,
 }
 
 impl Default for ListeningConfig {
     fn default() -> Self {
-        Self { mode: ListeningMode::Push, silence_ms: 1000, mic_gain: 12.0 }
+        Self { mode: ListeningMode::Push, silence_ms: 1000, mic_gain: 12.0, mic_device: None }
     }
 }
 

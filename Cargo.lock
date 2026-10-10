@@ -3732,6 +3732,7 @@ dependencies = [
  "cpal 0.18.2",
  "dirs",
  "futures",
+ "getrandom 0.4.3",
  "hound",
  "keyring",
  "ratatui",
