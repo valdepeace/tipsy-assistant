@@ -154,12 +154,28 @@ impl ElevenLabsSpeech {
 ///
 /// The note marks the PCM bit depth, signedness and channel count for TTS **output**
 /// unconfirmed — it documents them only for STT *input* — so this decodes the way
-/// `pcm_s16le_to_pcm` does (signed 16-bit little-endian, mono, 24 kHz) and refuses a JSON body
-/// (the API's own error shape served with 200), a WAV/RIFF container and a body too short to hold
-/// one sample. Raw PCM cannot announce itself, so an MP3 or a wrong sample rate inside a
-/// well-formed body is not detectable here; playing it as 24 kHz would be worse than an error.
-fn audio_bytes_to_pcm(bytes: &[u8]) -> Result<Pcm, ProviderError> {
-    if bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{') {
+/// `pcm_s16le_to_pcm` does (signed 16-bit little-endian, mono, 24 kHz) and refuses a payload that
+/// announces itself as JSON (an object, an array, or one of those behind a UTF-8 BOM), a body the
+/// response calls JSON in its `content-type`, a WAV/RIFF container and a body too short to hold one
+/// sample. Raw PCM cannot announce itself, so an MP3 or a wrong sample rate inside a well-formed
+/// body is not detectable here; playing it as 24 kHz would be worse than an error.
+fn audio_bytes_to_pcm(bytes: &[u8], content_type: Option<&str>) -> Result<Pcm, ProviderError> {
+    // A JSON content-type is the API's own error shape served with 200, and it is checked before
+    // the bytes: a body that happens to look like PCM must still not be played as noise.
+    if content_type.is_some_and(|t| t.to_ascii_lowercase().contains("json")) {
+        let preview: String = String::from_utf8_lossy(bytes).chars().take(200).collect();
+        return Err(ProviderError::BadResponse(format!(
+            "expected raw pcm_24000 audio but the response declares a JSON content-type \
+             ({content_type:?}): {preview}"
+        )));
+    }
+    // A BOM-prefixed JSON body would otherwise start with the BOM's bytes rather than the brace, so
+    // the BOM is stepped over before looking for the first meaningful byte.
+    let payload = bytes.strip_prefix(b"\xEF\xBB\xBF".as_slice()).unwrap_or(bytes);
+    if matches!(
+        payload.iter().copied().find(|b| !b.is_ascii_whitespace()),
+        Some(b'{') | Some(b'[')
+    ) {
         // `chars().take(..)` keeps the preview on character boundaries (Review Focus 2).
         let preview: String = String::from_utf8_lossy(bytes).chars().take(200).collect();
         return Err(ProviderError::BadResponse(format!(
@@ -195,8 +211,15 @@ impl SpeechProvider for ElevenLabsSpeech {
             .json(&body)
             .send()
             .await?;
-        let bytes = ElevenLabsHttp::check(resp).await?.bytes().await?;
-        audio_bytes_to_pcm(&bytes)
+        let resp = ElevenLabsHttp::check(resp).await?;
+        // The header has to be read before `bytes()` consumes the response.
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.bytes().await?;
+        audio_bytes_to_pcm(&bytes, content_type.as_deref())
     }
 }
 

@@ -258,6 +258,42 @@ async fn speech_rejects_bodies_that_are_not_pcm_24000() {
     }
 }
 
+/// The same guard from two more directions: raw PCM announces nothing, so a payload that starts
+/// with `[` (a JSON array) or with a UTF-8 BOM in front of an object is still JSON and must be
+/// refused rather than played as noise. The `content-type` is the other announcement the API
+/// makes, and a 200 that calls itself JSON is refused even when its bytes would pass the byte
+/// checks.
+#[tokio::test]
+async fn speech_rejects_json_arrays_boms_and_a_json_content_type() {
+    let bom = [b"\xEF\xBB\xBF".as_slice(), br#"{"detail":[{"msg":"voice not found"}]}"#.as_slice()].concat();
+    let pcm = vec![0x00, 0x40, 0x00, 0xC0];
+    let cases: [(&str, Vec<u8>, &str); 3] = [
+        ("application/json", br#"[{"msg":"voice not found"}]"#.to_vec(), "voice not found"),
+        ("application/json", bom, "voice not found"),
+        // Well-formed raw PCM bytes, but the header says JSON: only the content-type check can
+        // catch this one, so it proves that check is not dead code.
+        ("application/json", pcm, "JSON"),
+    ];
+    for (content_type, body, expected) in cases {
+        let server = MockServer::start().await;
+        mount_voice_list(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/text-to-speech/fixture-voice-george"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body.clone(), content_type))
+            .mount(&server)
+            .await;
+
+        let err = provider(&server).synthesize(request(Some(GEORGE_VOICE_ID))).await.unwrap_err();
+        match &err {
+            ProviderError::BadResponse(m) => {
+                assert!(!m.trim().is_empty(), "{content_type} carried an empty message");
+                assert!(m.contains(expected), "{content_type}, body {body:?}: {m}");
+            }
+            other => panic!("{content_type}, body {body:?} produced {other:?}"),
+        }
+    }
+}
+
 /// Review Focus 2 for this connector: the audio is raw bytes and `reqwest` hands `serde_json`
 /// whole bodies, so no parse can be split mid-character here — the UTF-8 risk lives in the
 /// request body and in the preview the connector builds from a body it cannot use. Both are
