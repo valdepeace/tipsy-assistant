@@ -854,6 +854,22 @@ impl ConfigForm {
             },
         ]
     }
+
+    /// Shows the answer to a `Test` request in the screen's notice line: green when the provider
+    /// answered, red when it refused.
+    ///
+    /// The text is the capability's own name and what the probe said; the form adds no copy of its
+    /// own, because it does not know which of the two string tables is in use (the plan's
+    /// `ConfigForm` has no language field). The latency is shown only when there was a call to
+    /// measure: a refusal that never left the machine — a missing key — carries no time at all.
+    pub fn test_result(&mut self, capability: Capability, ok: bool, latency_ms: u64, message: String) {
+        let text = if ok {
+            format!("{capability}: {latency_ms} ms — {message}")
+        } else {
+            format!("{capability}: {message}")
+        };
+        self.notice = Some((if ok { NoticeKind::Ok } else { NoticeKind::Error }, text));
+    }
 }
 
 /// The rows a Providers capability group has: connector, base URL, model, key name and its Test
@@ -1386,5 +1402,39 @@ mod tests {
                 "an unknown row label: {label:?}"
             );
         }
+    }
+
+    /// Review Focus 5, as the screen shows it: an answer is green and carries the measured latency;
+    /// a refusal is red and carries the provider's own words, with no latency dressed up as one. The
+    /// base form is the module's own `providers()`, which is a form nobody has touched.
+    #[test]
+    fn a_test_result_lands_in_the_notice_and_never_dresses_up_a_failure() {
+        let mut f = providers();
+
+        f.test_result(Capability::Chat, true, 412, "18 bytes".into());
+        let (kind, text) = f.notice.clone().unwrap();
+        assert_eq!(kind, NoticeKind::Ok);
+        assert_eq!(text, "chat: 412 ms — 18 bytes");
+
+        f.test_result(
+            Capability::Chat,
+            false,
+            0,
+            "no API key named `openrouter`: run `tipsy-compadre key set openrouter` or set TIPSY_KEY_OPENROUTER"
+                .into(),
+        );
+        let (kind, text) = f.notice.clone().unwrap();
+        assert_eq!(kind, NoticeKind::Error);
+        assert_eq!(
+            text,
+            "chat: no API key named `openrouter`: run `tipsy-compadre key set openrouter` or set TIPSY_KEY_OPENROUTER",
+            "a refusal carries the answer as it came, and no latency"
+        );
+
+        // The third capability reads as a person says it, which is the protocol's `Display`.
+        f.test_result(Capability::Transcribe, false, 30, "HTTP 500: boom".into());
+        let (kind, text) = f.notice.clone().unwrap();
+        assert_eq!(kind, NoticeKind::Error);
+        assert_eq!(text, "transcription: HTTP 500: boom");
     }
 }

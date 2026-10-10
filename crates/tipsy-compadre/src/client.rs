@@ -10,18 +10,18 @@ use ratatui::crossterm::event::{
     self, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use tipsy_protocol::{Command, Event, Frame, ToClient, ToServer};
+use tipsy_protocol::{Capability, Command, Event, Frame, ToClient, ToServer};
 use tipsy_ui::{ClockView, ConfigEffect, Hit, KeyInput, NoticeKind, UiAction, UiState, draw};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::device::{Mic, Player};
 use crate::audio::pcm::{envelope, i16_to_f32, rms};
 use crate::brain::BrainConfig;
-use crate::config::form::{config_from, form_of};
+use crate::config::form::{config_from, form_of, provider_config};
 use crate::config::store;
 use crate::config::Config;
 use crate::keys::KeyResolver;
-use crate::providers::{build_providers, ProviderSlot};
+use crate::providers::{build_one, build_providers, ProviderSlot};
 use crate::session::spawn_with_events;
 use crate::sysmon;
 
@@ -180,6 +180,14 @@ impl Client {
                 if let Event::SpeechChunk { sample_rate, .. } = &event {
                     self.rate = *sample_rate;
                 }
+                // A Test result belongs to the screen's notice line, not to the HUD's log: the
+                // answer stays beside the rows it is about. `UiState::apply` deliberately has
+                // nothing to say about it.
+                if let Event::TestResult { capability, ok, latency_ms, message } = &event
+                    && let Some(form) = self.state.config_form.as_mut()
+                {
+                    form.test_result(*capability, *ok, *latency_ms, message.clone());
+                }
                 // No event ever touches the queued audio or the audio kept for `Replay`: the status
                 // that ends a reply arrives while the device is still speaking it, so the only
                 // interruption is one the user asks for, in `on_action`.
@@ -293,6 +301,16 @@ impl Client {
                     None => Vec::new(),
                 };
                 for effect in effects {
+                    // A Test is the screen's half of `Command::TestProvider`, and it goes through the
+                    // same rule a command does: it is a diagnostic that says nothing out loud, so it
+                    // leaves the reply being spoken where it is. Decided here, from `starts_turn`,
+                    // rather than inherited from the fact that the Test button never sends a
+                    // command.
+                    if let ConfigEffect::Test(capability) = effect
+                        && flush_on_interrupt(test_interrupts_playback(capability), self.playing())
+                    {
+                        self.flush_playback();
+                    }
                     self.on_config_effect(effect, to_server, events);
                 }
                 false
@@ -321,22 +339,71 @@ impl Client {
 
     /// Performs one effect the screen asked for.
     ///
-    /// `_events` is the client's own event sender: Task 7 uses it to report a Test result, and
-    /// renames it to `events` then. It is underscored here so the compiler is not told about an
-    /// argument this task has nothing to send.
+    /// `events` is the client's own event sender: a Test reports its answer through it, so the
+    /// result is rendered like anything else the session says.
     fn on_config_effect(
         &mut self,
         effect: ConfigEffect,
         to_server: &UnboundedSender<ToServer>,
-        _events: &UnboundedSender<ToClient>,
+        events: &UnboundedSender<ToClient>,
     ) {
         match effect {
             ConfigEffect::None => {}
             ConfigEffect::Save => self.save(to_server),
-            // Task 7 fills this in; the variant exists from Task 3 on, so the match is exhaustive.
-            ConfigEffect::Test(_) => {}
+            ConfigEffect::Test(capability) => self.test_provider(capability, events),
             ConfigEffect::RegenerateToken => self.regenerate_token(),
         }
+    }
+
+    /// Runs the screen's Test against the row on screen and reports the answer into the client's own
+    /// event channel, so it is rendered like anything else the session says.
+    ///
+    /// The connector is built *here*, before the call: a row that names a key nobody holds is then
+    /// answered at once, with no latency and without a single request — which is what makes "no key"
+    /// a different answer from "the provider refused". The probe itself runs on a task of its own,
+    /// so the HUD never waits for a provider.
+    fn test_provider(&mut self, capability: Capability, events: &UnboundedSender<ToClient>) {
+        // The row the user is looking at, converted the way a save converts it: a Test can never
+        // quietly use a connector other than the one on screen.
+        let converted = self
+            .state
+            .config_form
+            .as_ref()
+            .and_then(|form| form.providers.iter().find(|row| row.capability == capability))
+            .map(provider_config);
+        let cfg = match converted {
+            // No screen, or no row for this capability: nothing to test and nothing to say.
+            None => return,
+            Some(Err(message)) => return self.config_notice(NoticeKind::Error, message),
+            Some(Ok(cfg)) => cfg,
+        };
+        let connector = match build_one(&cfg, capability, &self.keys) {
+            Ok(connector) => connector,
+            Err(e) => {
+                // No request is made, so there is no latency to report; the message is the builder's
+                // own, which names the key and the environment variable that would provide it.
+                let _ = events.send(ToClient::Event(Event::TestResult {
+                    capability,
+                    ok: false,
+                    latency_ms: 0,
+                    message: e.to_string(),
+                }));
+                return;
+            }
+        };
+        // The profile's language, read now: the transcription probe sends it, and it is the same tag
+        // every other transcription carries.
+        let language = self.config.active().language.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            let probe = connector.probe(&language).await;
+            let _ = events.send(ToClient::Event(Event::TestResult {
+                capability,
+                ok: probe.ok,
+                latency_ms: probe.latency_ms,
+                message: probe.message,
+            }));
+        });
     }
 
     /// Writes the screen's configuration and applies it to the running session.
@@ -426,6 +493,11 @@ fn starts_turn(command: &Command) -> bool {
         // so those begin nothing and must not silence a reply in progress.
         Command::Ask { text } | Command::Say { text } => !text.trim().is_empty(),
         Command::ListenStop | Command::Reset => true,
+        // A Test is the one command the native client answers itself, in `test_provider`: it makes a
+        // real call to a provider, but it starts no turn, speaks nothing of its own and writes
+        // nothing to the log. This arm is therefore load-bearing for the screen as well —
+        // `test_interrupts_playback` reads the decision from it — and may not be flipped to `true`
+        // without also deciding that a one-word probe should cut a sentence in half.
         Command::Hello { .. }
         | Command::TestProvider { .. }
         | Command::ListenStart
@@ -433,6 +505,18 @@ fn starts_turn(command: &Command) -> bool {
         | Command::SetProfile { .. }
         | Command::SetListeningMode { .. } => false,
     }
+}
+
+/// Whether the screen's Test quiets the audio the device is still speaking.
+///
+/// It does not, and the answer comes from the same rule [`starts_turn`] applies to commands: the
+/// probe is a diagnostic — it says nothing out loud, plays nothing (the speech probe counts the
+/// samples and drops them) and adds nothing to the log — so a reply in progress keeps playing. This
+/// function exists so the screen's path, which never passes through `UiAction::Send`, takes that
+/// decision deliberately instead of inheriting it from an arm that only ever existed to make a match
+/// exhaustive.
+fn test_interrupts_playback(capability: Capability) -> bool {
+    starts_turn(&Command::TestProvider { capability })
 }
 
 /// Whether the queued audio has to go because the turn it belongs to is over.
@@ -808,5 +892,132 @@ mod tests {
         );
         assert!(form.dirty, "a fresh token is an unsaved edit like any other");
         assert_eq!(std::fs::read(&path).unwrap(), before, "nothing is written until the user saves");
+    }
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The screen's Test button, pressed the way the client receives it: the focused row of the
+    /// form decides which capability is probed, and the probe makes a real call against the row.
+    fn press_test(client: &mut Client, to_server: &UnboundedSender<ToServer>, events: &UnboundedSender<ToClient>) {
+        client.on_action(UiAction::Config(ConfigAction::Test), to_server, events);
+    }
+
+    /// Review Focus 5: the result of a Test comes back through the client's own event channel and
+    /// lands in the screen's notice line with the latency the call really took.
+    #[tokio::test]
+    async fn the_test_button_reports_a_real_answer_with_its_latency() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(30))
+                    .set_body_raw(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\ndata: [DONE]\n\n",
+                        "text/event-stream",
+                    ),
+            )
+            .mount(&server)
+            .await;
+
+        let config = mock_config(&server.uri());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config.clone(), path, keys, slot);
+        client.state.show_config_form(form_of(&config));
+        // Task 3's Providers tab lists the three capabilities in order, so its first row is chat's.
+        // The assertion on `capability` below is what catches a different layout.
+        client.state.config_form.as_mut().unwrap().field = 0;
+        // The reply `F2` replays, and the audio the device may still have queued: a probe is a
+        // diagnostic, so pressing Test must leave both exactly where they are.
+        client.reply = vec![7, 8, 9];
+
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
+        press_test(&mut client, &to_server, &events);
+        assert_eq!(client.reply, vec![7, 8, 9], "a Test is not a turn: the last reply stays replayable");
+
+        // The probe runs on a task of its own — the HUD never waits for a provider.
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), results.recv())
+            .await
+            .expect("the probe must answer within five seconds")
+            .expect("the client must still hold the channel");
+        let ToClient::Event(Event::TestResult { capability, ok, latency_ms, message: text }) = &message else {
+            panic!("a Test must answer with TestResult, got {message:?}");
+        };
+        // Copied out of the borrowed event: the message itself is moved into `on_message` below.
+        let (capability, ok, latency_ms, text) = (*capability, *ok, *latency_ms, text.clone());
+        assert_eq!(capability, Capability::Chat);
+        assert!(ok, "the provider answered: {text}");
+        assert!(latency_ms >= 20, "the latency must be the measured one, got {latency_ms}");
+
+        client.on_message(message);
+        let (kind, notice) = client.state.config_form.as_ref().unwrap().notice.clone().unwrap();
+        assert_eq!(kind, NoticeKind::Ok);
+        assert!(notice.starts_with("chat: "), "{notice}");
+        assert!(notice.contains(&format!("{latency_ms} ms")), "{notice}");
+    }
+
+    /// "No key" is not "the provider refused": the row names a key nobody holds, so the answer comes
+    /// back with no latency at all and no request is ever made.
+    #[tokio::test]
+    async fn a_test_for_a_row_with_no_key_answers_without_calling_anything() {
+        let server = MockServer::start().await; // nothing may reach it
+        let config = mock_config(&server.uri());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let keys = resolver(); // holds `openrouter` only
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config.clone(), path, keys, slot);
+
+        let mut edited = config.clone();
+        edited.providers.chat.key = "not-in-the-store".into();
+        client.state.show_config_form(form_of(&edited));
+        client.state.config_form.as_mut().unwrap().field = 0;
+
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
+        press_test(&mut client, &to_server, &events);
+
+        let message = results.try_recv().expect("a row with no key is answered at once, with no call");
+        let ToClient::Event(Event::TestResult { capability, ok, latency_ms, message: text }) = &message else {
+            panic!("a Test must answer with TestResult, got {message:?}");
+        };
+        let (capability, ok, latency_ms, text) = (*capability, *ok, *latency_ms, text.clone());
+        assert_eq!(capability, Capability::Chat);
+        assert!(!ok);
+        assert_eq!(latency_ms, 0, "no call was made, so there is no latency to report: {text}");
+        assert!(
+            text.contains("not-in-the-store") && text.contains("TIPSY_KEY_NOT_IN_THE_STORE"),
+            "the answer names the key and how to provide it: {text}"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty(), "no key must not become a request");
+
+        client.on_message(message);
+        let (kind, notice) = client.state.config_form.as_ref().unwrap().notice.clone().unwrap();
+        assert_eq!(kind, NoticeKind::Error);
+        assert!(notice.contains("not-in-the-store"), "{notice}");
+    }
+
+    /// The interruption decision Task 7 had to take, named and proved rather than inherited: a Test
+    /// makes a real call, but it is a diagnostic — it speaks nothing of its own, writes nothing to
+    /// the log and starts no turn — so it never quiets the reply being spoken. The answer comes from
+    /// `starts_turn`, the one helper that decides whether a command interrupts, so flipping that arm
+    /// flips this too.
+    #[test]
+    fn a_test_probe_is_not_a_turn_and_leaves_the_playing_audio_alone() {
+        for capability in [Capability::Chat, Capability::Speech, Capability::Transcribe] {
+            assert!(
+                !test_interrupts_playback(capability),
+                "{capability} is a diagnostic, not a turn"
+            );
+            assert!(!interrupts_playback(&Command::TestProvider { capability }));
+        }
+        // The whole rule at once: audio is queued and the user asked for a Test, and the audio stays
+        // where it is. Had this been true, a one-word probe would cut a sentence in half.
+        assert!(!flush_on_interrupt(test_interrupts_playback(Capability::Speech), true));
     }
 }
