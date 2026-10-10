@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{
     self, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use tipsy_protocol::{AssistantState, Command, Event, Frame, ToClient, ToServer};
+use tipsy_protocol::{Command, Event, Frame, ToClient, ToServer};
 use tipsy_ui::{ClockView, Hit, KeyInput, UiAction, UiState, draw};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -60,15 +60,10 @@ struct Client {
     config: Config,
     /// `None` when there is no output device: the HUD still works, silently.
     player: Option<Player>,
-    /// The audio of the reply being spoken, kept for `Replay`.
+    /// The audio of the reply being spoken, kept for `Replay` until a new turn starts.
     reply: Vec<i16>,
     /// Sample rate announced by the last `SpeechChunk`.
     rate: u32,
-    /// The assistant state the previous server event left behind, for terminal transitions.
-    last_status: AssistantState,
-    /// True while the turn the user just interrupted is still winding down: its audio is flushed
-    /// as soon as the session reports that it stopped.
-    cancel_pending: bool,
     mic_gain: f32,
     mic: Option<Mic>,
     mic_frames: std::sync::mpsc::Receiver<Vec<i16>>,
@@ -85,8 +80,6 @@ impl Client {
             player: None,
             reply: Vec::new(),
             rate: 24000,
-            last_status: AssistantState::Idle,
-            cancel_pending: false,
             mic_gain,
             mic: None,
             mic_frames,
@@ -175,26 +168,22 @@ impl Client {
                 if let Event::SpeechChunk { sample_rate, .. } = &event {
                     self.rate = *sample_rate;
                 }
-                if matches!(event, Event::Done { .. }) {
-                    // The next sentence spoken starts a new reply.
-                    self.reply.clear();
-                }
+                // No event ever touches the queued audio or the audio kept for `Replay`: the status
+                // that ends a reply arrives while the device is still speaking it, so the only
+                // interruption is one the user asks for, in `on_action`.
                 self.state.apply(&event);
-                if let Event::Status { state, .. } = event {
-                    let flush = flush_on_terminal(self.last_status, state, self.cancel_pending);
-                    if state == AssistantState::Idle {
-                        // The idle status arrived: nothing is still winding down.
-                        self.cancel_pending = false;
-                    }
-                    self.last_status = state;
-                    if flush {
-                        self.flush_playback();
-                    }
-                }
             }
             ToClient::Audio(Frame::Speech { samples, .. }) => self.on_speech(samples),
             ToClient::Audio(Frame::Mic(_)) => {}
         }
+    }
+
+    /// True while the device still has audio queued or being played.
+    ///
+    /// The device is the only honest source for this: the session reports the end of a turn before
+    /// the device has finished speaking, so its status cannot say what is still audible.
+    fn playing(&self) -> bool {
+        self.player.as_ref().is_some_and(Player::playing)
     }
 
     /// Silences the device: whatever rodio still has queued is audio the assistant no longer wants
@@ -252,9 +241,15 @@ impl Client {
     fn on_action(&mut self, action: UiAction, to_server: &UnboundedSender<ToServer>) -> bool {
         match action {
             UiAction::Send(command) => {
-                if command == Command::Cancel {
-                    // The user ended the turn: its audio stops as soon as the session says so.
-                    self.cancel_pending = true;
+                // The only two things that quiet the device: the user starting a new turn over the
+                // reply still being spoken (barge-in), and the cancel the user asked for. Reaching
+                // the end of a turn is not an interruption — see `flush_on_interrupt`.
+                if flush_on_interrupt(interrupts_playback(&command), self.playing()) {
+                    self.flush_playback();
+                }
+                if starts_turn(&command) {
+                    // What `Replay` replays is the last reply, so it goes when the next turn begins.
+                    self.reply.clear();
                 }
                 let _ = to_server.send(ToServer::Command(command));
                 false
@@ -271,19 +266,42 @@ impl Client {
     }
 }
 
-/// Whether the queued audio must be dropped on this status change.
+/// Whether the audio the device has queued must be dropped right now.
 ///
-/// The session sends no more frames once a turn is over, but sentences handed to rodio earlier are
-/// still queued in the device, and the session reports the end of the turn before the device has
-/// played them. Flushing is therefore reserved for the two terminal transitions: the speaking
-/// status giving way to idle (a cancelled turn, or a failure that stopped the audio), and the
-/// moment the cancel the user asked for reaches the idle status. A normal reply ends with its own
-/// `Done`, which never flushes, so its last sentence is heard in full.
-fn flush_on_terminal(previous: AssistantState, current: AssistantState, cancelled: bool) -> bool {
-    if current != AssistantState::Idle {
-        return false;
+/// The two inputs are the whole rule: the user is interrupting (`interrupting`) and there is
+/// something left to drop (`playing`). Nothing else flushes. A status change in particular is never
+/// a trigger: a reply that finishes normally crosses `Speaking` → `Idle` (`brain.rs:110-115`,
+/// `:153-158`) while the device is still speaking it out, so flushing there would cut every reply
+/// off mid-sentence — and, because rodio's `clear` pauses the sink, leave the rest of the session
+/// silent.
+fn flush_on_interrupt(interrupting: bool, playing: bool) -> bool {
+    interrupting && playing
+}
+
+/// Whether a command starts the next turn, which is what makes the audio kept for `Replay` stale.
+///
+/// The session cancels the running turn and starts another one for `Ask`, `Say` and `ListenStop`
+/// (`session.rs:283-287`); `Reset` starts the conversation over (`session.rs:272-281`).
+fn starts_turn(command: &Command) -> bool {
+    match command {
+        // The session ignores an empty question and a bare `!` (`session.rs:233-238`, `:242-249`),
+        // so those begin nothing and must not silence a reply in progress.
+        Command::Ask { text } | Command::Say { text } => !text.trim().is_empty(),
+        Command::ListenStop | Command::Reset => true,
+        Command::Hello { .. }
+        | Command::ListenStart
+        | Command::Cancel
+        | Command::SetPersona { .. }
+        | Command::SetListeningMode { .. } => false,
     }
-    previous == AssistantState::Speaking || cancelled
+}
+
+/// Whether the queued audio has to go because the turn it belongs to is over.
+///
+/// Everything that starts a turn leaves nothing of the previous one to hear; `Cancel`
+/// (`session.rs:266-270`) is the one command that ends a turn without starting another.
+fn interrupts_playback(command: &Command) -> bool {
+    starts_turn(command) || matches!(command, Command::Cancel)
 }
 
 /// Draws one frame and reports where its clickable titles landed.
@@ -339,46 +357,65 @@ fn clock_view() -> ClockView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tipsy_protocol::AssistantState;
 
     #[test]
-    fn speaking_giving_way_to_idle_flushes_the_queued_audio() {
-        // A cancelled turn: the session stops emitting frames, but rodio still holds a sentence.
-        assert!(flush_on_terminal(AssistantState::Speaking, AssistantState::Idle, false));
-        // A failure that stopped the audio on the way out.
-        assert!(flush_on_terminal(AssistantState::Speaking, AssistantState::Idle, true));
+    fn only_an_interrupt_with_audio_left_to_drop_flushes() {
+        // Barge-in, or the cancel the user asked for, while the reply is being spoken: the rest of
+        // the queued audio goes.
+        assert!(flush_on_interrupt(true, true));
+        // An interrupt with nothing queued has nothing to drop — a cancel that arrives while the
+        // session is still thinking, with no sentence synthesised yet.
+        assert!(!flush_on_interrupt(true, false));
+        // The status change that ends a normal reply. `Done` and `Idle` arrive while the device is
+        // still speaking, so this row is what keeps every completed reply whole.
+        assert!(!flush_on_interrupt(false, true));
+        assert!(!flush_on_interrupt(false, false));
     }
 
     #[test]
-    fn the_cancel_the_user_asked_for_flushes_even_before_any_audio() {
-        assert!(flush_on_terminal(AssistantState::Thinking, AssistantState::Idle, true));
-        assert!(flush_on_terminal(AssistantState::Transcribing, AssistantState::Idle, true));
-    }
-
-    #[test]
-    fn only_the_idle_status_is_terminal() {
-        // Reaching idle is the only transition that drops audio; every other status is the turn
-        // still going on, and `Done` itself never flushes, so a normal reply is heard in full.
-        for previous in [
-            AssistantState::Idle,
-            AssistantState::Listening,
-            AssistantState::Transcribing,
-            AssistantState::Thinking,
-            AssistantState::Speaking,
+    fn the_commands_that_end_a_turn_are_the_ones_that_interrupt_it() {
+        // Barge-in: the session cancels the running turn and starts another one in its place.
+        for command in [
+            Command::Ask { text: "¿qué pasa?".into() },
+            Command::Say { text: "hola compadre".into() },
+            Command::ListenStop,
+            Command::Reset,
         ] {
-            assert!(!flush_on_terminal(previous, AssistantState::Listening, false), "{previous:?}");
-            assert!(!flush_on_terminal(previous, AssistantState::Transcribing, false), "{previous:?}");
-            assert!(!flush_on_terminal(previous, AssistantState::Thinking, false), "{previous:?}");
-            assert!(!flush_on_terminal(previous, AssistantState::Speaking, false), "{previous:?}");
+            assert!(interrupts_playback(&command), "{command:?} ends the running turn");
+        }
+        // `Cancel` ends a turn without starting one, and is the other half of the rule.
+        assert!(interrupts_playback(&Command::Cancel));
+        // Nothing else quiets the device: opening the microphone leaves the reply audible until the
+        // utterance that follows it, and the session ignores the empty question a bare `!` sends.
+        for command in [
+            Command::ListenStart,
+            Command::Ask { text: String::new() },
+            Command::Say { text: "   ".into() },
+            Command::SetPersona { id: "compae".into() },
+        ] {
+            assert!(!interrupts_playback(&command), "{command:?} leaves the reply alone");
         }
     }
 
     #[test]
-    fn an_idle_that_follows_silence_has_nothing_to_flush() {
-        // Nothing was queued: the greeting of a silent session, a repeated idle, or the idle that
-        // follows a turn which never spoke.
-        assert!(!flush_on_terminal(AssistantState::Idle, AssistantState::Idle, false));
-        assert!(!flush_on_terminal(AssistantState::Listening, AssistantState::Idle, false));
-        assert!(!flush_on_terminal(AssistantState::Transcribing, AssistantState::Idle, false));
-        assert!(!flush_on_terminal(AssistantState::Thinking, AssistantState::Idle, false));
+    fn a_finished_reply_keeps_its_audio_until_a_new_turn_starts() {
+        let (to_server, _from_client) = tokio::sync::mpsc::unbounded_channel();
+        let mut client = Client::new(Config::default());
+
+        client.on_message(ToClient::Event(Event::Status { state: AssistantState::Speaking, detail: None }));
+        client.on_message(ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
+        client.on_message(ToClient::Audio(Frame::Speech { seq: 0, samples: vec![7, 8, 9] }));
+        client.on_message(ToClient::Event(Event::Reply { text: "Aquí andamos.".into() }));
+        client.on_message(ToClient::Event(Event::Done { first_audio_ms: Some(1), total_ms: 2 }));
+        assert_eq!(client.reply, vec![7, 8, 9], "`F2` has the reply as soon as it is spoken");
+
+        // The idle that ends every normal reply: the device is still speaking, so it must keep both
+        // the queue and what `F2` replays.
+        client.on_message(ToClient::Event(Event::Status { state: AssistantState::Idle, detail: None }));
+        assert_eq!(client.reply, vec![7, 8, 9], "a normal `Speaking -> Idle` keeps the last reply");
+
+        client.on_action(UiAction::Send(Command::Ask { text: "¿y eso?".into() }), &to_server);
+        assert!(client.reply.is_empty(), "the next turn speaks a reply of its own");
     }
 }
