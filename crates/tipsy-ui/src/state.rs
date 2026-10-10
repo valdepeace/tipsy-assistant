@@ -35,6 +35,13 @@ impl LogEntry {
     }
 }
 
+/// True for an assistant entry that has not been said yet: what `Reply` and `Done` fill in. It is
+/// still pending while the turn runs, and may carry an advisory error — a recoverable failure the
+/// session is already retrying — which the reply must clear once it arrives.
+fn reply_pending(entry: &LogEntry) -> bool {
+    entry.who == Who::Assistant && entry.first_audio_ms.is_none()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Chat,
@@ -130,8 +137,9 @@ impl UiState {
         self.notice = Some((text.into(), NOTICE_MS));
     }
 
+    /// The assistant entry the next reply belongs to: the last one that has not been said yet.
     fn pending_assistant(&mut self) -> Option<&mut LogEntry> {
-        self.log.iter_mut().rev().find(|e| e.pending && e.who == Who::Assistant)
+        self.log.iter_mut().rev().find(|e| reply_pending(e))
     }
 
     pub fn busy(&self) -> bool {
@@ -165,6 +173,9 @@ impl UiState {
             Event::Reply { text } => {
                 if let Some(e) = self.pending_assistant() {
                     e.text = text.clone();
+                    // A recoverable error is advisory: the reply it sat in front of has arrived,
+                    // and the entry is the reply, not the warning that preceded it.
+                    e.error = None;
                 }
             }
             Event::SpeechChunk { .. } => {}
@@ -172,6 +183,7 @@ impl UiState {
                 if let Some(e) = self.pending_assistant() {
                     e.pending = false;
                     e.first_audio_ms = *first_audio_ms;
+                    e.error = None;
                 }
             }
             Event::Stats { cpu, ram, net_in, net_out } => {
@@ -191,6 +203,9 @@ impl UiState {
             Event::Error { message, .. } => {
                 if let Some(e) = self.pending_assistant() {
                     e.pending = false;
+                    // The warning is advisory: the session is already retrying a recoverable one,
+                    // and the reply that lands clears it. A failure that never gets a reply keeps
+                    // its marker, so it stays visible on screen.
                     e.error = Some(message.clone());
                 }
                 self.notify(message.clone());
@@ -500,4 +515,30 @@ mod tests {
         }
         assert!(s.mic_levels.len() <= 400);
     }
+    #[test]
+    fn a_recoverable_error_does_not_outlive_the_reply() {
+        let mut s = UiState::new();
+        s.apply(&welcome(UiLanguage::Es));
+        type_text(&mut s, "¿qué pasa?");
+        s.on_key(KeyInput::Enter);
+
+        // The rate-limited warning arrives before the retry; the reply the user heard follows it.
+        s.apply(&Event::Error {
+            code: ErrorCode::RateLimited,
+            message: "rate limited: busy".into(),
+            recoverable: true,
+        });
+        assert_eq!(s.log[1].error.as_deref(), Some("rate limited: busy"));
+
+        // The retry succeeded: the entry the warning sat on is the one the reply fills.
+        s.apply(&Event::Reply { text: "Nada, aquí andamos.".into() });
+        s.apply(&Event::Done { first_audio_ms: Some(900), total_ms: 2000 });
+
+        assert_eq!(s.log[1].text, "Nada, aquí andamos.");
+        assert_eq!(s.log[1].error, None, "the entry shows the reply, not the warning it survived");
+        assert!(!s.log[1].pending);
+        assert_eq!(s.log[1].first_audio_ms, Some(900));
+        assert!(!s.busy());
+    }
 }
+
