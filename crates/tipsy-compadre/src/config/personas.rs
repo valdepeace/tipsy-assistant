@@ -452,7 +452,10 @@ fn polite_one() -> Persona {
 mod tests {
     use super::*;
 
-    /// The personas this task adds, with the name and language each must declare.
+    /// The Spanish built-ins this task adds, with the name and language each must declare. `compae`
+    /// is deliberately absent: it shares the character with the user's own copy and does not follow
+    /// the Spanish texts' no-apostrophe rule, so it is guarded by `every_builtin_persona...` below
+    /// instead of by this table's wording rules.
     const SPANISH: [(&str, &str, &str); 3] =
         [("meigo", "O Meigo", "es-ES"), ("chulapo", "El Chulapo", "es-ES"), ("senyor", "El Senyor", "es-ES")];
 
@@ -528,6 +531,68 @@ mod tests {
             assert!(!persona.voice_instructions.trim().is_empty(), "{id} needs delivery instructions");
             assert!(!persona.greeting.trim().is_empty(), "{id} needs a greeting");
             assert!(!persona.wake_word.trim().is_empty(), "{id} needs a wake word");
+        }
+    }
+
+    /// The module doc's claim is about **all nine** personas, and the two language tables above
+    /// cover eight of them: `compae` is the pair the user owns and is not in either table, because
+    /// its prompt is the one Spanish text that does use an apostrophe (it explains the rule with
+    /// `«pa'»`) and the tables' wording rules are deliberately not applied to it. So the claim is
+    /// enforced here, for every built-in, by marker instead of by table.
+    ///
+    /// Each rule lists the spellings the corpus uses for it, in both languages, because every
+    /// persona states the rules in its own words. Only the rule-bearing fragments are quoted, not
+    /// whole sentences, so rewording around them cannot make this test wrong. The gaps are
+    /// collected and reported, so a failure names the rule and the persona that lost it.
+    #[test]
+    fn every_builtin_persona_states_the_four_rules() {
+        /// One spec §8.3 rule as the markers the corpus uses to state it.
+        struct Rule {
+            name: &'static str,
+            markers: &'static [&'static str],
+        }
+
+        const RULES: [Rule; 4] = [
+            Rule {
+                name: "rule 1: it ends up giving a correct, useful answer",
+                markers: &["correcta y útil", "correct, useful answer", "que funciona"],
+            },
+            Rule {
+                name: "rule 2: no access to Jira, GitHub, GitLab or the code, and it asks instead",
+                markers: &["nunca te inventes", "never make up", "never invent"],
+            },
+            Rule {
+                name: "rule 3: two or three short sentences, since the reply is read aloud",
+                markers: &["dos o tres frases", "two or three short sentences"],
+            },
+            Rule {
+                name: "rule 4: an original character, never a real person or a character from another work",
+                markers: &["personaje original", "original character"],
+            },
+        ];
+
+        let all = builtin_personas();
+        assert_eq!(all.len(), 9, "the spec lists nine built-in personas");
+        for persona in &all {
+            let prompt = persona.prompt.as_str();
+            for tool in ["Jira", "GitHub", "GitLab"] {
+                assert!(prompt.contains(tool), "{} must state that it cannot see {tool}", persona.id);
+            }
+            let missing: Vec<&str> = RULES
+                .iter()
+                .filter(|rule| !rule.markers.iter().any(|marker| prompt.contains(marker)))
+                .map(|rule| rule.name)
+                .collect();
+            assert!(missing.is_empty(), "{}'s prompt does not state: {}", persona.id, missing.join("; "));
+            assert!(prompt.split_whitespace().count() >= 150, "{}'s prompt looks truncated", persona.id);
+            assert!(!persona.voice_instructions.trim().is_empty(), "{} needs delivery instructions", persona.id);
+            // The no-apostrophe rule is a Spanish-texts rule; the English delivery briefs spell
+            // their accent with apostrophes (`dropped r's`), so it stays in the Spanish table.
+            if persona.language.starts_with("es") {
+                assert!(!persona.voice_instructions.contains('\''), "{}: delivery text carries no apostrophes", persona.id);
+            }
+            assert!(!persona.greeting.trim().is_empty(), "{} needs a greeting", persona.id);
+            assert!(!persona.wake_word.trim().is_empty(), "{} needs a wake word", persona.id);
         }
     }
 }

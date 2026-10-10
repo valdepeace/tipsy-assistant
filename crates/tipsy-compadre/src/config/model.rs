@@ -193,11 +193,19 @@ mod tests {
         assert_eq!(words.len(), before, "two personas share a wake word");
     }
 
+    /// A persona with no entry for the connector's `voice_key` resolves to `None`, so the connector
+    /// uses its own default voice. The model is set too: `voice_key` tests the model string before
+    /// the kind, so an `Elevenlabs` kind carrying the default OpenRouter speech model
+    /// (`google/gemini-3.8-flash-tts`) would resolve the `gemini` key and leave this guard blind —
+    /// the resolved key is asserted so that can never be mistaken again. Precedence itself is Plan
+    /// 1 behaviour and is not changed here (Plan 2B owns it).
     #[test]
     fn a_persona_without_a_voice_for_the_connector_falls_back_to_the_provider_default() {
         let config = Config::default();
         let mut eleven = config.providers.speech.clone();
         eleven.kind = ProviderKind::Elevenlabs;
+        eleven.model = "eleven_flash_v2_5".into();
+        assert_eq!(eleven.voice_key(), "elevenlabs", "this test must exercise the elevenlabs key");
         let meigo = crate::config::personas::builtin_personas().into_iter().find(|p| p.id == "meigo").unwrap();
         assert_eq!(meigo.voice_for(&eleven), None, "no entry means the connector's own default voice");
     }
