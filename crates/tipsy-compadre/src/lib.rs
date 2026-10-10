@@ -4,6 +4,8 @@ pub mod text;
 
 pub mod audio;
 
+pub mod brain;
+
 pub mod config;
 
 pub mod keys;
