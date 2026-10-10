@@ -142,6 +142,22 @@ impl UiState {
         self.log.iter_mut().rev().find(|e| reply_pending(e))
     }
 
+    /// Marks every assistant entry that is still waiting for a reply as no longer pending.
+    ///
+    /// The session emits `Done` before it reports `Idle` for every reply it completed, so an entry
+    /// that still has no audio when the turn goes idle — a turn cancelled mid-sentence, a question
+    /// nothing ever answered — will never be completed, and leaving it pending is what kept the HUD
+    /// in "Pensando…" for ever.
+    ///
+    /// The entries themselves are kept rather than dropped: the last one may belong to the turn a
+    /// barge-in has just started, whose reply still has to land somewhere, and the ones carrying a
+    /// failure must stay on screen for the user to read.
+    fn end_pending_replies(&mut self) {
+        for entry in self.log.iter_mut().filter(|e| e.who == Who::Assistant) {
+            entry.pending = false;
+        }
+    }
+
     pub fn busy(&self) -> bool {
         self.log.iter().any(|e| e.pending)
     }
@@ -153,7 +169,13 @@ impl UiState {
                 self.lang = *ui_language;
                 self.listening_mode = *listening_mode;
             }
-            Event::Status { state, .. } => self.status = *state,
+            Event::Status { state, .. } => {
+                self.status = *state;
+                if *state == AssistantState::Idle {
+                    // The turn is over: nothing is mid-reply any more.
+                    self.end_pending_replies();
+                }
+            }
             Event::Heard { text } => {
                 let at = self
                     .log
@@ -515,6 +537,84 @@ mod tests {
         }
         assert!(s.mic_levels.len() <= 400);
     }
+    #[test]
+    fn a_turn_that_heard_nothing_leaves_the_hud_idle() {
+        let mut s = UiState::new();
+        s.apply(&welcome(UiLanguage::Es));
+        // The mic closes: the HUD pushes the assistant placeholder before the turn is even run.
+        s.on_key(KeyInput::Tab);
+        s.on_key(KeyInput::Tab);
+        assert!(s.busy());
+
+        // Nothing intelligible was captured: no `Heard`, no `Reply`, no `Done` — only an error and
+        // the idle status that follows it.
+        s.apply(&Event::Error {
+            code: ErrorCode::NothingHeard,
+            message: "nothing was heard".into(),
+            recoverable: true,
+        });
+        s.apply(&Event::Status { state: AssistantState::Idle, detail: None });
+
+        assert!(!s.busy(), "the spinner must stop: {:#?}", s.log);
+        // The failure is still on screen, in the entry itself and in the notice: the user is told
+        // why the assistant said nothing.
+        assert_eq!(s.log.len(), 1);
+        assert_eq!(s.log[0].error.as_deref(), Some("nothing was heard"));
+        assert_eq!(s.notice.as_ref().map(|n| n.0.as_str()), Some("nothing was heard"));
+    }
+
+    #[test]
+    fn an_idle_status_stops_the_spinner_on_a_cancelled_turn() {
+        let mut s = UiState::new();
+        // The mic closes and the turn is cancelled before the assistant says anything: no `Reply`,
+        // no `Done`, no `Error` — only the idle status that ends the turn.
+        s.on_key(KeyInput::Tab);
+        s.on_key(KeyInput::Tab);
+        assert!(s.busy());
+
+        s.apply(&Event::Status { state: AssistantState::Idle, detail: None });
+
+        assert!(!s.busy(), "the spinner must stop: {:#?}", s.log);
+        assert!(s.log.iter().all(|e| !e.pending), "nothing may still be waiting: {:#?}", s.log);
+    }
+
+    #[test]
+    fn an_idle_from_a_cancelled_turn_does_not_swallow_the_next_reply() {
+        let mut s = UiState::new();
+        type_text(&mut s, "primera");
+        s.on_key(KeyInput::Enter);
+        // Barge-in: a second question is asked while the first turn is still running, so the
+        // placeholder for it already exists when the cancelled turn reports that it is idle.
+        type_text(&mut s, "segunda");
+        s.on_key(KeyInput::Enter);
+        s.apply(&Event::Status { state: AssistantState::Idle, detail: None });
+        assert!(!s.busy());
+
+        // The turn that is now running still has to answer the question that was just asked.
+        s.apply(&Event::Reply { text: "Aquí andamos.".into() });
+        s.apply(&Event::Done { first_audio_ms: Some(300), total_ms: 900 });
+
+        assert_eq!(s.log.last().unwrap().text, "Aquí andamos.", "the reply must land: {:#?}", s.log);
+        assert_eq!(s.log.last().unwrap().first_audio_ms, Some(300));
+        assert!(!s.busy());
+    }
+
+    #[test]
+    fn an_idle_status_keeps_a_failure_visible_and_stops_the_spinner() {
+        let mut s = UiState::new();
+        type_text(&mut s, "x");
+        s.on_key(KeyInput::Enter);
+        s.apply(&Event::Error { code: ErrorCode::Auth, message: "bad key".into(), recoverable: false });
+        // The failure is still on screen while the turn winds down.
+        assert_eq!(s.log[1].error.as_deref(), Some("bad key"));
+        s.apply(&Event::Status { state: AssistantState::Idle, detail: None });
+        assert!(!s.busy(), "the error ended the turn, so nothing is still running");
+        // A failure that never got a reply keeps its row: the user has to see why nothing was said.
+        assert_eq!(s.log[1].error.as_deref(), Some("bad key"));
+        // The failure itself is still reported, in the notice too.
+        assert_eq!(s.notice.as_ref().map(|n| n.0.as_str()), Some("bad key"));
+    }
+
     #[test]
     fn a_recoverable_error_does_not_outlive_the_reply() {
         let mut s = UiState::new();
