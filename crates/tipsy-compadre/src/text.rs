@@ -10,6 +10,7 @@ pub struct SentenceSplitter {
     buf: String,
 }
 
+/// A character that ends a sentence for the splitter.
 fn is_terminator(c: char) -> bool {
     matches!(c, '.' | '?' | '!' | '…')
 }
