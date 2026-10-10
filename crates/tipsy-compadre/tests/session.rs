@@ -299,3 +299,34 @@ async fn barge_in_cancels_running_turn() {
     let audio: Vec<&ToClient> = late.iter().filter(|m| is_speech(m)).collect();
     assert!(audio.is_empty(), "no audio may play after Cancel: {audio:#?}");
 }
+
+#[tokio::test]
+async fn a_long_conversation_keeps_the_prompt_bounded() {
+    // Thirty questions is far more than the session keeps, so the prompt has to stop growing:
+    // without a cap, the last request would carry every question ever asked and its reply.
+    let turns = 30usize;
+    let chat = FakeChat::new((0..turns).map(|_| Ok(vec![S1])).collect());
+    let (tx, mut rx, _) = session(chat.clone(), FakeSpeech::new(), "");
+
+    next_matching(&mut rx, is_done, 500).await; // the greeting
+
+    for n in 0..turns {
+        send(&tx, Command::Ask { text: format!("pregunta {n}") });
+        next_matching(&mut rx, is_done, 1000).await;
+    }
+
+    let requests = chat.requests.lock().unwrap();
+    assert_eq!(requests.len(), turns, "one chat call per Ask");
+    let sizes: Vec<usize> = requests.iter().map(|r| r.messages.len()).collect();
+    assert!(sizes[0] < sizes[turns - 1], "the prompt must carry the conversation: {sizes:?}");
+    // Once the history is full the prompt stops growing: the last ten questions all send the same
+    // number of messages, however many were asked before them.
+    assert!(
+        sizes[turns - 10..].windows(2).all(|w| w[0] == w[1]),
+        "the prompt must stop growing: {sizes:?}"
+    );
+
+    let last = requests[turns - 1].messages.clone();
+    assert_eq!(last[0].role, Role::System, "the persona prompt stays first: {last:#?}");
+    assert_eq!(last.last().unwrap(), &ChatMessage::user(format!("pregunta {}", turns - 1)));
+}
