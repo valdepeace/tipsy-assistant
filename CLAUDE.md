@@ -5,37 +5,56 @@ Read `docs/architecture.md` and the spec `docs/superpowers/specs/2026-10-10-tips
 
 ## Current work
 
-Executing **Plan 1** (`docs/superpowers/plans/2026-10-10-plan-1-terminal-core.md`) on branch
-`plan-1-terminal-core` with `superpowers:subagent-driven-development`. The SDD workspace, task
-briefs, global constraints and the progress ledger (with every ruling taken so far) live in
-`.superpowers/sdd/2026-10-10-plan-1-terminal-core/`. **Resume from the ledger**: tasks with a
-`Task <N>: complete` line are done; start at the first one without it.
+**Integrated on `master`:** Plan 1 (`docs/superpowers/plans/2026-10-10-plan-1-terminal-core.md`) and
+Plan 2A (`docs/superpowers/plans/2026-10-10-plan-2a-providers-and-personas.md`). Each plan owns a
+git-ignored SDD workspace under `.superpowers/sdd/<plan-stem>/` holding its task briefs, the global
+constraints and the progress ledger with every ruling taken while executing it. **Resume from the
+ledger**: tasks with a `Task <N>: complete` line are done; start at the first one without it.
 
-Pending in parallel with Plan 1: two throwaway spikes on Haiku, in a scratch directory outside the
-repo — Ratzilla (ratatui `Canvas` with Braille + mouse on wasm32) and Rustpotter (custom Spanish
-wake word "oye compae"). Their answers feed Plans 3 and 4. Plans 2–4 are written only after Plan 1
-lands, against the real code.
+**In progress:** Plan 2B (`docs/superpowers/plans/2026-10-10-plan-2b-config-screen-and-auto-mode.md`)
+— the configuration screen (`F9`) and the `auto` listening mode. Its skeleton, its fixed interfaces
+and the bodies of Tasks 1–2 exist; Tasks 3–10 still need writing, against the real code.
+
+**Not started:** the two throwaway spikes in a scratch directory outside the repo — Ratzilla
+(ratatui `Canvas` with Braille + mouse on wasm32) and Rustpotter (a custom Spanish wake word; the
+shipped one is "oye compae"). They feed the web-client plan and the `hands_free` plan, and every
+persona's wake word stays provisional until Rustpotter verifies it.
 
 ## Budget rules (user is on a tight budget)
 
-- Each task is executed by a subagent on the model tagged in the plan: `[haiku]` by default,
-  `[sonnet]` only where tagged. Tests are always written by Haiku.
-- **No per-task reviews.** One whole-branch review on Sonnet at the end (Task 18 Step 2).
-- Always pass `model` explicitly when dispatching subagents.
+- One implementer subagent per task, and **no per-task reviews**: a single whole-branch review when
+  the plan is complete, then one fix wave and one scoped re-review of it. Plan 1 and Plan 2A both
+  ran that way.
+- This harness cannot pick a model per subagent — every subagent inherits the session model — so a
+  plan's `[tier]`, `[haiku]` or `[sonnet]` tags are hints about a task's size, not model selections.
+- Authoring a plan costs more than executing a task. Give task bodies the complete tests and the
+  exact wire shapes, quote third-party endpoints from research notes instead of recalling them, and
+  state behaviour in prose where the remaining implementation is mechanical.
 
 ## Known environment issues
 
-- Haiku fails with `API Error: 400 system.4.type: Input should be 'text'` when the claude.ai MCP
-  connectors are loaded. Start Claude Code with `ENABLE_CLAUDEAI_MCP_SERVERS=false`
-  (PowerShell: `$env:ENABLE_CLAUDEAI_MCP_SERVERS="false"; claude`) so Haiku subagents work.
-- Building on Windows from Git Bash: remove `/usr/bin` from `PATH` before `cargo` (Git's
-  `link.exe` shadows MSVC's): `export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '^/usr/bin$' | paste -sd:)"`.
-- Disk `E:` is nearly full; avoid duplicate `target/` directories.
+- **The sandbox and where the build goes.** The project tree carries DSH's sandbox grant and the
+  build output is configured onto `G:` (`.cargo/config.toml`; the `.cargo/` directory is
+  ignored by git). A *sandboxed* shell must therefore build with
+  `CARGO_TARGET_DIR="E:\workspace\personal\tipsy-compadre\.target-sandbox"`. Building into the
+  configured `G:` directory labels the artifacts low-integrity, and an app started from such a
+  binary runs restricted and cannot create `%APPDATA%\tipsy-compadre\config.toml` — that trap cost
+  hours once and is recorded in Plan 1's ledger. The permission recovery scripts live in
+  `E:\workspace\personal\.dsh-acl-recovery\` (each with its own rollback command).
+- `git` prints `fsmonitor_ipc__send_query ... '.git/fsmonitor--daemon.ipc'` on every call: harmless.
+- Carried over from the Claude Code era, in case you go back: Haiku subagents fail with
+  `400 system.4.type` unless Claude Code starts with `ENABLE_CLAUDEAI_MCP_SERVERS=false`, and in Git
+  Bash `/usr/bin` must be removed from `PATH` before `cargo` (Git's `link.exe` shadows MSVC's).
 
 ## Conventions
 
-- Code, comments, docs and commit messages in English; personas in their own language.
+- Code, comments, docs and commit messages in English; personas in their own language and variety.
 - Terminal first: every feature must work in the native terminal before it is done.
-- Never clone or imitate the voice of a real person; never use characters or quotes from films or
-  other media. Personas are original, affectionate caricatures.
-- API keys never go into files; config stores key names only.
+- Never clone or imitate the voice of a real person; never use characters or quotes from films,
+  books or other media. Personas are original, affectionate caricatures, and regional humour never
+  mocks a group. **The persona copy is the user's to approve**; implementers reproduce it verbatim
+  and flag anything they would change instead of changing it.
+- API keys never go into files, logs or fixtures; the config stores key *names* only, and the
+  resolution order is `TIPSY_KEY_<NAME>` first, then the OS credential store.
+- Plans live in `docs/superpowers/plans/`, the spec in `docs/superpowers/specs/`, and the research
+  notes a plan quotes from live in `.superpowers/sdd/<plan-stem>/` beside its ledger.
