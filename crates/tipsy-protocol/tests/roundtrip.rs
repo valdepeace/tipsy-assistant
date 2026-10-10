@@ -53,6 +53,18 @@ fn json_shape_is_tagged_snake_case() {
     assert_eq!(json, r#"{"type":"listen_start"}"#);
 }
 
+/// `Capability` is the contract Plan 2B's `Command::TestProvider` and `Event::TestResult` consume,
+/// so its serde spelling is pinned here rather than left to plan 2B's own tests.
+#[test]
+fn capability_serde_spelling_is_snake_case() {
+    for (capability, json) in
+        [(Capability::Chat, "chat"), (Capability::Speech, "speech"), (Capability::Transcribe, "transcribe")]
+    {
+        assert_eq!(serde_json::to_string(&capability).unwrap(), format!("\"{json}\""));
+        assert_eq!(serde_json::from_str::<Capability>(&format!("\"{json}\"")).unwrap(), capability);
+    }
+}
+
 #[test]
 fn frames_roundtrip() {
     let mic = Frame::Mic(vec![0, 1, -1, i16::MAX, i16::MIN]);

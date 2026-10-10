@@ -63,6 +63,32 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// Which connector the configuration screen's "Test" button is asking about (spec §9). Plan 2B
+/// Task 2 puts it on the wire (`Command::TestProvider`, `Event::TestResult`); Plan 2A Task 5 uses
+/// it first, to name a capability a connector does not offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    Chat,
+    Speech,
+    Transcribe,
+}
+
+/// The capability as a human reads it, for a message such as
+/// "transcription is not supported by the `Gemini` connector". The serde spelling above stays
+/// `transcribe` because it is the wire contract; this is only ever shown to a person. It lives
+/// here because the orphan rule forbids a `Display` impl for a `tipsy-protocol` type anywhere
+/// else, and the enum's own formatting belongs beside the enum.
+impl std::fmt::Display for Capability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Capability::Chat => "chat",
+            Capability::Speech => "speech",
+            Capability::Transcribe => "transcription",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaView {
     pub id: String,
