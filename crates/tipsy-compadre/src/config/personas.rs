@@ -55,9 +55,7 @@ fn compae() -> Persona {
             "No añadas palabras nuevas."
         )
         .into(),
-        // One sentence on purpose: the greeting is spoken first, and a sentence end in the middle
-        // would make the session ask the speech provider twice for the same breath.
-        greeting: "Ozú, quillo, ya estoy aquí ya, ¿qué querías, mi arma, que sea cortito?".into(),
+        greeting: "Ozú, quillo... ya estoy aquí, ya. ¿Qué querías, mi arma? Que sea cortito, ¿eh?".into(),
         wake_word: "oye compae".into(),
         voices: BTreeMap::from([
             ("gemini".to_string(), "Charon".to_string()),
