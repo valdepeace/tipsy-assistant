@@ -7,6 +7,7 @@
 use std::f64::consts::TAU;
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint::{Length, Min, Percentage};
 use ratatui::layout::{Alignment, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -15,9 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Circle, Context, Line as CLine, Points};
 use ratatui::widgets::{
     Axis, Block, BorderType, Chart, Dataset, Gauge, GraphType, LegendPosition, List, ListItem, ListState, Paragraph,
-    Sparkline,
+    Sparkline, Widget,
 };
-use tipsy_protocol::{AssistantState, UiLanguage};
+use tipsy_protocol::{AssistantState, ListeningMode, UiLanguage};
 
 use crate::state::{KeyInput, LogEntry, Tab, UiState, Who};
 use crate::strings::Strings;
@@ -53,31 +54,63 @@ pub struct Hit {
 
 pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) -> Vec<Hit> {
     let [header, body, input, help] = Layout::vertical([Length(1), Min(10), Length(3), Length(1)]).areas(frame.area());
-    let [left, center, right] = Layout::horizontal([Percentage(LEFT_PERCENT), Min(30), Percentage(26)]).areas(body);
-
-    draw_header(frame, state, header, title);
-
-    let [clock_area, log] = Layout::vertical([Length(5), Min(3)]).areas(left);
-    draw_clock(frame, state, clock, clock_area);
-    let hits = draw_left(frame, state, log);
-
-    let [rings, voice] = Layout::vertical([Min(8), Length(6)]).areas(center);
-    draw_rings(frame, state, rings);
-    draw_voice(frame, state, voice);
-
-    draw_system(frame, state, right);
-    draw_input(frame, state, input);
-    if !help.is_empty() {
-        frame.render_widget(Line::from(state.strings().help).fg(DIM), help);
-    }
-
+    // The screen is full screen (spec §9): while it is up the HUD is not drawn at all, and its
+    // clickable rows are not reported either — a click on the screen may not clear the conversation.
+    let Some(form) = &state.config_form else {
+        let [left, center, right] = Layout::horizontal([Percentage(LEFT_PERCENT), Min(30), Percentage(26)]).areas(body);
+        let mut hits = draw_header(frame, state, header, title);
+        let [clock_area, log] = Layout::vertical([Length(5), Min(3)]).areas(left);
+        draw_clock(frame, state, clock, clock_area);
+        hits.extend(draw_left(frame, state, log));
+        let [rings, voice] = Layout::vertical([Min(8), Length(6)]).areas(center);
+        draw_rings(frame, state, rings);
+        draw_voice(frame, state, voice);
+        draw_system(frame, state, right);
+        draw_input(frame, state, input);
+        if !help.is_empty() {
+            frame.render_widget(Line::from(state.strings().help).fg(DIM), help);
+        }
+        return hits;
+    };
+    let mut hits = draw_header(frame, state, header, title);
+    let _ = clock;
+    hits.extend(crate::render_config::draw_form(frame, form, state.strings(), state.elapsed_ms));
     hits
 }
 
-/// Badge with the profile's title, then whatever the assistant is doing.
-fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str) {
+/// Badge with the profile's title, the listening-mode indicator, whatever the assistant is doing,
+/// and the ⚙ button — whose click is reported as a [`Hit`], like the HUD's other titles.
+///
+/// The header's own two controls come first in the order `draw` reports, both answering `F9`: the
+/// mode indicator whose area is the word itself, then the gear at the right edge. A frame too small
+/// to draw either reports no `Hit` for it rather than a rectangle nobody can see.
+fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str) -> Vec<Hit> {
+    let (line, mode, gear) = header(state, area, title);
+    frame.render_widget(line, area);
+    [mode, gear]
+        .into_iter()
+        .filter(|hit| !hit.area.is_empty() && area.intersection(hit.area) == hit.area)
+        .collect()
+}
+
+/// One header row: the line to draw, and the two clickable areas on it.
+///
+/// The row is built to exactly `area`'s width on purpose. `ratatui` lays a line's spans out one
+/// after another and does not report where they landed, so the only way for the mode indicator and
+/// the gear to sit in the columns their [`Hit`]s name is for everything in front of them to be
+/// exactly as wide as the room they were given.
+///
+/// The mode sits immediately before the gear, at the right edge, so the gear is the last thing read
+/// on the row, and the status — the one span whose length the user's own data decides, a `⚠` notice
+/// or a failure — is cut to whatever is left between the badge and the mode.
+fn header(state: &UiState, area: Rect, title: &str) -> (Line<'static>, Hit, Hit) {
     let strings = state.strings();
     let spin = SPINNER[(state.elapsed_ms / 150) as usize % SPINNER.len()];
+    let mode = match state.listening_mode {
+        ListeningMode::Push => strings.mode_push,
+        ListeningMode::Auto => strings.mode_auto,
+        ListeningMode::HandsFree => strings.mode_hands_free,
+    };
     let status: Span = if state.mic_open {
         Span::from(strings.listening).fg(Color::Red).bold()
     } else if state.busy() {
@@ -93,7 +126,88 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str) {
         Span::from(format!("● {}", strings.ready)).fg(Color::Green)
     };
     let badge = Span::from(format!(" ◉ {} ", title.to_uppercase())).fg(Color::Black).bg(CYAN).bold();
-    frame.render_widget(Line::from(vec![badge, Span::from("  "), status]), area);
+    // The mode is a word (§9: `push`, `auto`, `hands free`) and the microphone is the colour: red
+    // while it is open, whatever the mode.
+    let mode_span = Span::from(format!(" {mode} ")).fg(if state.mic_open { Color::Red } else { DIM });
+    let gear = Span::from(" ⚙ ").fg(GOLD).bold();
+    let gap = Span::from("  ");
+    // Every width below is the width the span is *drawn* in, which is not what `Span::width`
+    // reports for every symbol: it reads the modern UAX #11 tables and the renderer advances by
+    // older ones on `◉`, `⚙` and `·`. The badge carries `◉`, and the title is the profile's own, set
+    // in the profile's own variety, so the two tables differ by the profile's name.
+    let gear_w = drawn_width(&gear);
+    let mode_w = drawn_width(&mode_span);
+    // A row that cannot hold both controls puts them at its first column rather than letting the two
+    // rectangles overlap or sit off the frame; the clipping below then drops whichever does not fit,
+    // which is what a terminal too small to draw them reports.
+    let (mode_w, gear_w) = if mode_w + gear_w <= area.width as usize { (mode_w, gear_w) } else { (0, 0) };
+    let gear_x = area.right().saturating_sub(gear_w as u16).max(area.x);
+    let mode_x = gear_x.saturating_sub(mode_w as u16).max(area.x);
+    let max_x = area.right();
+    let mode_hit = Hit {
+        area: Rect::new(mode_x, area.y, gear_x.saturating_sub(mode_x).min(max_x.saturating_sub(mode_x)), 1),
+        key: KeyInput::F(9),
+    };
+    let gear_hit = Hit {
+        area: Rect::new(gear_x, area.y, gear_w.min(max_x.saturating_sub(gear_x) as usize) as u16, 1),
+        key: KeyInput::F(9),
+    };
+    // The status keeps whatever is left between the badge and the mode, and never more.
+    let used = drawn_width(&badge) + drawn_width(&gap);
+    let status_w = usize::from(mode_x.saturating_sub(area.x)).saturating_sub(used);
+    let status = cut_to(status.content.as_ref(), status.style, status_w);
+    let padding = usize::from(mode_x.saturating_sub(area.x)).saturating_sub(used + drawn_width(&status));
+    let line = Line::from(vec![badge, gap, status, Span::raw(" ".repeat(padding)), mode_span, gear]);
+    (line, mode_hit, gear_hit)
+}
+
+/// The column `drawn_width` reads its answer from. A private-use character: no string table, no
+/// profile and no event can put it on the header row, so a cell holding it is the marker.
+const MARKER: &str = "\u{E000}";
+
+/// The columns a span occupies when it is drawn, which is what every position in the header is
+/// measured with: the width of the cells it writes.
+///
+/// A span is laid out by one width table and drawn by another, and the two disagree on `◉`, `⚙` and
+/// `·` — each one column to [`Span::width`] and two as drawn. The span is therefore measured by
+/// drawing it and reading the column the span *after* it lands in: its own trailing space is part of
+/// its width and no symbol marks the end of it, so a marker is the only honest ruler.
+///
+/// The scratch row is wide enough for `Span::width` plus room for the two tables to disagree. A span
+/// past that stops at the row's edge instead of growing it without bound, and the header is a
+/// handful of spans on one row.
+fn drawn_width(span: &Span) -> usize {
+    let room = span.width().saturating_add(4);
+    if room == 0 {
+        return 0;
+    }
+    let area = Rect::new(0, 0, u16::try_from(room).unwrap_or(u16::MAX), 1);
+    let mut scratch = Buffer::empty(area);
+    Line::from(vec![span.clone(), Span::from(MARKER)]).render(area, &mut scratch);
+    for x in 0..area.width {
+        if scratch[(x, 0)].symbol() == MARKER {
+            return x as usize;
+        }
+    }
+    // The span filled the whole scratch row: it is at least as wide as the row it was given.
+    room
+}
+
+/// `text` cut to `width` columns in the width the row is drawn in, keeping `style`. Cutting by
+/// [`drawn_width`] is what keeps a cut status exactly as wide as the room its own rectangle promised
+/// it.
+fn cut_to(text: &str, style: Style, width: usize) -> Span<'static> {
+    let mut cut = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = drawn_width(&Span::from(c.to_string()));
+        if used + w > width {
+            break;
+        }
+        used += w;
+        cut.push(c);
+    }
+    Span::styled(cut, style)
 }
 
 fn draw_clock(frame: &mut Frame, state: &UiState, clock: &ClockView, area: Rect) {

@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 
 use tipsy_protocol::{AssistantState, Command, Event, ListeningMode, ProfileView, UiLanguage};
 
+use crate::config_form::{ConfigEffect, ConfigForm};
 use crate::strings::{strings, Strings};
 
 const NOTICE_MS: u64 = 3000;
@@ -69,6 +70,10 @@ pub enum UiAction {
     Quit,
     /// Replay the audio of the last completed reply (handled by the client, which kept it).
     Replay(usize),
+    /// Open the configuration screen: the client loads `config.toml`, converts it to a
+    /// [`ConfigForm`] and calls [`UiState::show_config_form`]. The HUD holds a default form until
+    /// then, so the screen is usable the moment the key is pressed.
+    OpenConfig,
 }
 
 pub struct UiState {
@@ -94,6 +99,9 @@ pub struct UiState {
     pub mic_levels: Vec<f32>,
     pub voice_envelope: Vec<f32>,
     pub voice_pos_ms: u64,
+    /// The configuration screen's form while it is open: `None` is the closed HUD. Kept as plain
+    /// values (Task 3) so this crate still knows nothing about `config.toml`.
+    pub config_form: Option<ConfigForm>,
 }
 
 impl Default for UiState {
@@ -126,6 +134,7 @@ impl UiState {
             mic_levels: Vec::new(),
             voice_envelope: Vec::new(),
             voice_pos_ms: 0,
+            config_form: None,
         }
     }
 
@@ -135,6 +144,46 @@ impl UiState {
 
     pub fn notify(&mut self, text: impl Into<String>) {
         self.notice = Some((text.into(), NOTICE_MS));
+    }
+
+    /// Opens the configuration screen, or closes it if it is already open.
+    fn toggle_config_form(&mut self) -> Vec<UiAction> {
+        match self.config_form.take() {
+            // Closing leaves the HUD exactly as it was: the screen never touched the log, the input
+            // or the microphone, and the half-typed edit goes with the form.
+            Some(_) => Vec::new(),
+            None => {
+                self.config_form = Some(ConfigForm::default());
+                vec![UiAction::OpenConfig]
+            }
+        }
+    }
+
+    /// Puts the loaded configuration on screen: the client's answer to [`UiAction::OpenConfig`].
+    pub fn show_config_form(&mut self, form: ConfigForm) {
+        self.config_form = Some(form);
+    }
+
+    /// The screen's own keys: the form translates and reduces them, and the effects it raises are
+    /// what the client has to do about it.
+    fn config_key(&mut self, key: KeyInput) -> Vec<UiAction> {
+        let Some(form) = self.config_form.as_mut() else {
+            return Vec::new();
+        };
+        let outcome = form.key(key);
+        let actions = Vec::new();
+        for effect in outcome.effects {
+            match effect {
+                ConfigEffect::None => {}
+                // The client side of these three lands in Task 6 (save and regenerate) and Task 7
+                // (the probe). Named with the screen's own words so the key is honest today, and set
+                // as a notice rather than swallowed. `Capability` already speaks for itself.
+                ConfigEffect::Save => self.notify(self.strings().cfg_save),
+                ConfigEffect::Test(capability) => self.notify(capability.to_string()),
+                ConfigEffect::RegenerateToken => self.notify(self.strings().cfg_token),
+            }
+        }
+        actions
     }
 
     /// The assistant entry the next reply belongs to: the last one that has not been said yet.
@@ -239,6 +288,18 @@ impl UiState {
     }
 
     pub fn on_key(&mut self, key: KeyInput) -> Vec<UiAction> {
+        if self.config_form.is_some() {
+            // F9 and Esc are the screen's door: everything else — Tab, Enter, characters, F4 —
+            // belongs to the form while it is on screen.
+            return if matches!(key, KeyInput::Esc | KeyInput::F(9)) {
+                self.toggle_config_form()
+            } else {
+                self.config_key(key)
+            };
+        }
+        if key == KeyInput::F(9) {
+            return self.toggle_config_form();
+        }
         match key {
             KeyInput::Char(c) => {
                 self.input.push(c);
@@ -616,6 +677,91 @@ mod tests {
         assert_eq!(s.log[1].error.as_deref(), Some("bad key"));
         // The failure itself is still reported, in the notice too.
         assert_eq!(s.notice.as_ref().map(|n| n.0.as_str()), Some("bad key"));
+    }
+
+    #[test]
+    fn f9_opens_the_screen_on_a_default_form_and_closes_it_again() {
+        let mut s = UiState::new();
+        assert!(s.config_form.is_none());
+        // Opening is the one key that asks the client for anything: it owns `config.toml`, and the
+        // request is the whole of what the HUD can do about it (the test below is what pins it).
+        assert_eq!(s.on_key(KeyInput::F(9)), vec![UiAction::OpenConfig]);
+        let form = s.config_form.as_ref().expect("the screen is open");
+        assert_eq!(form.tab, crate::config_form::ConfigTab::Providers);
+        assert_eq!(form.field, 0);
+        assert!(form.editing.is_none());
+        assert!(!form.dirty);
+
+        // While it is open, nothing reaches the log or the microphone.
+        s.on_key(KeyInput::Tab);
+        s.on_key(KeyInput::Char('x'));
+        s.on_key(KeyInput::Enter);
+        assert!(!s.mic_open && s.input.is_empty() && s.log.is_empty(), "the screen has the keyboard");
+
+        // Esc closes it instead of quitting, and F9 does the same. Closing asks for nothing: the
+        // form the HUD holds is the default one, and re-reading the file is not what Esc means.
+        assert!(s.on_key(KeyInput::Esc).is_empty());
+        assert!(s.config_form.is_none());
+        assert_eq!(s.on_key(KeyInput::Esc), vec![UiAction::Quit], "and then Esc is the HUD's again");
+        s.on_key(KeyInput::F(9));
+        s.on_key(KeyInput::F(9));
+        assert!(s.config_form.is_none(), "F9 is not a one-way door");
+    }
+
+    #[test]
+    fn opening_the_screen_asks_the_client_for_the_configuration() {
+        let mut s = UiState::new();
+        // The client owns the file, so the only thing the HUD can do is ask for the conversion. The
+        // action is the whole request; the form above is what is shown until it answers.
+        assert_eq!(s.on_key(KeyInput::F(9)), vec![UiAction::OpenConfig]);
+    }
+
+    #[test]
+    fn a_screen_effect_the_client_cannot_honour_yet_says_so() {
+        let mut s = UiState::new();
+        s.apply(&welcome(UiLanguage::En));
+        s.on_key(KeyInput::F(9));
+        // Ctrl+S reaches the form as the control character no text row wants.
+        s.on_key(KeyInput::Char('\u{13}'));
+        assert_eq!(
+            s.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Save"),
+            "a key that is wired but not implemented reports the effect instead of doing nothing"
+        );
+        assert!(s.config_form.as_ref().is_some_and(|f| f.dirty), "and the form knows there is something to save");
+    }
+
+    #[test]
+    fn a_second_welcome_does_not_reset_the_form_the_user_is_filling_in() {
+        let mut s = UiState::new();
+        s.apply(&welcome(UiLanguage::Es));
+        // Work already done on the HUD, and work in progress in the screen: the two things a fresh
+        // session would drop.
+        type_text(&mut s, "a medias");
+        s.on_key(KeyInput::Enter);
+        assert_eq!(s.log.len(), 2);
+        type_text(&mut s, "sin enviar");
+        s.on_key(KeyInput::F(9));
+        s.config_form.as_mut().unwrap().profiles[0].name = "Otro Compae".into();
+
+        // Task 6 makes `SetProfile` and `SetListeningMode` re-announce the session. A reducer that
+        // treated the second `Welcome` as a fresh one would drop everything the user has typed.
+        s.apply(&Event::Welcome {
+            session_id: 1,
+            profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+            ui_language: UiLanguage::Es,
+            listening_mode: ListeningMode::Auto,
+            web_bundle: false,
+        });
+
+        assert_eq!(s.listening_mode, ListeningMode::Auto, "the re-announcement still says what the mode is");
+        assert_eq!(
+            s.config_form.as_ref().map(|f| f.profiles[0].name.as_str()),
+            Some("Otro Compae"),
+            "the half-edited form is the user's work, and it survives the announcement"
+        );
+        assert_eq!(s.log.len(), 2, "and so does the log behind the screen");
+        assert_eq!(s.input, "sin enviar", "and the question box");
     }
 
     #[test]

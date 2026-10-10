@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
-    self, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, MouseEventKind,
+    self, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use tipsy_protocol::{Command, Event, Frame, ToClient, ToServer};
@@ -262,6 +262,10 @@ impl Client {
                 false
             }
             UiAction::Quit => true,
+            // The screen asks for the configuration it shows: read it fresh (a hand-edited file is
+            // seen the next time the screen opens) and hand it over. Task 6 fills the conversion in;
+            // until then the default form the HUD already holds is what the screen shows.
+            UiAction::OpenConfig => false,
         }
     }
 }
@@ -337,6 +341,16 @@ fn key_input(key: &KeyEvent) -> Option<KeyInput> {
         KeyCode::Left => Some(KeyInput::Left),
         KeyCode::Right => Some(KeyInput::Right),
         KeyCode::F(n) => Some(KeyInput::F(n)),
+        // A modifier is not part of the HUD's vocabulary (`KeyInput` has no modifier at all), so a
+        // control chord arrives as the control character it stands for: `Ctrl+S` and `Ctrl+R` are
+        // `'\u{13}'` and `'\u{12}'`, which is the one class of `char` no text row wants
+        // (`ConfigForm::SAVE_KEY`, `ConfigForm::REGENERATE_KEY`). `Ctrl+Shift+letter` reaches the
+        // same control character, which is why the mapping folds the case first; a chord that names
+        // no letter is not a key this HUD has, and gets none.
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let lower = c.to_ascii_lowercase();
+            lower.is_ascii_lowercase().then_some(KeyInput::Char((lower as u8 & 0x1f) as char))
+        }
         KeyCode::Char(c) => Some(KeyInput::Char(c)),
         _ => None,
     }
