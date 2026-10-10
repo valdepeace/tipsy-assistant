@@ -108,6 +108,9 @@ pub enum Command {
     Reset,
     SetProfile { id: String },
     SetListeningMode { mode: ListeningMode },
+    /// The configuration screen's "Test" button: one minimal call against the connector for this
+    /// capability. Plan 2B Task 7 runs the probe and answers with `Event::TestResult`.
+    TestProvider { capability: Capability },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +132,10 @@ pub enum Event {
     Done { first_audio_ms: Option<u64>, total_ms: u64 },
     Stats { cpu: f32, ram: f32, net_in: f64, net_out: f64 },
     Error { code: ErrorCode, message: String, recoverable: bool },
+    /// The answer to `Command::TestProvider`. `message` is never empty: the provider's own words
+    /// on failure, a short human summary on success. `ok` is `true` only when a real minimal call
+    /// answered — never for an error body.
+    TestResult { capability: Capability, ok: bool, latency_ms: u64, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -227,6 +227,10 @@ impl Session {
                 self.listening_mode = mode;
             }
             Command::Hello { .. } => {}
+            // The Test probe asks a provider a question, not the session: Plan 2B Task 7 runs it in
+            // the native client and Plan 3's server answers it over the wire. Accepted and ignored,
+            // so the match stays exhaustive.
+            Command::TestProvider { .. } => {}
         }
     }
 

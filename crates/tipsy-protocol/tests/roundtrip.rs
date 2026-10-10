@@ -53,6 +53,52 @@ fn json_shape_is_tagged_snake_case() {
     assert_eq!(json, r#"{"type":"listen_start"}"#);
 }
 
+#[test]
+fn test_provider_and_test_result_roundtrip() {
+    for capability in [Capability::Chat, Capability::Speech, Capability::Transcribe] {
+        roundtrip_command(Command::TestProvider { capability });
+    }
+    // A success with a measured latency and the short summary of what answered.
+    roundtrip_event(Event::TestResult {
+        capability: Capability::Chat,
+        ok: true,
+        latency_ms: 1234,
+        message: "1.2 s, 412 bytes".into(),
+    });
+    // A refusal with no latency at all: `ok = false` and the provider's own words, which may not
+    // be ASCII.
+    roundtrip_event(Event::TestResult {
+        capability: Capability::Transcribe,
+        ok: false,
+        latency_ms: 0,
+        message: "no key named openrouter — set TIPSY_KEY_OPENROUTER".into(),
+    });
+}
+
+#[test]
+fn test_pair_json_shape_is_tagged_snake_case() {
+    for (capability, json) in
+        [(Capability::Chat, "chat"), (Capability::Speech, "speech"), (Capability::Transcribe, "transcribe")]
+    {
+        assert_eq!(serde_json::to_string(&capability).unwrap(), format!("\"{json}\""));
+    }
+
+    let json = serde_json::to_string(&Command::TestProvider { capability: Capability::Speech }).unwrap();
+    assert_eq!(json, r#"{"type":"test_provider","capability":"speech"}"#);
+
+    let json = serde_json::to_string(&Event::TestResult {
+        capability: Capability::Transcribe,
+        ok: false,
+        latency_ms: 0,
+        message: "no key named openrouter".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"test_result","capability":"transcribe","ok":false,"latency_ms":0,"message":"no key named openrouter"}"#
+    );
+}
+
 /// `Capability` is the contract Plan 2B's `Command::TestProvider` and `Event::TestResult` consume,
 /// so its serde spelling is pinned here rather than left to plan 2B's own tests.
 #[test]
