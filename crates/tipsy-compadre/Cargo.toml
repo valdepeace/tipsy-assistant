@@ -1,0 +1,33 @@
+[package]
+name = "tipsy-compadre"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A tipsy, lazy, joking voice assistant for software developers"
+
+[dependencies]
+tipsy-protocol.workspace = true
+tipsy-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ratatui = { version = "0.30" }
+tokio = { version = "1.53", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+reqwest = { version = "0.13", features = ["json", "stream", "multipart"] }
+toml = "1.1"
+dirs = "7"
+keyring = "4.2"
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "pcm"] }
+hound = "3.5"
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
+cpal = "0.18"
+sysinfo = "0.39"
+chrono = "0.4"
+clap = { version = "4.6", features = ["derive"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3.27"
