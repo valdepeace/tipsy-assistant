@@ -209,8 +209,11 @@ async fn welcome_then_greeting() {
     next_matching(&mut rx, is_speech, 500).await;
     assert_eq!(chat.calls(), 0, "the greeting must not ask the chat provider");
     let spoken = speech.requests.lock().unwrap().clone();
-    assert_eq!(spoken.len(), 1, "the greeting is the only thing spoken so far: {spoken:#?}");
-    assert_eq!(spoken[0].text, config.active().greeting);
+    // The greeting is split into sentences, so the provider may be asked more than once;
+    // what matters is that the whole greeting is spoken and the chat provider is untouched.
+    let spoken_text = spoken.iter().map(|r| r.text.clone()).collect::<Vec<_>>().join(" ");
+    let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(normalize(&spoken_text), normalize(&config.active().greeting));
 }
 
 #[tokio::test]
