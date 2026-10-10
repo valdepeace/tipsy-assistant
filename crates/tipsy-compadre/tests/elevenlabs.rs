@@ -294,6 +294,41 @@ async fn speech_rejects_json_arrays_boms_and_a_json_content_type() {
     }
 }
 
+/// A `GET /v1/voices` that fails must be remembered for the turn: several sentences are
+/// synthesised in parallel (up to four), and without a negative cache each one re-lists the
+/// voices behind the same mutex, turning one flaky call into four extra requests and a brain
+/// timeout instead of the list's own error. The count is the assertion: exactly one request.
+#[tokio::test]
+async fn speech_failing_voice_list_is_fetched_once_for_parallel_sentences() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/voices"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(r#"{"detail":[{"msg":"voices are unwell"}]}"#))
+        .mount(&server)
+        .await;
+
+    let provider = provider(&server);
+    let (a, b, c) = tokio::join!(
+        provider.synthesize(request(None)),
+        provider.synthesize(request(None)),
+        provider.synthesize(request(None))
+    );
+
+    for (label, result) in [("first", a), ("second", b), ("third", c)] {
+        let err = result.expect_err(&format!("{label} sentence must report the list's failure"));
+        assert!(
+            matches!(&err, ProviderError::BadResponse(m) if m.contains("voices are unwell")),
+            "{label} sentence produced {err:?}"
+        );
+    }
+    assert_eq!(
+        count(&server, "/v1/voices").await,
+        1,
+        "a failed list must be shared by the turn, not retried per sentence: {:?}",
+        paths(&requests(&server).await)
+    );
+}
+
 /// Review Focus 2 for this connector: the audio is raw bytes and `reqwest` hands `serde_json`
 /// whole bodies, so no parse can be split mid-character here — the UTF-8 risk lives in the
 /// request body and in the preview the connector builds from a body it cannot use. Both are
