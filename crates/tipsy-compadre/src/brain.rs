@@ -13,10 +13,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audio::pcm::{f32_to_i16, Pcm};
 use crate::providers::{
-    ChatMessage, ChatRequest, ProviderError, Providers, SpeechProvider, SpeechRequest, TextStream,
+    ChatMessage, ChatRequest, ProviderError, ProviderSlot, Providers, SpeechProvider, SpeechRequest, TextStream,
 };
 use crate::text::{clean_for_speech, is_speakable, SentenceSplitter};
 
+#[derive(Clone)]
 pub struct BrainConfig {
     pub chat_timeout: Duration,
     pub speech_timeout: Duration,
@@ -49,13 +50,13 @@ pub enum TurnInput {
 }
 
 pub struct Brain {
-    providers: Providers,
+    providers: ProviderSlot,
     profile: TurnProfile,
     config: BrainConfig,
 }
 
 impl Brain {
-    pub fn new(providers: Providers, profile: TurnProfile, config: BrainConfig) -> Self {
+    pub fn new(providers: ProviderSlot, profile: TurnProfile, config: BrainConfig) -> Self {
         Self { providers, profile, config }
     }
 
@@ -67,6 +68,9 @@ impl Brain {
         cancel: CancellationToken,
     ) {
         let started = Instant::now();
+        // The stack this turn uses, read once: a save that rebuilds the connectors takes effect on
+        // the *next* turn, and never halfway through this one.
+        let providers = self.providers.current();
         let (ask, said) = match input {
             TurnInput::Ask(text) => {
                 send(&out, status(AssistantState::Thinking));
@@ -74,7 +78,7 @@ impl Brain {
             }
             TurnInput::Utterance(pcm) => {
                 send(&out, status(AssistantState::Transcribing));
-                match self.transcribe(pcm, &cancel).await {
+                match self.transcribe(&providers, pcm, &cancel).await {
                     Transcribed::Text(text) if text.trim().is_empty() => {
                         error(&out, ErrorCode::NothingHeard, "nothing was heard", true);
                         send(&out, status(AssistantState::Idle));
@@ -97,7 +101,7 @@ impl Brain {
 
         match (ask, said) {
             (Some(ask), _) => {
-                let turn = self.answer(&ask, history, &out, &cancel, started).await;
+                let turn = self.answer(&providers, &ask, history, &out, &cancel, started).await;
                 if turn.aborted {
                     // A cancelled reply keeps what was already spoken; a failed one keeps nothing.
                     if !turn.text.is_empty() {
@@ -115,7 +119,7 @@ impl Brain {
                     send(&out, status(AssistantState::Idle));
                 }
             }
-            (None, Some(text)) => self.say(&text, &out, &cancel, started).await,
+            (None, Some(text)) => self.say(&providers, &text, &out, &cancel, started).await,
             (None, None) => send(&out, status(AssistantState::Idle)),
         }
     }
@@ -124,6 +128,7 @@ impl Brain {
     /// wrote them.
     async fn answer(
         &self,
+        providers: &Providers,
         ask: &str,
         history: &[ChatMessage],
         out: &UnboundedSender<ToClient>,
@@ -131,21 +136,28 @@ impl Brain {
         started: Instant,
     ) -> Turn {
         let messages = self.messages(ask, history);
-        let stream = match self.chat_with_retry(ChatRequest { messages }, out, cancel).await {
+        let stream = match self.chat_with_retry(providers, ChatRequest { messages }, out, cancel).await {
             Ok(stream) => stream,
             Err(failure) => {
                 report(out, &failure);
                 return Turn { aborted: true, text: String::new(), spoken: Vec::new(), first_audio_ms: None };
             }
         };
-        self.speak(stream, out, cancel, started).await
+        self.speak(providers, stream, out, cancel, started).await
     }
 
     /// `Say`: the same sentence pipeline over literal text instead of a chat stream.
-    async fn say(&self, text: &str, out: &UnboundedSender<ToClient>, cancel: &CancellationToken, started: Instant) {
+    async fn say(
+        &self,
+        providers: &Providers,
+        text: &str,
+        out: &UnboundedSender<ToClient>,
+        cancel: &CancellationToken,
+        started: Instant,
+    ) {
         let spoken_text = text.to_string();
         let stream: TextStream = Box::pin(futures::stream::once(async move { Ok(spoken_text) }));
-        let turn = self.speak(stream, out, cancel, started).await;
+        let turn = self.speak(providers, stream, out, cancel, started).await;
         if turn.aborted {
             send(out, status(AssistantState::Idle));
             return;
@@ -162,6 +174,7 @@ impl Brain {
     /// sentence order.
     async fn speak(
         &self,
+        providers: &Providers,
         stream: TextStream,
         out: &UnboundedSender<ToClient>,
         cancel: &CancellationToken,
@@ -172,8 +185,8 @@ impl Brain {
             text: String::new(),
             splitter: SentenceSplitter::new(),
             speech: Some(Synthesis {
-                provider: Arc::clone(&self.providers.speech),
-                permits: Arc::new(Semaphore::new(self.providers.speech.max_parallel())),
+                provider: Arc::clone(&providers.speech),
+                permits: Arc::new(Semaphore::new(providers.speech.max_parallel())),
                 timeout: self.config.speech_timeout,
                 request: SpeechRequest {
                     text: String::new(),
@@ -266,11 +279,12 @@ impl Brain {
     /// Calls the chat provider once, retrying a rate-limited request once after the backoff.
     async fn chat_with_retry(
         &self,
+        providers: &Providers,
         request: ChatRequest,
         out: &UnboundedSender<ToClient>,
         cancel: &CancellationToken,
     ) -> Result<TextStream, ProviderError> {
-        match self.chat(request.clone(), cancel).await {
+        match self.chat(providers, request.clone(), cancel).await {
             Err(ProviderError::RateLimited(message)) => {
                 error(out, ErrorCode::RateLimited, &message, true);
                 tokio::select! {
@@ -278,18 +292,23 @@ impl Brain {
                     () = cancel.cancelled() => return Err(ProviderError::Cancelled),
                     () = tokio::time::sleep(self.config.retry_backoff) => {}
                 }
-                self.chat(request, cancel).await
+                self.chat(providers, request, cancel).await
             }
             other => other,
         }
     }
 
     /// One chat request, bounded by `chat_timeout` and dropped the moment the turn is cancelled.
-    async fn chat(&self, request: ChatRequest, cancel: &CancellationToken) -> Result<TextStream, ProviderError> {
+    async fn chat(
+        &self,
+        providers: &Providers,
+        request: ChatRequest,
+        cancel: &CancellationToken,
+    ) -> Result<TextStream, ProviderError> {
         tokio::select! {
             biased;
             () = cancel.cancelled() => Err(ProviderError::Cancelled),
-            result = tokio::time::timeout(self.config.chat_timeout, self.providers.chat.stream(request)) => {
+            result = tokio::time::timeout(self.config.chat_timeout, providers.chat.stream(request)) => {
                 match result {
                     Ok(stream) => stream,
                     Err(_) => Err(ProviderError::Timeout),
@@ -299,9 +318,9 @@ impl Brain {
     }
 
     /// Transcription, bounded by `transcribe_timeout` and using the profile's language.
-    async fn transcribe(&self, pcm: Pcm, cancel: &CancellationToken) -> Transcribed {
+    async fn transcribe(&self, providers: &Providers, pcm: Pcm, cancel: &CancellationToken) -> Transcribed {
         let language = self.profile.language.as_str();
-        let call = self.providers.transcribe.transcribe(pcm, language);
+        let call = providers.transcribe.transcribe(pcm, language);
         tokio::select! {
             biased;
             () = cancel.cancelled() => Transcribed::Failed(ProviderError::Cancelled),

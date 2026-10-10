@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use tipsy_protocol::{AssistantState, Command, Event, ListeningMode, ProfileView, UiLanguage};
 
-use crate::config_form::{ConfigEffect, ConfigForm};
+use crate::config_form::{ConfigAction, ConfigEffect, ConfigForm};
 use crate::strings::{strings, Strings};
 
 const NOTICE_MS: u64 = 3000;
@@ -74,6 +74,11 @@ pub enum UiAction {
     /// [`ConfigForm`] and calls [`UiState::show_config_form`]. The HUD holds a default form until
     /// then, so the screen is usable the moment the key is pressed.
     OpenConfig,
+    /// One action the screen's form raised a *native* effect for: the client applies it to the form
+    /// it holds and performs the effect — a save writes the file, a Test probes a connector, a
+    /// Regenerate mints a token. Applying it twice is harmless because those three actions only set
+    /// the form dirty, which is what the form has already done here.
+    Config(ConfigAction),
 }
 
 pub struct UiState {
@@ -164,23 +169,26 @@ impl UiState {
         self.config_form = Some(form);
     }
 
-    /// The screen's own keys: the form translates and reduces them, and the effects it raises are
-    /// what the client has to do about it.
+    /// The screen's own keys: the form translates and reduces them — the buffer, the focus and the
+    /// rows are the form's — and the effects it raises are what the client has to do about it.
+    ///
+    /// Only the three effects with a native side are reported as actions: the file, the connector
+    /// probe and the token generator all live in the client, which is the only thing that may touch
+    /// either. Everything else the key did is already in the form.
     fn config_key(&mut self, key: KeyInput) -> Vec<UiAction> {
         let Some(form) = self.config_form.as_mut() else {
             return Vec::new();
         };
         let outcome = form.key(key);
-        let actions = Vec::new();
+        let mut actions = Vec::new();
         for effect in outcome.effects {
             match effect {
                 ConfigEffect::None => {}
-                // The client side of these three lands in Task 6 (save and regenerate) and Task 7
-                // (the probe). Named with the screen's own words so the key is honest today, and set
-                // as a notice rather than swallowed. `Capability` already speaks for itself.
-                ConfigEffect::Save => self.notify(self.strings().cfg_save),
-                ConfigEffect::Test(capability) => self.notify(capability.to_string()),
-                ConfigEffect::RegenerateToken => self.notify(self.strings().cfg_token),
+                ConfigEffect::Save => actions.push(UiAction::Config(ConfigAction::Save)),
+                ConfigEffect::Test(_) => actions.push(UiAction::Config(ConfigAction::Test)),
+                ConfigEffect::RegenerateToken => {
+                    actions.push(UiAction::Config(ConfigAction::RegenerateToken))
+                }
             }
         }
         actions
@@ -717,18 +725,33 @@ mod tests {
     }
 
     #[test]
-    fn a_screen_effect_the_client_cannot_honour_yet_says_so() {
+    fn a_screen_effect_the_client_has_to_perform_becomes_an_action() {
         let mut s = UiState::new();
         s.apply(&welcome(UiLanguage::En));
         s.on_key(KeyInput::F(9));
-        // Ctrl+S reaches the form as the control character no text row wants.
-        s.on_key(KeyInput::Char('\u{13}'));
+        // Ctrl+S reaches the form as the control character no text row wants. The client owns the
+        // file, so the key is reported as the action to perform rather than left as a notice the
+        // user can do nothing about.
         assert_eq!(
-            s.notice.as_ref().map(|(text, _)| text.as_str()),
-            Some("Save"),
-            "a key that is wired but not implemented reports the effect instead of doing nothing"
+            s.on_key(KeyInput::Char('\u{13}')),
+            vec![UiAction::Config(ConfigAction::Save)],
+            "a wired key reports the action instead of doing nothing"
         );
         assert!(s.config_form.as_ref().is_some_and(|f| f.dirty), "and the form knows there is something to save");
+
+        // The token generator lives on the native side too: the screen can only ask for it.
+        assert_eq!(
+            s.on_key(KeyInput::Char('\u{12}')),
+            vec![UiAction::Config(ConfigAction::RegenerateToken)]
+        );
+
+        // A key that raises no effect is still nobody's business but the form's: typing inside a
+        // buffer changes the buffer, and asks the client for nothing.
+        let form = s.config_form.as_mut().unwrap();
+        form.field = 1; // the Base URL row, the first editable one
+        form.apply(ConfigAction::BeginEdit);
+        assert_eq!(s.on_key(KeyInput::Char('x')), Vec::new());
+        assert_eq!(s.config_form.as_ref().unwrap().editing.as_deref(), Some("x"));
     }
 
     #[test]

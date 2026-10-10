@@ -11,16 +11,17 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use tipsy_protocol::{Command, Event, Frame, ToClient, ToServer};
-use tipsy_ui::{ClockView, Hit, KeyInput, UiAction, UiState, draw};
+use tipsy_ui::{ClockView, ConfigEffect, Hit, KeyInput, NoticeKind, UiAction, UiState, draw};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::device::{Mic, Player};
 use crate::audio::pcm::{envelope, i16_to_f32, rms};
 use crate::brain::BrainConfig;
+use crate::config::form::{config_from, form_of};
 use crate::config::store;
 use crate::config::Config;
 use crate::keys::KeyResolver;
-use crate::providers::{build_providers, Providers};
+use crate::providers::{build_providers, ProviderSlot};
 use crate::session::spawn_with_events;
 use crate::sysmon;
 
@@ -35,9 +36,11 @@ const MAX_INPUT_PER_FRAME: usize = 64;
 pub fn run(config_path: PathBuf) -> Result<(), String> {
     let loaded = store::load_or_create(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
     let config = loaded.config;
-    let providers = build_providers(&config.providers, &KeyResolver::system()).map_err(|e| e.to_string())?;
+    let keys = KeyResolver::system();
+    // One stack, shared with the session from here on: a save swaps the connectors inside it.
+    let providers = ProviderSlot::new(build_providers(&config.providers, &keys).map_err(|e| e.to_string())?);
 
-    let mut client = Client::new(config);
+    let mut client = Client::new(config, config_path, keys, providers);
     // `init` enters the alternate screen, enables raw mode and installs the panic hook that
     // restores the terminal; `restore` undoes all of it.
     let mut terminal = ratatui::init();
@@ -47,7 +50,7 @@ pub fn run(config_path: PathBuf) -> Result<(), String> {
         client.state.notify(warning);
     }
     client.open_player();
-    let outcome = client.frame_loop(&mut terminal, providers);
+    let outcome = client.frame_loop(&mut terminal);
     let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
     ratatui::restore();
     outcome
@@ -56,8 +59,15 @@ pub fn run(config_path: PathBuf) -> Result<(), String> {
 /// Everything the client keeps from one frame to the next.
 struct Client {
     state: UiState,
-    /// The configuration the session was built from, kept for its provider settings.
+    /// The configuration the running session was built from: a save that worked replaces it, so the
+    /// client always holds the configuration the file holds.
     config: Config,
+    /// Where the screen writes, and where it reads every time it opens.
+    config_path: PathBuf,
+    /// The resolver the connectors are built with: the one the app started with.
+    keys: KeyResolver,
+    /// The live provider stack, shared with the session.
+    providers: ProviderSlot,
     /// `None` when there is no output device: the HUD still works, silently.
     player: Option<Player>,
     /// The audio of the reply being spoken, kept for `Replay` until a new turn starts.
@@ -71,12 +81,15 @@ struct Client {
 }
 
 impl Client {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, config_path: PathBuf, keys: KeyResolver, providers: ProviderSlot) -> Self {
         let (mic_tx, mic_frames) = std::sync::mpsc::sync_channel(MIC_QUEUE);
         let mic_gain = config.listening.mic_gain;
         Self {
             state: UiState::new(),
             config,
+            config_path,
+            keys,
+            providers,
             player: None,
             reply: Vec::new(),
             rate: 24000,
@@ -96,14 +109,13 @@ impl Client {
     }
 
     /// The frame loop: input, messages from the session, audio and drawing, about 30 times a second.
-    fn frame_loop(
-        &mut self,
-        terminal: &mut ratatui::DefaultTerminal,
-        providers: Providers,
-    ) -> Result<(), String> {
-        let ends = spawn_with_events(self.config.clone(), providers, BrainConfig::default());
+    fn frame_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
+        let ends = spawn_with_events(self.config.clone(), self.providers.clone(), BrainConfig::default());
         let to_server = ends.to_server;
         let mut from_server = ends.from_server;
+        // A second sender for the same client channel: the system monitor and the screen's Test
+        // results (Task 7) both arrive with the session's own events.
+        let events = ends.events.clone();
         sysmon::spawn(ends.events);
 
         let mut drawn = Instant::now();
@@ -149,7 +161,7 @@ impl Client {
             let mut quit = false;
             for key in keys {
                 for action in self.state.on_key(key) {
-                    quit |= self.on_action(action, &to_server);
+                    quit |= self.on_action(action, &to_server, &events);
                 }
             }
             if quit {
@@ -238,7 +250,12 @@ impl Client {
     }
 
     /// Applies one action from the HUD. True when the user asked to quit.
-    fn on_action(&mut self, action: UiAction, to_server: &UnboundedSender<ToServer>) -> bool {
+    fn on_action(
+        &mut self,
+        action: UiAction,
+        to_server: &UnboundedSender<ToServer>,
+        events: &UnboundedSender<ToClient>,
+    ) -> bool {
         match action {
             UiAction::Send(command) => {
                 // The only two things that quiet the device: the user starting a new turn over the
@@ -261,12 +278,129 @@ impl Client {
                 }
                 false
             }
+            // The screen asks for a form it cannot build: `tipsy-ui` owns no native type. The file
+            // is read here and now, which is what keeps a hand-edited `config.toml` from being
+            // served out of a copy taken at startup.
+            UiAction::OpenConfig => {
+                self.open_screen();
+                false
+            }
+            // Every other screen action goes through the form's own reducer, and the effects it asks
+            // for are performed here, on the native side.
+            UiAction::Config(action) => {
+                let effects = match self.state.config_form.as_mut() {
+                    Some(form) => form.apply(action),
+                    None => Vec::new(),
+                };
+                for effect in effects {
+                    self.on_config_effect(effect, to_server, events);
+                }
+                false
+            }
             UiAction::Quit => true,
-            // The screen asks for the configuration it shows: read it fresh (a hand-edited file is
-            // seen the next time the screen opens) and hand it over. Task 6 fills the conversion in;
-            // until then the default form the HUD already holds is what the screen shows.
-            UiAction::OpenConfig => false,
         }
+    }
+
+    /// Opens the configuration screen on a copy read from the file *now* (Review Focus 3): a
+    /// `config.toml` edited while the app runs is what the screen shows. Opening changes nothing
+    /// that is running — `Esc` discards the edits, and only a save applies them.
+    fn open_screen(&mut self) {
+        match store::load_or_create(&self.config_path) {
+            Ok(loaded) => {
+                let mut form = form_of(&loaded.config);
+                // A file that had to be backed up and reset is worth saying in the notice line: the
+                // user's own file is gone, and the form no longer holds what they wrote.
+                if let Some(warning) = loaded.warning {
+                    form.notice = Some((NoticeKind::Warning, warning));
+                }
+                self.state.show_config_form(form);
+            }
+            Err(e) => self.state.notify(format!("{}: {e}", self.config_path.display())),
+        }
+    }
+
+    /// Performs one effect the screen asked for.
+    ///
+    /// `_events` is the client's own event sender: Task 7 uses it to report a Test result, and
+    /// renames it to `events` then. It is underscored here so the compiler is not told about an
+    /// argument this task has nothing to send.
+    fn on_config_effect(
+        &mut self,
+        effect: ConfigEffect,
+        to_server: &UnboundedSender<ToServer>,
+        _events: &UnboundedSender<ToClient>,
+    ) {
+        match effect {
+            ConfigEffect::None => {}
+            ConfigEffect::Save => self.save(to_server),
+            // Task 7 fills this in; the variant exists from Task 3 on, so the match is exhaustive.
+            ConfigEffect::Test(_) => {}
+            ConfigEffect::RegenerateToken => self.regenerate_token(),
+        }
+    }
+
+    /// Writes the screen's configuration and applies it to the running session.
+    ///
+    /// The order is the whole of Review Focus 1: the connectors are built first, then the file is
+    /// written through the one writer, and only then does anything running change. Nothing is
+    /// written until every row parses and every key resolves, because a `config.toml` the app cannot
+    /// start from is damage rather than a saved edit; and a refused write leaves the file, the
+    /// running stack and the session exactly as they were.
+    fn save(&mut self, to_server: &UnboundedSender<ToServer>) {
+        // 1. The form in the file's shape.
+        let parsed = self.state.config_form.as_ref().map(config_from);
+        let config = match parsed {
+            None => return,
+            Some(Err(message)) => return self.config_notice(NoticeKind::Error, message),
+            Some(Ok(config)) => config,
+        };
+        // 2. The connectors that configuration names.
+        let rebuilt = match build_providers(&config.providers, &self.keys) {
+            Ok(providers) => providers,
+            Err(e) => return self.config_notice(NoticeKind::Error, e.to_string()),
+        };
+        // 3. The file itself.
+        if let Err(e) = store::save(&self.config_path, &config) {
+            return self.config_notice(NoticeKind::Error, format!("{}: {e}", self.config_path.display()));
+        }
+        // 4. What is running: the stack in place, then the fields the channel carries.
+        self.mic_gain = config.listening.mic_gain;
+        self.providers.replace(rebuilt);
+        let _ = to_server.send(ToServer::Command(Command::SetListeningMode { mode: config.listening.mode }));
+        let _ = to_server.send(ToServer::Command(Command::SetProfile { id: config.active_profile.clone() }));
+        self.config = config;
+        if let Some(form) = self.state.config_form.as_mut() {
+            form.dirty = false;
+            form.notice = None;
+        }
+    }
+
+    /// Fills the Server tab's token row with a fresh token from the OS generator. This is an edit
+    /// like any other: the file changes when the user saves, never here.
+    fn regenerate_token(&mut self) {
+        match store::new_token() {
+            Ok(token) => {
+                if let Some(form) = self.state.config_form.as_mut() {
+                    form.server.token = token;
+                    form.dirty = true;
+                }
+            }
+            Err(e) => self.config_notice(NoticeKind::Error, e.to_string()),
+        }
+    }
+
+    /// Puts a configuration message in the screen's notice line. The text is the low-level truth —
+    /// the path and its OS error, the row that would not parse, the provider's own words — because
+    /// the form carries no language of its own (the plan's `ConfigForm` has no `lang` field) and
+    /// must not invent copy it cannot translate. Falls back to the HUD's notice when no screen is
+    /// open.
+    fn config_notice(&mut self, kind: NoticeKind, text: impl Into<String>) {
+        let text = text.into();
+        if let Some(form) = self.state.config_form.as_mut() {
+            form.notice = Some((kind, text));
+            return;
+        }
+        self.state.notify(text);
     }
 }
 
@@ -372,7 +506,37 @@ fn clock_view() -> ClockView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tipsy_protocol::AssistantState;
+    use tipsy_protocol::{AssistantState, ListeningMode};
+
+    use crate::config::form::form_of;
+    use crate::keys::{KeyResolver, MemoryStore, SecretStore};
+    use crate::providers::ProviderSlot;
+    use tipsy_ui::{ConfigAction, NoticeKind};
+    /// A resolver that knows one key — `openrouter`, the name the default configuration uses — and
+    /// reads no environment.
+    fn resolver() -> KeyResolver {
+        let store = MemoryStore::default();
+        SecretStore::set(&store, "openrouter", "k-test").unwrap();
+        KeyResolver::new(Box::new(store), Box::new(|_| None))
+    }
+
+    /// A configuration whose three connectors point at `base`. Nothing in these tests calls them
+    /// unless it says so, and it keeps `build_providers` off the real network.
+    fn mock_config(base: &str) -> Config {
+        let mut config = Config::default();
+        for provider in [&mut config.providers.chat, &mut config.providers.speech, &mut config.providers.transcribe] {
+            provider.base_url = format!("{base}/v1");
+            provider.key = "openrouter".into();
+        }
+        config
+    }
+
+    /// The screen with the edits a user would have made in it: the form holds them, the file does
+    /// not, and `dirty` says so.
+    fn open_with_edits(client: &mut Client, edited: &Config) {
+        client.state.show_config_form(form_of(edited));
+        client.state.config_form.as_mut().unwrap().dirty = true;
+    }
 
     #[test]
     fn only_an_interrupt_with_audio_left_to_drop_flushes() {
@@ -416,7 +580,10 @@ mod tests {
     #[test]
     fn a_finished_reply_keeps_its_audio_until_a_new_turn_starts() {
         let (to_server, _from_client) = tokio::sync::mpsc::unbounded_channel();
-        let mut client = Client::new(Config::default());
+        let config = Config::default();
+        let keys = resolver();
+        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
 
         client.on_message(ToClient::Event(Event::Status { state: AssistantState::Speaking, detail: None }));
         client.on_message(ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
@@ -430,7 +597,216 @@ mod tests {
         client.on_message(ToClient::Event(Event::Status { state: AssistantState::Idle, detail: None }));
         assert_eq!(client.reply, vec![7, 8, 9], "a normal `Speaking -> Idle` keeps the last reply");
 
-        client.on_action(UiAction::Send(Command::Ask { text: "¿y eso?".into() }), &to_server);
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        client.on_action(UiAction::Send(Command::Ask { text: "¿y eso?".into() }), &to_server, &events);
         assert!(client.reply.is_empty(), "the next turn speaks a reply of its own");
+    }
+
+    /// Review Focus 3, second half: the screen opens on the file as it is *now*. A `config.toml`
+    /// hand-edited while the app runs is what the second open shows, never the copy the first one
+    /// read, and opening changes nothing that is running.
+    #[test]
+    fn opening_the_screen_again_reads_the_file_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = mock_config("http://127.0.0.1:1");
+        store::save(&path, &config).unwrap();
+
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config.clone(), path.clone(), keys, slot);
+
+        client.open_screen();
+        let first = client.state.config_form.as_ref().unwrap();
+        assert_eq!(first.listening.silence_ms, "1000");
+        assert!(first.server.token.is_empty());
+
+        // The user edits the file in another window while the app keeps running.
+        let mut edited = config.clone();
+        edited.listening.silence_ms = 4321;
+        edited.server.token = "pasted-by-hand".into();
+        store::save(&path, &edited).unwrap();
+
+        client.open_screen();
+        let second = client.state.config_form.as_ref().unwrap();
+        assert_eq!(second.listening.silence_ms, "4321", "the screen must read the file again");
+        assert_eq!(second.server.token, "pasted-by-hand");
+        assert_eq!(client.config, config, "opening the screen changes nothing that is running");
+    }
+
+    /// Review Focus 1: a write that fails changes nothing at all. The file is byte for byte what it
+    /// was, the running configuration and its provider stack are the ones the app started with, and
+    /// the screen says why — while the edits stay in the form, unsaved.
+    #[test]
+    fn a_refused_save_leaves_the_file_and_the_running_configuration_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = mock_config("http://127.0.0.1:1");
+        store::save(&path, &config).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let stack_before = slot.current();
+        let mut client = Client::new(config.clone(), path.clone(), keys, slot.clone());
+
+        let mut edited = config.clone();
+        edited.listening.silence_ms = 4321;
+        edited.server.token = "pasted-by-hand".into();
+        open_with_edits(&mut client, &edited);
+
+        // A config path the process may not write: read-only is the cheapest way to make the write
+        // itself fail — after every row parsed and every connector built, which is where the
+        // interesting part of the order is.
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().permissions().readonly(), "the file must be read-only for this test to prove anything");
+
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        client.on_action(UiAction::Config(ConfigAction::Save), &to_server, &events);
+
+        assert_eq!(std::fs::read(&path).unwrap(), before, "a refused save must not touch the file");
+        assert_eq!(client.config, config, "the running configuration is the one it was");
+        assert!(
+            std::sync::Arc::ptr_eq(&stack_before.chat, &slot.current().chat),
+            "the running provider stack must not have been swapped"
+        );
+        let form = client.state.config_form.as_ref().unwrap();
+        let (kind, text) = form.notice.clone().expect("a refused save must say so");
+        assert_eq!(kind, NoticeKind::Error);
+        assert!(text.contains("config.toml"), "the notice must name the file: {text}");
+        assert!(form.dirty, "the edits are still unsaved: {form:?}");
+        // And the file still holds the value a next launch must read.
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("4321"));
+
+        // Let the temp directory go away. Clearing the bit back is the one place `false` is the
+        // point, so clippy's `permissions_set_readonly_false` is silenced rather than obeyed.
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+    }
+
+    /// The other half of Review Focus 1, and Review Focus 5's "no key": a configuration whose
+    /// connectors cannot be built is never written at all. Writing it would leave a `config.toml`
+    /// the app cannot start from — a fresh launch fails with exit code 2 — so the key is checked
+    /// before the file is touched.
+    #[test]
+    fn a_save_whose_providers_cannot_be_built_never_writes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = mock_config("http://127.0.0.1:1");
+        store::save(&path, &config).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let stack_before = slot.current();
+        let mut client = Client::new(config.clone(), path.clone(), keys, slot.clone());
+
+        // The user typed a key name nobody holds. Everything else about this save is valid, and the
+        // write itself would have succeeded.
+        let mut edited = config.clone();
+        edited.providers.chat.key = "not-in-the-store".into();
+        open_with_edits(&mut client, &edited);
+
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        client.on_action(UiAction::Config(ConfigAction::Save), &to_server, &events);
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a configuration the app cannot start from must never be written"
+        );
+        assert_eq!(client.config, config);
+        assert!(std::sync::Arc::ptr_eq(&stack_before.chat, &slot.current().chat));
+        let (kind, text) = client.state.config_form.as_ref().unwrap().notice.clone().unwrap();
+        assert_eq!(kind, NoticeKind::Error);
+        assert!(
+            text.contains("not-in-the-store") && text.contains("TIPSY_KEY_NOT_IN_THE_STORE"),
+            "the notice must name the key and how to provide it: {text}"
+        );
+    }
+
+    /// A save that works: the file holds the edits, the running configuration is the one that was
+    /// written, the connectors are rebuilt *in place*, and the session is told the fields the
+    /// channel carries — in that order.
+    #[test]
+    fn a_saved_configuration_is_written_and_swapped_into_the_running_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = mock_config("http://127.0.0.1:1");
+        store::save(&path, &config).unwrap();
+
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let stack_before = slot.current();
+        let mut client = Client::new(config.clone(), path.clone(), keys, slot.clone());
+
+        let mut edited = config.clone();
+        edited.listening.silence_ms = 4321;
+        edited.listening.mode = ListeningMode::Auto;
+        edited.active_profile = "senyor".into();
+        open_with_edits(&mut client, &edited);
+
+        let (to_server, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        client.on_action(UiAction::Config(ConfigAction::Save), &to_server, &events);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("silence_ms = 4321"), "{text}");
+        assert!(text.contains("mode = \"auto\""), "{text}");
+        assert!(text.contains("active_profile = \"senyor\""), "{text}");
+        assert_eq!(store::load_or_create(&path).unwrap().config, edited, "the file is the whole form");
+        assert_eq!(client.config, edited, "the running configuration is what was written");
+        assert!(!std::sync::Arc::ptr_eq(&stack_before.chat, &slot.current().chat), "rebuilt in place");
+        assert!(!client.state.config_form.as_ref().unwrap().dirty, "saved means nothing unsaved");
+        assert!(client.state.config_form.as_ref().unwrap().notice.is_none());
+
+        // The session learns the mode and the profile over the channel it already uses.
+        assert_eq!(
+            commands.try_recv().unwrap(),
+            ToServer::Command(Command::SetListeningMode { mode: ListeningMode::Auto })
+        );
+        assert_eq!(
+            commands.try_recv().unwrap(),
+            ToServer::Command(Command::SetProfile { id: "senyor".into() })
+        );
+    }
+
+    /// Regenerating fills the row the screen shows and writes nothing: the file changes on save,
+    /// only on save, and only through `store::save`.
+    #[test]
+    fn regenerating_the_token_fills_the_row_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = mock_config("http://127.0.0.1:1");
+        store::save(&path, &config).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config, path.clone(), keys, slot);
+        client.open_screen();
+        assert!(client.state.config_form.as_ref().unwrap().server.token.is_empty());
+
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        client.on_action(UiAction::Config(ConfigAction::RegenerateToken), &to_server, &events);
+
+        let form = client.state.config_form.as_ref().unwrap();
+        assert_eq!(form.server.token.len(), 32, "16 bytes as lowercase hex: {:?}", form.server.token);
+        assert!(
+            form.server.token.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "the token's alphabet is 0-9a-f: {:?}",
+            form.server.token
+        );
+        assert!(form.dirty, "a fresh token is an unsaved edit like any other");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "nothing is written until the user saves");
     }
 }

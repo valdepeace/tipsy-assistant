@@ -15,7 +15,7 @@ use crate::audio::device::MIC_SAMPLE_RATE;
 use crate::audio::pcm::{i16_to_f32, Pcm};
 use crate::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use crate::config::Config;
-use crate::providers::{ChatMessage, Providers, Role};
+use crate::providers::{ChatMessage, ProviderSlot, Role};
 
 /// The session id reported to clients. There is one session per process for now.
 const SESSION_ID: u64 = 1;
@@ -28,7 +28,7 @@ const HISTORY_MAX_MESSAGES: usize = 40;
 /// Starts a session on its own task and returns the two ends of its channels.
 pub fn spawn_session(
     config: Config,
-    providers: Providers,
+    providers: ProviderSlot,
     brain_config: BrainConfig,
 ) -> (UnboundedSender<ToServer>, UnboundedReceiver<ToClient>) {
     let session = spawn_with_events(config, providers, brain_config);
@@ -46,7 +46,7 @@ pub struct SessionEnds {
 
 /// Like [`spawn_session`], but also hands back the sender the session reports to, so a caller can
 /// put other producers of [`ToClient`] on the same channel.
-pub fn spawn_with_events(config: Config, providers: Providers, brain_config: BrainConfig) -> SessionEnds {
+pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: BrainConfig) -> SessionEnds {
     let (to_server_tx, to_server_rx) = mpsc::unbounded_channel();
     let (to_client_tx, to_client_rx) = mpsc::unbounded_channel();
     // Held so the client end only closes once the session task itself has ended.
@@ -54,19 +54,13 @@ pub fn spawn_with_events(config: Config, providers: Providers, brain_config: Bra
 
     let profile = config.active().clone();
     let listening_mode = config.listening.mode;
-    let brain = Arc::new(Brain::new(
-        providers,
-        TurnProfile {
-            prompt: profile.prompt.clone(),
-            voice_instructions: profile.voice_instructions.clone(),
-            voice: profile.voice_for(&config.providers.speech),
-            language: profile.language.clone(),
-        },
-        brain_config,
-    ));
+    let brain = Arc::new(Brain::new(providers.clone(), turn_profile(&config), brain_config.clone()));
 
     let mut session = Session {
+        config,
         brain,
+        brain_config,
+        providers,
         out: to_client_tx.clone(),
         history: Vec::new(),
         current: None,
@@ -88,6 +82,18 @@ pub fn spawn_with_events(config: Config, providers: Providers, brain_config: Bra
     SessionEnds { to_server: to_server_tx, from_server: to_client_rx, events: to_client_tx }
 }
 
+/// What the brain needs from the configuration: the active profile's texts and the voice the speech
+/// connector recommends for it. Built when the session starts and again on every `SetProfile`.
+fn turn_profile(config: &Config) -> TurnProfile {
+    let profile = config.active();
+    TurnProfile {
+        prompt: profile.prompt.clone(),
+        voice_instructions: profile.voice_instructions.clone(),
+        voice: profile.voice_for(&config.providers.speech),
+        language: profile.language.clone(),
+    }
+}
+
 /// A turn that is running right now, and the only handle the session may cancel.
 struct Turn {
     cancel: CancellationToken,
@@ -99,7 +105,13 @@ struct Turn {
 }
 
 struct Session {
+    /// The configuration the session was built from. A `SetProfile` re-derives the brain from it, so
+    /// a switch takes effect on the next turn.
+    config: Config,
     brain: Arc<Brain>,
+    brain_config: BrainConfig,
+    /// The live provider stack (Task 6): read once per turn, swapped in place by a save.
+    providers: ProviderSlot,
     out: UnboundedSender<ToClient>,
     history: Vec<ChatMessage>,
     current: Option<Turn>,
@@ -220,18 +232,43 @@ impl Session {
             Command::ListenStop => self.listen_stop(),
             Command::Cancel => self.cancel(),
             Command::Reset => self.reset(),
-            Command::SetProfile { id } => {
-                self.profile.id = id;
-            }
-            Command::SetListeningMode { mode } => {
-                self.listening_mode = mode;
-            }
+            Command::SetProfile { id } => self.set_profile(id),
+            Command::SetListeningMode { mode } => self.set_listening_mode(mode),
             Command::Hello { .. } => {}
             // The Test probe asks a provider a question, not the session: Plan 2B Task 7 runs it in
             // the native client and Plan 3's server answers it over the wire. Accepted and ignored,
             // so the match stays exhaustive.
             Command::TestProvider { .. } => {}
         }
+    }
+
+    /// Applies the profile the configuration screen saved and tells the client about it, so the
+    /// header, the interface language and the next turn all follow the switch.
+    ///
+    /// The edited *texts* of a profile cannot travel the channel (`Command` carries an id), so this
+    /// re-derives the brain from the configuration the session holds: an id that is not in it is a
+    /// no-op rather than a brain built around nothing.
+    fn set_profile(&mut self, id: String) {
+        if !self.config.profiles.iter().any(|profile| profile.id == id) {
+            return;
+        }
+        self.config.active_profile = id;
+        let profile = self.config.active();
+        self.profile = profile.view();
+        self.ui_language = UiLanguage::from_bcp47(&profile.language);
+        self.brain = Arc::new(Brain::new(
+            self.providers.clone(),
+            turn_profile(&self.config),
+            self.brain_config.clone(),
+        ));
+        self.welcome();
+    }
+
+    /// Applies the listening mode a save changed. The mode lives in `Welcome` and nowhere else, so
+    /// the session announces it again — that is what moves the header's indicator.
+    fn set_listening_mode(&mut self, mode: ListeningMode) {
+        self.listening_mode = mode;
+        self.welcome();
     }
 
     fn ask(&mut self, text: String) {
