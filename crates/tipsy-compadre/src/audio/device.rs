@@ -53,9 +53,25 @@ impl Player {
         self.player.append(buffer);
     }
 
-    /// Drops everything queued but not yet played.
+    /// Drops everything queued but not yet played, and leaves the player able to play again.
+    ///
+    /// rodio 0.22.2 `Player::clear` removes every loaded source **and pauses the sink**
+    /// (`player.rs:279-284`), while `append` only clears the *stopped* flag, never the paused one
+    /// (`player.rs:104-115`). The client never calls rodio's `play()` anywhere else, so a cleared
+    /// player would stay muted for the rest of the session: the greeting would be the only thing
+    /// ever heard, and `Replay` would be silent too. Resuming the sink here is what makes the next
+    /// `play()` audible; it drops nothing, because the queue was just emptied.
     pub fn stop(&self) {
         self.player.clear();
+        self.player.play();
+    }
+
+    /// True while a chunk is still queued or being played.
+    ///
+    /// rodio counts a source until it finishes (`Done` decrements the count, `source/done.rs:54-62`),
+    /// so this is exactly "clearing now would drop audio the user has not heard yet".
+    pub fn playing(&self) -> bool {
+        !self.player.empty()
     }
 
     /// The configuration the output device actually opened with, for the log.
@@ -180,5 +196,18 @@ mod tests {
     #[test]
     fn frame_size_is_twenty_milliseconds() {
         assert_eq!(MIC_FRAME_SAMPLES, (MIC_SAMPLE_RATE / 50) as usize);
+    }
+
+    /// The rodio behaviour `Player::stop` is built on, pinned here because it is easy to get wrong:
+    /// `clear` pauses the sink, and only `play` resumes it. No device is needed — this is a bare
+    /// player with an empty queue, so `clear` returns at once instead of waiting for a source.
+    #[test]
+    fn a_cleared_rodio_player_stays_paused_until_it_is_resumed() {
+        let (player, _queue) = RodioPlayer::new();
+        assert!(!player.is_paused());
+        player.clear();
+        assert!(player.is_paused(), "rodio 0.22.2 `clear` pauses the sink (player.rs:279-284)");
+        player.play();
+        assert!(!player.is_paused(), "`play` is what lets the next `play()` be heard");
     }
 }
