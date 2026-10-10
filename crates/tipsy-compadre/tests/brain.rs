@@ -110,7 +110,7 @@ fn config() -> BrainConfig {
 
 fn brain(chat: Arc<FakeChat>, speech: Arc<FakeSpeech>, transcript: &'static str) -> (Brain, Arc<FakeTranscribe>) {
     let transcribe = Arc::new(FakeTranscribe { text: transcript, languages: Mutex::new(Vec::new()) });
-    let providers = Providers { chat, speech, transcribe: transcribe.clone() };
+    let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
     (Brain::new(providers, profile(), config()), transcribe)
 }
 

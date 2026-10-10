@@ -156,6 +156,33 @@ pub struct Providers {
     pub transcribe: Arc<dyn TranscribeProvider>,
 }
 
+/// A handle to the provider stack a session is running on.
+///
+/// The client and the session share one, which is what makes a save live: the client builds the
+/// connectors from the configuration it just wrote and swaps them in, and every turn started after
+/// that reads the new stack. Nothing is restarted, and no turn is ever half on the old stack — the
+/// stack is read once, at the top of `Brain::run_turn`.
+#[derive(Clone)]
+pub struct ProviderSlot(std::sync::Arc<std::sync::RwLock<Providers>>);
+
+impl ProviderSlot {
+    pub fn new(providers: Providers) -> Self {
+        Self(std::sync::Arc::new(std::sync::RwLock::new(providers)))
+    }
+
+    /// Swaps the whole stack. A turn already running keeps the stack it started on.
+    pub fn replace(&self, providers: Providers) {
+        // Poisoning cannot happen: the guard is dropped before any provider call is made, so
+        // nothing that can panic ever runs while it is held.
+        *self.0.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = providers;
+    }
+
+    /// The stack the next turn uses: three `Arc`s, and the guard is gone before the call is made.
+    pub fn current(&self) -> Providers {
+        self.0.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("no API key named `{name}`: run `tipsy-compadre key set {name}` or set {env}")]

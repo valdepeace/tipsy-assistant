@@ -10,7 +10,7 @@ use tipsy_compadre::config::Config;
 use tipsy_compadre::config::store;
 use tipsy_compadre::providers::*;
 use tipsy_compadre::session::spawn_session;
-use tipsy_protocol::{AssistantState, Command, Event, Frame, ToClient, ToServer, UiLanguage};
+use tipsy_protocol::{AssistantState, Command, Event, Frame, ListeningMode, ToClient, ToServer, UiLanguage};
 use tokio::sync::mpsc;
 
 // ---------- fakes (copied from `tests/brain.rs`) ----------
@@ -119,7 +119,7 @@ fn session(
         languages: Mutex::new(Vec::new()),
         pcms: Mutex::new(Vec::new()),
     });
-    let providers = Providers { chat, speech, transcribe: transcribe.clone() };
+    let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
     let (tx, rx) = spawn_session(config(), providers, BrainConfig::default());
     (tx, rx, transcribe)
 }
@@ -329,4 +329,105 @@ async fn a_long_conversation_keeps_the_prompt_bounded() {
     let last = requests[turns - 1].messages.clone();
     assert_eq!(last[0].role, Role::System, "the profile prompt stays first: {last:#?}");
     assert_eq!(last.last().unwrap(), &ChatMessage::user(format!("pregunta {}", turns - 1)));
+}
+
+/// Review Focus 1's live half: the session reads the provider stack when a turn starts, so a
+/// save that rebuilds the connectors answers the *next* turn with them — no restart, and the
+/// conversation the session was holding is not dropped.
+#[tokio::test]
+async fn a_rebuilt_provider_stack_answers_the_next_turn() {
+    let first = FakeChat::new(vec![Ok(vec!["primera respuesta."])]);
+    let second = FakeChat::new(vec![Ok(vec!["segunda respuesta."])]);
+    let speech = FakeSpeech::new();
+    let transcribe = Arc::new(FakeTranscribe {
+        text: "",
+        languages: Mutex::new(Vec::new()),
+        pcms: Mutex::new(Vec::new()),
+    });
+    let slot = ProviderSlot::new(Providers {
+        chat: first.clone(),
+        speech: speech.clone(),
+        transcribe: transcribe.clone(),
+    });
+    let (tx, mut rx) = spawn_session(config(), slot.clone(), BrainConfig::default());
+    next_matching(&mut rx, is_done, 500).await; // the greeting
+
+    send(&tx, Command::Ask { text: "primera pregunta".into() });
+    let reply = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Reply { .. })), 500).await;
+    assert_eq!(reply, ToClient::Event(Event::Reply { text: "primera respuesta.".into() }));
+    assert_eq!(first.calls(), 1);
+
+    // The save: the connectors are rebuilt and swapped in place, exactly as the client does it.
+    slot.replace(Providers { chat: second.clone(), speech, transcribe });
+
+    send(&tx, Command::Ask { text: "segunda pregunta".into() });
+    let reply = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Reply { .. })), 500).await;
+    assert_eq!(reply, ToClient::Event(Event::Reply { text: "segunda respuesta.".into() }));
+    assert_eq!(second.calls(), 1, "the next turn must use the stack the save installed");
+    assert_eq!(first.calls(), 1, "the replaced stack must never be called again");
+}
+
+/// The mode the screen saves is the mode the HUD shows: `Welcome` is the only event that carries
+/// it, so the session announces the change.
+#[tokio::test]
+async fn a_new_listening_mode_is_announced_to_the_client() {
+    let slot = ProviderSlot::new(Providers {
+        chat: FakeChat::new(vec![]),
+        speech: FakeSpeech::new(),
+        transcribe: Arc::new(FakeTranscribe {
+            text: "",
+            languages: Mutex::new(Vec::new()),
+            pcms: Mutex::new(Vec::new()),
+        }),
+    });
+    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default());
+    let first = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Welcome { .. })), 500).await;
+    assert!(
+        matches!(first, ToClient::Event(Event::Welcome { listening_mode: ListeningMode::Push, .. })),
+        "{first:?}"
+    );
+
+    send(&tx, Command::SetListeningMode { mode: ListeningMode::Auto });
+
+    let again = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Welcome { .. })), 500).await;
+    assert!(
+        matches!(again, ToClient::Event(Event::Welcome { listening_mode: ListeningMode::Auto, .. })),
+        "the header needs a fresh Welcome to show the mode that was just saved: {again:?}"
+    );
+}
+
+/// The profile half of a save: the switch reaches the running session, so the next turn speaks
+/// the new profile's own prompt and the header and the language follow it.
+#[tokio::test]
+async fn switching_profile_changes_the_prompt_of_the_next_turn() {
+    let chat = FakeChat::new(vec![Ok(vec!["Una respuesta suficientemente larga."])]);
+    let slot = ProviderSlot::new(Providers {
+        chat: chat.clone(),
+        speech: FakeSpeech::new(),
+        transcribe: Arc::new(FakeTranscribe {
+            text: "",
+            languages: Mutex::new(Vec::new()),
+            pcms: Mutex::new(Vec::new()),
+        }),
+    });
+    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default());
+    next_matching(&mut rx, is_done, 500).await; // the greeting
+
+    send(&tx, Command::SetProfile { id: "senyor".into() });
+    let welcome = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Welcome { .. })), 500).await;
+    match welcome {
+        ToClient::Event(Event::Welcome { profile, ui_language, .. }) => {
+            assert_eq!(profile.id, "senyor");
+            assert_eq!(ui_language, UiLanguage::Es);
+        }
+        other => panic!("the profile switch must be announced in a fresh Welcome, got {other:?}"),
+    }
+
+    send(&tx, Command::Ask { text: "¿cuánto cuesta?".into() });
+    next_matching(&mut rx, is_done, 500).await;
+
+    let sent = chat.requests.lock().unwrap()[0].messages.clone();
+    assert_eq!(sent[0].role, Role::System);
+    let senyor = config().profiles.into_iter().find(|p| p.id == "senyor").unwrap().prompt;
+    assert_eq!(sent[0].content, senyor, "the next turn must speak as the profile just chosen: {sent:#?}");
 }

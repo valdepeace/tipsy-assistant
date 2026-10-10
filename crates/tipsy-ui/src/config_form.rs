@@ -299,10 +299,13 @@ impl ConfigForm {
         ]
     }
 
-    /// One key, turned into the action it means and applied. The form has no modifier of its own:
-    /// the two chords arrive as their control characters, and everything else is a named key.
-    pub fn key(&mut self, key: KeyInput) -> KeyOutcome {
-        let action = match key {
+    /// One key, turned into the action it means — and *not* applied. `UiState` needs exactly this:
+    /// the translation is the form's own knowledge (which row a key reaches, whether a buffer is
+    /// open), while applying the action is the native client's job, because only the client can
+    /// write the file. Splitting it here is what keeps one key from being reduced twice, and what
+    /// keeps the translation in one place for [`ConfigForm::key`] and the screen's dispatcher alike.
+    pub fn action_for(&self, key: KeyInput) -> Option<ConfigAction> {
+        match key {
             // A control character is the one `char` a text row wants none of: the two chords the
             // screen has arrive as their own control characters, so no variant is needed for either.
             KeyInput::Char(SAVE_KEY) => Some(ConfigAction::Save),
@@ -333,8 +336,13 @@ impl ConfigForm {
             // outcome reports either way; the buffer is gone by the time the caller sees it.
             KeyInput::Esc => Some(ConfigAction::Close),
             KeyInput::F(_) => None,
-        };
-        match action {
+        }
+    }
+
+    /// One key, turned into the action it means and applied. The form has no modifier of its own:
+    /// the two chords arrive as their control characters, and everything else is a named key.
+    pub fn key(&mut self, key: KeyInput) -> KeyOutcome {
+        match self.action_for(key) {
             Some(action) => KeyOutcome { action: Some(action), effects: self.apply(action) },
             None => KeyOutcome { action: None, effects: Vec::new() },
         }
