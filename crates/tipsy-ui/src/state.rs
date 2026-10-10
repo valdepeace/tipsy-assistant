@@ -201,6 +201,9 @@ impl UiState {
                 }
             }
             Event::SpeechChunk { .. } => {}
+            // A Test result belongs to the configuration screen's notice line (`ConfigForm::notice`,
+            // Plan 2B Task 7), not to the HUD's log or its status rings: nothing to record here.
+            Event::TestResult { .. } => {}
             Event::Done { first_audio_ms, .. } => {
                 if let Some(e) = self.pending_assistant() {
                     e.pending = false;

@@ -289,6 +289,7 @@ fn starts_turn(command: &Command) -> bool {
         Command::Ask { text } | Command::Say { text } => !text.trim().is_empty(),
         Command::ListenStop | Command::Reset => true,
         Command::Hello { .. }
+        | Command::TestProvider { .. }
         | Command::ListenStart
         | Command::Cancel
         | Command::SetProfile { .. }
