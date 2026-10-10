@@ -247,11 +247,13 @@ active_profile = "compae"
 [server]
 bind = "127.0.0.1:7070"
 lan = false
+token = ""               # server token; empty until the Server tab generates one
 
 [listening]
 mode = "auto"            # push | auto | hands_free
 silence_ms = 1000
 mic_gain = 12.0
+# mic_device = "..."     # input device, native client only; omitted means the system default
 
 [providers.chat]
 kind = "openai_compat"   # openai_compat | gemini | elevenlabs
