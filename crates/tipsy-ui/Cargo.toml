@@ -1,0 +1,10 @@
+[package]
+name = "tipsy-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Backend-agnostic ratatui HUD for tipsy-compadre"
+
+[dependencies]
+tipsy-protocol.workspace = true
+ratatui.workspace = true
