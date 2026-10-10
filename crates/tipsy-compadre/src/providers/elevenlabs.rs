@@ -1,5 +1,5 @@
-//! Native ElevenLabs connector: speech synthesis over HTTP (not the WebSocket) and, in Task 4,
-//! Scribe transcription.
+//! Native ElevenLabs connector: speech synthesis over HTTP (not the WebSocket) and Scribe
+//! transcription (Task 4).
 //!
 //! Every endpoint, header, field name and format string here is quoted from
 //! `.superpowers/sdd/plan-2-research/elevenlabs-api.md`; the note's own caveats are repeated at
@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::{ProviderError, SpeechProvider, SpeechRequest};
-use crate::audio::pcm::{pcm_s16le_to_pcm, Pcm};
+use super::{ProviderError, SpeechProvider, SpeechRequest, TranscribeProvider};
+use crate::audio::pcm::{encode_wav_16k, pcm_s16le_to_pcm, Pcm};
 
 /// 30 s per sentence of speech (Global Constraints).
 const SPEECH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -197,5 +197,55 @@ impl SpeechProvider for ElevenLabsSpeech {
             .await?;
         let bytes = ElevenLabsHttp::check(resp).await?.bytes().await?;
         audio_bytes_to_pcm(&bytes)
+    }
+}
+
+/// 60 s per transcription (Global Constraints).
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub struct ElevenLabsTranscribe {
+    http: ElevenLabsHttp,
+}
+
+impl ElevenLabsTranscribe {
+    /// `model` is the transcription model id from the configuration; the note names `scribe_v2`.
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>, key: Option<String>) -> Self {
+        Self { http: ElevenLabsHttp::new(base_url, model, key) }
+    }
+}
+
+/// `es-ES` → `es`: the API takes ISO-639-1 or ISO-639-3 (the note) while our personas declare
+/// BCP 47 tags (the plan's decision).
+fn primary_subtag(language: &str) -> String {
+    language.split(['-', '_']).next().unwrap_or("").trim().to_ascii_lowercase()
+}
+
+#[async_trait]
+impl TranscribeProvider for ElevenLabsTranscribe {
+    async fn transcribe(&self, pcm: Pcm, language: &str) -> Result<String, ProviderError> {
+        let primary = primary_subtag(language);
+        // A self-describing WAV rather than raw PCM plus `file_format` (the plan's decision).
+        let file = reqwest::multipart::Part::bytes(encode_wav_16k(&pcm))
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+        let mut form =
+            reqwest::multipart::Form::new().text("model_id", self.http.model.clone()).part("file", file);
+        if !primary.is_empty() {
+            form = form.text("language_code", primary);
+        }
+        let resp = self
+            .http
+            .authed(self.http.client.post(self.http.url("v1/speech-to-text")))
+            .timeout(TRANSCRIBE_TIMEOUT)
+            .multipart(form)
+            .send()
+            .await?;
+        let value: serde_json::Value = ElevenLabsHttp::check(resp).await?.json().await?;
+        value
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(|t| t.trim().to_string())
+            .ok_or_else(|| ProviderError::BadResponse(format!("no text in transcription response: {value}")))
     }
 }

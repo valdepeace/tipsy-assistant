@@ -5,8 +5,8 @@
 //! `.superpowers/sdd/plan-2-research/elevenlabs-api.md`.
 
 use tipsy_compadre::audio::pcm::Pcm;
-use tipsy_compadre::providers::elevenlabs::ElevenLabsSpeech;
-use tipsy_compadre::providers::{ProviderError, SpeechProvider, SpeechRequest};
+use tipsy_compadre::providers::elevenlabs::{ElevenLabsSpeech, ElevenLabsTranscribe};
+use tipsy_compadre::providers::{ProviderError, SpeechProvider, SpeechRequest, TranscribeProvider};
 use wiremock::matchers::{body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -291,6 +291,172 @@ async fn speech_keeps_multi_byte_text_and_error_previews_intact() {
         .mount(&server)
         .await;
     let err = provider(&server).synthesize(request_with_text("hola", None)).await.unwrap_err();
+    match err {
+        ProviderError::BadResponse(m) => assert_eq!(m.chars().filter(|c| *c == 'ñ').count(), 300, "{m}"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// A transcript in the note's response shape, with the whole `words[]` array it documents.
+fn transcript_body() -> serde_json::Value {
+    serde_json::json!({
+        "language_code": "es",
+        "language_probability": 0.98,
+        "text": "  ¿y el ticket de Jira?  ",
+        "words": [
+            {"text": "¿y", "start": 0.0, "end": 0.1, "type": "word", "logprob": -0.124, "speaker_id": "speaker_1"},
+            {"text": " ", "start": 0.1, "end": 0.2, "type": "spacing"},
+            {"text": "el", "start": 0.2, "end": 0.3, "type": "word", "logprob": -0.31}
+        ],
+        "audio_duration_secs": 1.4,
+        "transcription_id": "fixture-transcription"
+    })
+}
+
+fn transcribe_model() -> &'static str {
+    "scribe_v2"
+}
+
+fn upload() -> Pcm {
+    // 100 ms of a 440 Hz tone at 48 kHz: `encode_wav_16k` resamples it to 16 kHz.
+    let samples: Vec<f32> =
+        (0..4800).map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5).collect();
+    Pcm { samples, sample_rate: 48_000 }
+}
+
+/// Scribe's multipart fields, and the `language_code` hint as the primary subtag of the persona's
+/// BCP 47 tag (`es-ES` → `es`, the plan's decision). The multipart body is a real form: the
+/// `file` part is a WAV that `encode_wav_16k` wrote at 16 kHz, checked from the raw body.
+#[tokio::test]
+async fn transcription_uploads_a_wav_with_the_primary_subtag() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/speech-to-text"))
+        .and(header("xi-api-key", "k"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(transcript_body()))
+        .mount(&server)
+        .await;
+
+    let provider = ElevenLabsTranscribe::new(server.uri(), transcribe_model(), Some("k".into()));
+    assert_eq!(provider.transcribe(upload(), "es-ES").await.unwrap(), "¿y el ticket de Jira?");
+
+    let reqs = requests(&server).await;
+    let req = &reqs[0];
+    let content_type = req.headers.get("content-type").unwrap().to_str().unwrap().to_string();
+    assert!(content_type.starts_with("multipart/form-data"), "{content_type}");
+    let form = String::from_utf8_lossy(&req.body).to_string();
+    assert!(form.contains("name=\"model_id\"") && form.contains("scribe_v2"), "{form}");
+    assert!(form.contains("name=\"language_code\"") && form.contains("\r\n\r\nes\r\n"), "{form}");
+    assert!(form.contains("filename=\"audio.wav\"") && form.contains("RIFF"), "{form}");
+    assert!(
+        req.body.windows(4).any(|w| w == [0x80, 0x3e, 0x00, 0x00]),
+        "the upload must be 16 kHz (16000 = 0x3E80 little-endian)"
+    );
+}
+
+/// The hint is the primary subtag only, lowercased; a persona that declares no language sends no
+/// `language_code` at all, because the note says omitted means auto-detect.
+#[tokio::test]
+async fn transcription_language_hint_is_the_primary_subtag_or_omitted() {
+    let cases: [(&str, Option<&str>); 4] =
+        [("es-ES", Some("es")), ("ES_419", Some("es")), ("EN", Some("en")), ("", None)];
+    for (language, expected) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/speech-to-text"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": "hola"})))
+            .mount(&server)
+            .await;
+
+        let provider = ElevenLabsTranscribe::new(server.uri(), transcribe_model(), Some("k".into()));
+        assert_eq!(provider.transcribe(upload(), language).await.unwrap(), "hola");
+        let form = String::from_utf8_lossy(&requests(&server).await[0].body).to_string();
+        match expected {
+            Some(tag) => assert!(form.contains(&format!("\r\n\r\n{tag}\r\n")), "{language}: {form}"),
+            None => assert!(!form.contains("name=\"language_code\""), "{language}: {form}"),
+        }
+    }
+}
+
+/// Review Focus 1 for the Scribe path: typed error, the API's own text, never empty.
+#[tokio::test]
+async fn transcription_maps_api_errors_to_typed_errors() {
+    let cases: [(u16, &str, &str); 3] = [
+        (401, r#"{"detail":{"message":"invalid api key"}}"#, "invalid api key"),
+        (429, r#"{"detail":{"message":"rate limit exceeded"}}"#, "rate limit exceeded"),
+        (500, r#"{"detail":[{"type":"server_error","code":"boom","msg":"scribe is unwell"}]}"#, "scribe is unwell"),
+    ];
+    for (status, body, provider_text) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/speech-to-text"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let err = ElevenLabsTranscribe::new(server.uri(), transcribe_model(), Some("k".into()))
+            .transcribe(upload(), "es-ES")
+            .await
+            .unwrap_err();
+        let right_variant = match status {
+            401 => matches!(&err, ProviderError::Auth(_)),
+            429 => matches!(&err, ProviderError::RateLimited(_)),
+            _ => matches!(&err, ProviderError::BadResponse(_)),
+        };
+        assert!(right_variant, "status {status} produced {err:?}");
+        assert!(err.to_string().contains(provider_text), "status {status}: {err}");
+    }
+}
+
+/// A 200 without a readable `text` is `BadResponse` with a readable message — never an empty
+/// transcript handed to the brain as if it were silence.
+#[tokio::test]
+async fn transcription_rejects_responses_without_text() {
+    for body in [serde_json::json!({"language_code": "es", "words": []}), serde_json::json!({"text": 42})] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/speech-to-text"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+            .mount(&server)
+            .await;
+
+        let err = ElevenLabsTranscribe::new(server.uri(), transcribe_model(), Some("k".into()))
+            .transcribe(upload(), "es-ES")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ProviderError::BadResponse(m) if !m.trim().is_empty() && m.contains("text")),
+            "{body} produced {err:?}"
+        );
+    }
+}
+
+/// Review Focus 2 inside the JSON parse: accents, inverted punctuation and an emoji survive the
+/// round trip, and a long multi-byte error body is truncated by `chars()` (300 characters, the
+/// `ProviderError::from_status` rule), never by bytes.
+#[tokio::test]
+async fn transcription_keeps_multi_byte_text_intact() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/speech-to-text"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": "  ¿Y el ticket? ¡Ozú, mi arma! 😅  "})),
+        )
+        .mount(&server)
+        .await;
+    let provider = ElevenLabsTranscribe::new(server.uri(), transcribe_model(), Some("k".into()));
+    assert_eq!(provider.transcribe(upload(), "es-ES").await.unwrap(), "¿Y el ticket? ¡Ozú, mi arma! 😅");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/speech-to-text"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("ñ".repeat(1000)))
+        .mount(&server)
+        .await;
+    let err = ElevenLabsTranscribe::new(server.uri(), transcribe_model(), Some("k".into()))
+        .transcribe(upload(), "es-ES")
+        .await
+        .unwrap_err();
     match err {
         ProviderError::BadResponse(m) => assert_eq!(m.chars().filter(|c| *c == 'ñ').count(), 300, "{m}"),
         other => panic!("unexpected {other:?}"),
