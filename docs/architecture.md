@@ -115,7 +115,7 @@ The server is a set of **actors**: tokio tasks that only talk through message ch
 
 | Actor / module | Responsibility |
 |---|---|
-| `config` | Loads and saves `config.toml`, including the `[[personas]]` array. Resolves API keys: environment variable first, then the OS credential store. |
+| `config` | Loads and saves `config.toml`, including the `[[profiles]]` array. Resolves API keys: environment variable first, then the OS credential store. |
 | `providers` | `ChatProvider`, `SpeechProvider` and `TranscribeProvider` traits. Implementations: `openai_compat` (OpenRouter, Ollama, LM Studio, Groq, OpenAI…), `gemini` and `elevenlabs`. Each capability can use a different provider. |
 | `brain` | One question end to end: transcribe, stream the LLM reply, split it into sentences, synthesize them in parallel and emit them in order. Keeps the conversation history. Handles cancel (barge-in) and reset. |
 | `listener` | Runs voice activity detection and wake word detection over the mic frames a client streams, according to the listening mode. Paused while the assistant is speaking so it never hears itself. |
@@ -127,11 +127,11 @@ The server is a set of **actors**: tokio tasks that only talk through message ch
 Clients and server exchange:
 
 - **Commands** (client → server), JSON: `Hello`, `Ask`, `Say`, `ListenStart`, `ListenStop`,
-  `Cancel`, `Reset`, `SetPersona`, `SetListeningMode`, `GetConfig`, `UpdateConfig`, `SetKey`,
+  `Cancel`, `Reset`, `SetProfile`, `SetListeningMode`, `GetConfig`, `UpdateConfig`, `SetKey`,
   `TestProvider`.
 - **Mic audio** (client → server), binary frames: 16 kHz mono 16-bit PCM.
 - **Events** (server → client), JSON: `Welcome`, `Status`, `Heard`, `ReplyDelta`, `Reply`,
-  `SpeechChunk`, `Done`, `Stats`, `Config`, `ProviderTest`, `PersonaChanged`, `ConfigChanged`,
+  `SpeechChunk`, `Done`, `Stats`, `Config`, `ProviderTest`, `ProfileChanged`, `ConfigChanged`,
   `Error`.
 - **Speech audio** (server → client), binary frames: mono 16-bit PCM, played by the client.
 
@@ -175,7 +175,7 @@ The server spends the user's API keys and listens to their microphone, so:
 
 - **v1:** server, protocol, TUI client, web client (TUI in WASM), web terminal, cloud providers
   (OpenAI-compatible, Gemini, ElevenLabs), the three listening modes, configuration screen and
-  regional personas in Spanish and English.
+  regional profiles in Spanish and English.
 - **v1.1:** Deepgram and Anthropic connectors.
 - **v2:** local text-to-speech (Qwen3-TTS or Chatterbox, through a Python sidecar) and local
   speech-to-text (Whisper).

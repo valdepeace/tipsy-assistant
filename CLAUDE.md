@@ -1,6 +1,6 @@
 # tipsy-compadre — instructions for Claude
 
-Rust client-server voice assistant for developers with affectionate regional personas.
+Rust client-server voice assistant for developers with affectionate regional profiles.
 Read `docs/architecture.md` and the spec `docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md`.
 
 ## Current work
@@ -18,7 +18,7 @@ and the bodies of Tasks 1–2 exist; Tasks 3–10 still need writing, against th
 **Not started:** the two throwaway spikes in a scratch directory outside the repo — Ratzilla
 (ratatui `Canvas` with Braille + mouse on wasm32) and Rustpotter (a custom Spanish wake word; the
 shipped one is "oye compae"). They feed the web-client plan and the `hands_free` plan, and every
-persona's wake word stays provisional until Rustpotter verifies it.
+profile's wake word stays provisional until Rustpotter verifies it.
 
 ## Budget rules (user is on a tight budget)
 
@@ -48,12 +48,16 @@ persona's wake word stays provisional until Rustpotter verifies it.
 
 ## Conventions
 
-- Code, comments, docs and commit messages in English; personas in their own language and variety.
+- Code, comments, docs and commit messages in English; profiles in their own language and variety.
 - Terminal first: every feature must work in the native terminal before it is done.
 - Never clone or imitate the voice of a real person; never use characters or quotes from films,
-  books or other media. Personas are original, affectionate caricatures, and regional humour never
-  mocks a group. **The persona copy is the user's to approve**; implementers reproduce it verbatim
+  books or other media. Profiles are original, affectionate caricatures, and regional humour never
+  mocks a group. **The profile copy is the user's to approve**; implementers reproduce it verbatim
   and flag anything they would change instead of changing it.
+- The product vocabulary is **profile**, not persona: `Profile`, `Config::profiles`,
+  `active_profile`, `[[profiles]]`. A `config.toml` written with the old `active_persona` /
+  `[[personas]]` keys still loads through serde aliases and is never rewritten in place, and only
+  the alias test and the documents that predate the rename may spell the old word.
 - API keys never go into files, logs or fixtures; the config stores key *names* only, and the
   resolution order is `TIPSY_KEY_<NAME>` first, then the OS credential store.
 - Plans live in `docs/superpowers/plans/`, the spec in `docs/superpowers/specs/`, and the research

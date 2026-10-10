@@ -10,12 +10,12 @@
 ## 1. Purpose
 
 tipsy-compadre is a voice assistant for software developers with a strong, affectionate regional
-personality. The default persona, *El Compae*, is a lazy, joking, slightly tipsy Andalusian who
+personality. The default profile, *El Compae*, is a lazy, joking, slightly tipsy Andalusian who
 knows Jira, GitHub, GitLab, CI/CD and code review, dodges work with developer excuses and, in the
 end, always gives a correct and useful answer.
 
 The project is meant to be shared with the community: a single executable, cloud providers that
-anyone can use with their own key, and personas that anyone can write for their own region.
+anyone can use with their own key, and profiles that anyone can write for their own region.
 
 ### Success criteria
 
@@ -24,7 +24,7 @@ anyone can use with their own key, and personas that anyone can write for their 
 2. Time from the end of the user's speech to the first audible sentence: under 1.5 s with
    ElevenLabs and under 3 s with Gemini TTS, on a typical home connection.
 3. The same interface works in a terminal, in a browser (WASM) and through the web terminal.
-4. A new persona can be added by pasting one `[[personas]]` block into `config.toml`.
+4. A new profile can be added by pasting one `[[profiles]]` block into `config.toml`.
 5. Builds and tests pass on Windows, Linux and macOS in CI.
 
 ### Non-goals for v1
@@ -43,14 +43,14 @@ anyone can use with their own key, and personas that anyone can write for their 
 | D1 | v1 is pure Rust and cloud only; local speech arrives in v2 | Local Qwen3-TTS from day one |
 | D2 | OpenAI-compatible base connector plus native Gemini and ElevenLabs connectors | Only OpenAI-compatible |
 | D3 | `config.toml` in the user config directory; keys in the OS credential store, overridable by environment variables | `.env` file; credential store only |
-| D4 | Personas are a `[[personas]]` array inside `config.toml`, each with its own language | One file per persona |
+| D4 | Profiles are a `[[profiles]]` array inside `config.toml`, each with its own language | One file per profile |
 | D5 | Client-server: the native executable is the server; clients only draw and move audio | Monolithic TUI |
 | D6 | The web client is the same ratatui TUI compiled to WASM (Ratzilla); no separate HTML app | HTML/TypeScript web app |
 | D7 | A built-in web terminal (xterm.js + PTY) is also part of v1 | External `ttyd` only |
 | D8 | Cargo workspace with four crates, one executable embedding the WASM bundle | Single crate (rejected: the shared UI must compile to WASM) |
 | D9 | tokio actors talking through channels | Plain threads |
 | D10 | Three listening modes in v1: `push`, `auto`, `hands_free`; hands-free is the last milestone | Push only; hands-free in v1.1 |
-| D11 | Code, comments and documentation in English; personas and interface strings in the persona's language (Spanish or English) | Spanish everywhere |
+| D11 | Code, comments and documentation in English; profiles and interface strings in the profile's language (Spanish or English) | Spanish everywhere |
 | D12 | **Terminal first**: every feature must work in the native terminal before it is done | — |
 
 ## 3. Architecture
@@ -101,12 +101,12 @@ JSON; binary frames carry audio. All types live in `tipsy-protocol` and derive `
 | Command | Fields | Effect |
 |---|---|---|
 | `Hello` | `token: Option<String>`, `client: Tui \| Web \| WebTerminal`, `protocol_version: u32` | First message; the server replies `Welcome` or closes |
-| `Ask` | `text` | Ask the persona; it answers with voice |
+| `Ask` | `text` | Ask the profile; it answers with voice |
 | `Say` | `text` | Speak `text` literally, without the LLM |
 | `ListenStart` / `ListenStop` | — | Open or close the mic turn (meaning depends on the listening mode, §6) |
 | `Cancel` | — | Barge-in: stop the current reply (§5.3) |
 | `Reset` | — | Forget this session's conversation |
-| `SetPersona` | `id` | Switch persona for all sessions and persist it |
+| `SetProfile` | `id` | Switch profile for all sessions and persist it |
 | `SetListeningMode` | `mode` | Switch mode and persist it |
 | `GetConfig` | — | Ask for the redacted configuration |
 | `UpdateConfig` | `config: ConfigView` | Replace the editable configuration and persist it |
@@ -117,7 +117,7 @@ JSON; binary frames carry audio. All types live in `tipsy-protocol` and derive `
 
 | Event | Fields | Meaning |
 |---|---|---|
-| `Welcome` | `session_id`, `persona: PersonaView`, `ui_language`, `listening_mode`, `web_bundle: bool` | Handshake accepted |
+| `Welcome` | `session_id`, `profile: ProfileView`, `ui_language`, `listening_mode`, `web_bundle: bool` | Handshake accepted |
 | `Status` | `state: Idle \| Listening \| Transcribing \| Thinking \| Speaking`, `detail: Option<String>` | Drives the header |
 | `Heard` | `text` | What the transcription understood |
 | `ReplyDelta` | `text` | Streamed reply text |
@@ -127,8 +127,8 @@ JSON; binary frames carry audio. All types live in `tipsy-protocol` and derive `
 | `Stats` | `cpu`, `ram`, `net_in`, `net_out` | Once per second |
 | `Config` | `config: ConfigView` | Redacted configuration (keys shown as `sk-or-…a1b2`) |
 | `ProviderTest` | `capability`, `ok`, `latency_ms`, `message` | Result of `TestProvider` |
-| `PersonaChanged` / `ConfigChanged` | — | Broadcast to all sessions |
-| `Error` | `code`, `message`, `recoverable` | Message already localized to the persona's language |
+| `ProfileChanged` / `ConfigChanged` | — | Broadcast to all sessions |
+| `Error` | `code`, `message`, `recoverable` | Message already localized to the profile's language |
 
 ### 4.3 Audio frames
 
@@ -146,7 +146,7 @@ JSON; binary frames carry audio. All types live in `tipsy-protocol` and derive `
 ### 5.1 Flow of one question
 
 1. `listener` produces an `Utterance` (PCM) or the client sends `Ask`.
-2. Transcription (`TranscribeProvider`) with the persona's language hint → `Heard`.
+2. Transcription (`TranscribeProvider`) with the profile's language hint → `Heard`.
 3. Chat (`ChatProvider::stream`) with the session history → `ReplyDelta`s.
 4. A **sentence splitter** accumulates text and emits a sentence when it ends in `.`, `?`, `!` or
    `…` followed by whitespace and holds at least 25 characters (shorter fragments are merged with
@@ -172,8 +172,8 @@ client are kept in the history, so the LLM never assumes it said something the u
 
 ### 5.4 Sessions
 
-Each session has its own history. Configuration and active persona are global; changing them
-broadcasts `ConfigChanged` or `PersonaChanged`.
+Each session has its own history. Configuration and active profile are global; changing them
+broadcasts `ConfigChanged` or `ProfileChanged`.
 
 ## 6. Listening
 
@@ -187,7 +187,7 @@ broadcasts `ConfigChanged` or `PersonaChanged`.
   `hands_free` mode the client streams continuously; nothing leaves the machine until the wake
   word fires.
 - Detection is paused while the session is speaking and for 300 ms afterwards.
-- Each persona may define its own `wake_word`.
+- Each profile may define its own `wake_word`.
 - Clients show a visible mic indicator in the header whenever the mic is open; in `hands_free`
   it stays red for as long as the mode is active.
 - In the browser, audio capture requires a user gesture; the web client shows a "press to start"
@@ -221,8 +221,8 @@ trait TranscribeProvider {
 }
 ```
 
-`SpeechRequest` carries the text, the persona's `voice_instructions` and the voice resolved from
-the persona's `voices` table for the active speech provider.
+`SpeechRequest` carries the text, the profile's `voice_instructions` and the voice resolved from
+the profile's `voices` table for the active speech provider.
 
 | Connector | Chat | Speech | Transcribe | Notes |
 |---|---|---|---|---|
@@ -233,7 +233,7 @@ the persona's `voices` table for the active speech provider.
 `ProviderError` distinguishes `Auth`, `RateLimited`, `Timeout`, `Network`, `BadResponse` and
 `Cancelled`.
 
-## 8. Configuration and personas
+## 8. Configuration and profiles
 
 ### 8.1 File
 
@@ -242,7 +242,7 @@ the persona's `voices` table for the active speech provider.
 defaults on first run.
 
 ```toml
-active_persona = "compae"
+active_profile = "compae"
 
 [server]
 bind = "127.0.0.1:7070"
@@ -271,7 +271,7 @@ base_url = "https://openrouter.ai/api/v1"
 model = "openai/whisper-large-v3"
 key = "openrouter"
 
-[[personas]]
+[[profiles]]
 id = "compae"
 name = "El Compae"
 language = "es-ES"
@@ -279,10 +279,14 @@ prompt = "…"
 voice_instructions = "…"
 greeting = "…"
 wake_word = "oye compae"
-[personas.voices]
+[profiles.voices]
 gemini = "Charon"
 elevenlabs = "george"
 ```
+
+The two keys are `active_profile` and `[[profiles]]`. A file written with the previous spelling —
+`active_persona` and `[[personas]]` — still loads, silently and unchanged: both are serde aliases on
+the same fields, so nobody has to rewrite a `config.toml`, and every save writes the new spelling.
 
 The default transcription model slug must be verified during planning.
 
@@ -292,16 +296,16 @@ Resolution order for a key named `openrouter`: environment variable `TIPSY_KEY_O
 the OS credential store (service `tipsy-compadre`, account `openrouter`). The configuration screen
 writes to the credential store and never displays a full key.
 
-### 8.3 Personas
+### 8.3 Profiles
 
 - `language` (BCP 47) drives the transcription language hint, the interface language (`es-*` →
   Spanish, anything else → English) and the language in which `prompt`, `voice_instructions` and
   `greeting` are written.
 - `voices` maps speech connectors to a recommended voice; the provider default is used when there
   is no entry.
-- Built-in personas ship as defaults inside the binary; a persona with the same `id` in the user's
+- Built-in profiles ship as defaults inside the binary; a profile with the same `id` in the user's
   `config.toml` overrides it.
-- Every prompt includes these rules, in the persona's language:
+- Every prompt includes these rules, in the profile's language:
   - the assistant is a software developer's helper and always ends up giving a correct, useful
     answer, even after dodging;
   - it has **no access** to Jira, GitHub, GitLab or the user's code, never invents ticket
@@ -310,7 +314,7 @@ writes to the credential store and never displays a full key.
   - an original character: it never claims to be a real person or a character from films, books
     or other media, and never quotes them.
 
-Built-in personas for v1 (names and traits are a draft, to be refined while writing them):
+Built-in profiles for v1 (names and traits are a draft, to be refined while writing them):
 
 | id | Name | Language | Flavour |
 |---|---|---|---|
@@ -324,7 +328,7 @@ Built-in personas for v1 (names and traits are a draft, to be refined while writ
 | `bloke` | The Bloke | en-GB | English: understatement, irony, complains about the weather and the CI alike |
 | `polite_one` | The Polite One | en-CA | Canadian: apologises even when your code breaks production |
 
-**Persona guideline (also in `CONTRIBUTING.md`):** regional humour is affectionate. Play with the
+**Profile guideline (also in `CONTRIBUTING.md`):** regional humour is affectionate. Play with the
 friendly clichés of a place; never mock or insult people or groups, never use slurs, never imitate
 real people.
 
@@ -333,16 +337,16 @@ real people.
 The proof of concept HUD is kept: header, local clock, core rings, voice oscilloscope, system
 panel, CHAT/NETWORK tabs (CHAT/RED in Spanish) and question box. Changes:
 
-- Header shows the persona's title, the status, a ⚙ button and the listening mode indicator
+- Header shows the profile's title, the status, a ⚙ button and the listening mode indicator
   (`push`, `auto`, `hands free`), red while the mic is open.
 - **Configuration screen** (⚙ or `F9`), full screen, tabs:
   - *Providers*: connector, base URL, model and key name per capability; "Test" button
     (`TestProvider`) showing latency or the error.
   - *Listening*: mode, silence threshold, mic gain, mic device (native client only).
-  - *Personas*: active persona, multi-line editors for its texts, voices table.
+  - *Profiles*: active profile, multi-line editors for its texts, voices table.
   - *Server*: bind address, LAN toggle, token display and regeneration.
   - Changes apply on save, without restarting.
-- Strings in Spanish and English, chosen from the active persona's language. Two static tables in
+- Strings in Spanish and English, chosen from the active profile's language. Two static tables in
   `tipsy-ui`, no i18n framework.
 - Keyboard and mouse: every action has both. Default shortcuts avoid keys browsers reserve
   (`F5`, `F11`, `Ctrl+W`…).
@@ -379,7 +383,7 @@ postponed and the web terminal remains the browser option for v1.
 ## 12. Errors
 
 No failure crashes the server or is swallowed. Every failure becomes an `Error` event with a code,
-a message in the persona's language and a `recoverable` flag.
+a message in the profile's language and a `recoverable` flag.
 
 | Case | Behaviour |
 |---|---|
@@ -421,7 +425,7 @@ browser, wake word in Spanish and English.
 2. Providers (`openai_compat` first, then `gemini`, `elevenlabs`) with tests.
 3. Brain with streaming, ordering and barge-in.
 4. Native TUI client ported from the proof of concept onto `tipsy-ui`, `push` mode.
-5. Configuration screen and personas (all nine).
+5. Configuration screen and profiles (all nine).
 6. `auto` mode (VAD).
 7. WebSocket server and `--connect`.
 8. Web terminal.

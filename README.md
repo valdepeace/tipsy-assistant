@@ -1,16 +1,16 @@
 # tipsy-compadre
 
 tipsy-compadre is a voice assistant for software developers with a strong, affectionate regional
-personality. The default persona, *El Compae*, is a lazy, joking, slightly tipsy Andalusian who
+personality. The default profile, *El Compae*, is a lazy, joking, slightly tipsy Andalusian who
 knows Jira, GitHub, GitLab, CI/CD and code review, dodges work with developer excuses and, in the
 end, always gives a correct and useful answer. The project is meant to be shared with the
 community: a single executable, cloud providers that anyone can use with their own key, and
-personas that anyone can write for their own region.
+profiles that anyone can write for their own region.
 
 **Status: early development — terminal client only.** The workspace, the protocol, the
 configuration and the key handling, the OpenAI-compatible chat, speech and transcription
 providers, the brain and the native terminal client all work. Still to come: the configuration
-screen, the other personas (`meigo`, `chulapo`, `good_ol_boy`…), the native Gemini and ElevenLabs
+screen, the other profiles (`meigo`, `chulapo`, `good_ol_boy`…), the native Gemini and ElevenLabs
 connectors, the `auto` and `hands_free` listening modes, the WebSocket server, the web client and
 the web terminal, plus CI and releases. Today's listening mode is `push`: you open and close the
 microphone by hand.
@@ -58,7 +58,7 @@ Every action also has a mouse equivalent: the `CHAT`/`NETWORK` titles and the **
 clickable, and clicking a line of the conversation selects it. Keyboard and mouse each need their
 own binding.
 
-The interface is drawn in Spanish when the active persona's language starts with `es` (`NÚCLEO`,
+The interface is drawn in Spanish when the active profile's language starts with `es` (`NÚCLEO`,
 `PREGUNTA`, `CHAT`/`RED`, "Listo, quillo"), and in English otherwise.
 
 ## Configuration
@@ -73,10 +73,15 @@ prints the path of `config.toml`; it is `%APPDATA%\tipsy-compadre\config.toml` o
 defaults on the first run, and a `config.toml` that does not parse is renamed to
 `config.toml.bad-<unix seconds>` and replaced by defaults rather than overwritten in place.
 
+The characters the assistant can speak as are **profiles**: an `active_profile` and, when you write
+your own, a `[[profiles]]` array. An older `config.toml` that spelled those keys `active_persona`
+and `[[personas]]` still loads exactly as it did — nothing has to be rewritten by hand — and the next
+time the file is saved it carries the new spelling.
+
 The default configuration talks to OpenRouter for all three capabilities:
 
 ```toml
-active_persona = "compae"
+active_profile = "compae"
 
 [server]
 bind = "127.0.0.1:7070"
@@ -130,7 +135,7 @@ model = "your-transcription-model"
 key = ""
 ```
 
-As soon as the client starts it speaks the persona's greeting, so the `speech` provider has to work
+As soon as the client starts it speaks the profile's greeting, so the `speech` provider has to work
 before you hear anything: `llama3.1` in the example above is a chat model, and a local server has
 to be reachable for each capability you actually use. The configuration is read at startup, so quit
 and run the client again after editing `config.toml`.
@@ -148,11 +153,11 @@ Keychain or the Secret Service on Linux — under the service `tipsy-compadre`, 
 variable you exported. `key status` prints only a redacted form of a key, `key set` prints no more
 than that when it confirms, and nothing ever writes a key into `config.toml`.
 
-## Persona guideline
+## Profile guideline
 
 Regional humour is affectionate. Play with the friendly clichés of a place; never mock or insult
-people or groups, never use slurs, never imitate real people. Personas are **original characters**:
-a persona never claims to be a real person or a character from films, books or other media, and
+people or groups, never use slurs, never imitate real people. Profiles are **original characters**:
+a profile never claims to be a real person or a character from films, books or other media, and
 never quotes them.
 
 ## Documentation
@@ -160,7 +165,7 @@ never quotes them.
 - [`docs/architecture.md`](docs/architecture.md) — how the client, the session, the brain, the
   providers and the interface fit together.
 - [`docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md`](docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md)
-  — the v1 design spec: decisions, protocol, personas, errors, milestones.
+  — the v1 design spec: decisions, protocol, profiles, errors, milestones.
 
 ## Building
 

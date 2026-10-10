@@ -116,7 +116,7 @@ Expressive voices need large models, and almost all of them live in Python.
 |---|---|---|---|---|
 | **Qwen3-TTS 1.7B** | Yes | Voice design from a description, 3-second cloning | Apache-2.0 | Tested in the proof of concept: ~38–48 s per reply on an RTX 3060 Ti without flash-attn, far from real time. The 0.6B model should be roughly twice as fast |
 | **Chatterbox** (Resemble AI) | Yes, multilingual version | Cloning, emotion exaggeration control | MIT | Strong candidate for the tipsy delivery. Verify Castilian quality |
-| **Kokoro-82M** | Few Spanish voices | No | Apache-2.0 | Tiny and very fast, even on the CPU. Servable through Kokoro-FastAPI (OpenAI-compatible). Not expressive enough for the persona |
+| **Kokoro-82M** | Few Spanish voices | No | Apache-2.0 | Tiny and very fast, even on the CPU. Servable through Kokoro-FastAPI (OpenAI-compatible). Not expressive enough for the profile |
 | **Piper** | Yes (`es_ES` voices) | No | MIT | Very fast on the CPU, ONNX. Sounds like an answering machine |
 | **F5-TTS** | Through community fine-tunes | Cloning | Code MIT; weights CC-BY-NC | Good quality. The non-commercial weights complicate distribution |
 | **XTTS-v2** (Coqui) | Yes | Cloning | CPML (non-commercial) | Reliable, but the original project is abandoned |
