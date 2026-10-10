@@ -234,6 +234,14 @@ impl UiState {
                 self.tab = if self.tab == Tab::Chat { Tab::Network } else { Tab::Chat };
                 Vec::new()
             }
+            KeyInput::F(7) => {
+                self.tab = Tab::Chat;
+                Vec::new()
+            }
+            KeyInput::F(8) => {
+                self.tab = Tab::Network;
+                Vec::new()
+            }
             KeyInput::Up => {
                 self.selected = match self.selected {
                     _ if self.log.is_empty() => None,
