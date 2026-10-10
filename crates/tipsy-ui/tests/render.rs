@@ -20,7 +20,9 @@ fn clock() -> ClockView {
 }
 
 fn render(s: &UiState) -> (String, Vec<Hit>, Terminal<TestBackend>) {
-    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    // Wide enough for a whole reply line at a 30% left column: the log wraps, and the assertions
+    // below read the text of one line.
+    let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
     let mut hits = Vec::new();
     term.draw(|f| hits = draw(f, s, &clock(), "Compae · el asistente de garrafón")).unwrap();
     let text: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
@@ -29,6 +31,26 @@ fn render(s: &UiState) -> (String, Vec<Hit>, Terminal<TestBackend>) {
 
 fn text_at(term: &Terminal<TestBackend>, r: ratatui::layout::Rect) -> String {
     (r.x..r.right()).map(|x| term.backend().buffer()[(x, r.y)].symbol().to_string()).collect()
+}
+
+/// The inner rect of the panel whose title is `title`, read off the drawn buffer: a panel is a
+/// rounded block, so the title sits on the row of its top border, between its `╭` and its `╮`.
+fn panel_inner(term: &Terminal<TestBackend>, title: &str) -> ratatui::layout::Rect {
+    let buffer = term.backend().buffer();
+    let area = buffer.area;
+    let text_row = |y: u16| -> String {
+        (area.left()..area.right()).map(|x| buffer[(x, y)].symbol().to_string()).collect()
+    };
+
+    let top = (area.top()..area.bottom()).find(|&y| text_row(y).contains(title)).expect("the panel title");
+    let title_x = {
+        let line = text_row(top);
+        area.left() + line[..line.find(title).unwrap()].chars().count() as u16
+    };
+    let left = (area.left()..title_x).rev().find(|&x| buffer[(x, top)].symbol() == "╭").expect("left border");
+    let right = (title_x..area.right()).find(|&x| buffer[(x, top)].symbol() == "╮").expect("right border");
+    let bottom = (top + 1..area.bottom()).find(|&y| buffer[(left, y)].symbol() == "╰").expect("bottom border");
+    ratatui::layout::Rect::new(left + 1, top + 1, right - left - 1, bottom - top - 1)
 }
 
 #[test]
@@ -100,6 +122,37 @@ fn clickable_areas_sit_on_their_labels() {
         (" RED ".to_string(), KeyInput::F(8)),
         (" ✗ Borrar ".to_string(), KeyInput::F(4)),
     ]);
+}
+
+#[test]
+fn rings_fit_inside_their_panel_when_it_is_not_wide_enough_for_them() {
+    // Taller than the rings are wide: the old window was fixed vertically and only compensated the
+    // shape of a terminal cell across, so a panel this narrow drew the rings far larger than it.
+    let s = state(UiLanguage::Es);
+    for (w, h) in [(110, 60), (100, 50)] {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            draw(f, &s, &clock(), "x");
+        })
+        .unwrap();
+
+        // The outermost ring is a full circle, so the middle row of its panel always crosses it and
+        // the horizontal extremes do not move with the clock.
+        let inner = panel_inner(&term, "NÚCLEO");
+        let y = inner.y + inner.height / 2;
+        let buffer = term.backend().buffer();
+        let drawn: Vec<u16> = (inner.x..inner.right()).filter(|&x| buffer[(x, y)].symbol() != " ").collect();
+        let first = *drawn.first().expect("the outer ring crosses the middle row of its panel");
+        let last = *drawn.last().unwrap();
+
+        assert!(first > inner.x, "the ring touches the left border of its panel at {w}x{h}");
+        assert!(last + 1 < inner.right(), "the ring touches the right border of its panel at {w}x{h}");
+        // A window scaled until the drawing fits leaves the middle row almost as wide as the panel.
+        // The old one put the horizontal extremes of the ring outside the window, and ratatui drops
+        // the points that fall outside it, so only the small centre circle was left visible.
+        let span = last - first + 1;
+        assert!(span >= inner.width * 3 / 4, "the ring must fill its panel at {w}x{h}: {span} of {} columns", inner.width);
+    }
 }
 
 #[test]

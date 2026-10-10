@@ -30,9 +30,13 @@ const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 const ENVELOPE_HOP_MS: f64 = 50.0;
 /// Envelope samples on screen in the oscilloscope: three seconds' worth.
 const VOICE_WINDOW: f64 = 60.0;
-/// Share of the width the clock and the log get. The proof of concept made it 28%, which clips a
-/// reply line — marker, text and timing — before it ends.
-const LEFT_PERCENT: u16 = 40;
+/// Share of the width the clock and the log get. The proof of concept made it 28%; 30 is the chosen
+/// compromise: narrow enough to leave the core in the middle of the HUD, and wide enough that a
+/// reply wraps into a couple of lines instead of a column of single words.
+const LEFT_PERCENT: u16 = 30;
+/// World half-extent the rings are drawn in when the panel has room for it. The outermost ring has
+/// radius 46, so this leaves it a margin instead of touching the border.
+const RING_VIEW: f64 = 50.0;
 
 pub struct ClockView {
     pub time: String,
@@ -159,33 +163,133 @@ fn draw_log(frame: &mut Frame, state: &UiState, area: Rect) {
     if area.is_empty() {
         return;
     }
-    let items: Vec<ListItem> = state.log.iter().map(|entry| log_item(entry, state.strings())).collect();
+    // `List` does not wrap an item that is wider than the panel, so every entry is wrapped here.
+    let items: Vec<ListItem> = state.log.iter().map(|entry| log_item(entry, state.strings(), area.width)).collect();
     let list = List::new(items).highlight_style(Style::new().fg(Color::Black).bg(CYAN).add_modifier(Modifier::BOLD));
     let mut list_state = ListState::default().with_selected(state.selected);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-fn log_item(entry: &LogEntry, strings: &Strings) -> ListItem<'static> {
-    let line = if entry.who == Who::User {
-        Line::from(vec![
-            Span::from(format!("{} ", strings.you)).fg(DIM),
-            Span::from(entry.text.clone()).fg(Color::White),
-        ])
+/// One run of entry text and the style it keeps wherever the wrap puts it.
+struct Piece {
+    text: String,
+    style: Style,
+}
+
+/// The entry as the list draws it, wrapped to the width of the panel.
+fn log_item(entry: &LogEntry, strings: &Strings, width: u16) -> ListItem<'static> {
+    ListItem::new(wrap(log_pieces(entry, strings), width as usize))
+}
+
+/// The runs an entry is made of: the marker of an assistant entry or the prefix of a user one
+/// first, then the text, and the timing on a reply that has been said.
+fn log_pieces(entry: &LogEntry, strings: &Strings) -> Vec<Piece> {
+    let piece = |text: &str, style: Style| Piece { text: text.to_string(), style };
+    if entry.who == Who::User {
+        vec![
+            piece(&format!("{} ", strings.you), Style::new().fg(DIM)),
+            piece(&entry.text, Style::new().fg(Color::White)),
+        ]
     } else if let Some(error) = &entry.error {
-        Line::from(Span::from(format!("◆  ✗ {error}")).fg(Color::Red))
+        vec![piece("◆  ✗ ", Style::new().fg(Color::Red)), piece(error, Style::new().fg(Color::Red))]
     } else if let Some(first_audio_ms) = entry.first_audio_ms {
-        Line::from(vec![
-            Span::from("◆  ").fg(GOLD),
-            Span::from(entry.text.clone()).fg(CYAN),
-            Span::from(format!(" {:.1}s", first_audio_ms as f64 / 1000.0)).fg(DIM),
-        ])
+        vec![
+            piece("◆  ", Style::new().fg(GOLD)),
+            piece(&entry.text, Style::new().fg(CYAN)),
+            piece(&format!(" {:.1}s", first_audio_ms as f64 / 1000.0), Style::new().fg(DIM)),
+        ]
     } else {
-        Line::from(vec![
-            Span::from("◆  ").fg(GOLD),
-            Span::from(entry.text.clone()).fg(GOLD).italic(),
-        ])
-    };
-    ListItem::new(line)
+        vec![piece("◆  ", Style::new().fg(GOLD)), piece(&entry.text, Style::new().fg(GOLD).italic())]
+    }
+}
+
+/// Word-wraps styled runs into rows of at most `width` columns.
+///
+/// A row breaks on a space the text already has, and the space a break happens at is dropped; only a
+/// single word that does not fit a row of its own is cut, and never inside a character. No text is
+/// dropped, so the timing of a reply stays on screen wherever the wrap puts it.
+fn wrap(pieces: Vec<Piece>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut row: Vec<Piece> = Vec::new();
+    let mut used = 0;
+    for mut word in pieces.into_iter().flat_map(split_words) {
+        loop {
+            if row.is_empty() {
+                // The space a row broke at, or a word left empty by it, is not drawn.
+                word.text = word.text.trim_start().to_string();
+                if word.text.is_empty() {
+                    break;
+                }
+            }
+            let w = text_width(&word.text);
+            if used + w <= width {
+                used += w;
+                row.push(word);
+                break;
+            }
+            if row.is_empty() {
+                // A word too long for a row of its own: draw as much of it as fits.
+                let (head, tail) = cut_at(&word.text, width);
+                let tail = tail.to_string();
+                row.push(Piece { text: head.to_string(), style: word.style });
+                lines.push(take_row(&mut row));
+                used = 0;
+                word.text = tail;
+                if word.text.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            lines.push(take_row(&mut row));
+            used = 0;
+        }
+    }
+    if !row.is_empty() {
+        lines.push(take_row(&mut row));
+    }
+    if lines.is_empty() {
+        // An entry without any text still takes its row in the list.
+        lines.push(Line::default());
+    }
+    lines
+}
+
+/// Splits a run into the words a row may break between, each keeping the space that follows it so
+/// that unwrapped text is reproduced exactly as it came in.
+fn split_words(piece: Piece) -> Vec<Piece> {
+    piece.text.split_inclusive(' ').map(|text| Piece { text: text.to_string(), style: piece.style }).collect()
+}
+
+/// Turns the pieces a row has collected into a line, trimming the space a break left on it.
+fn take_row(row: &mut Vec<Piece>) -> Line<'static> {
+    if let Some(last) = row.last_mut() {
+        last.text = last.text.trim_end().to_string();
+    }
+    let spans: Vec<Span> = row.drain(..).filter(|piece| !piece.text.is_empty()).map(|piece| Span::styled(piece.text, piece.style)).collect();
+    Line::from(spans)
+}
+
+/// The columns `text` takes on screen, by ratatui's own reckoning.
+fn text_width(text: &str) -> usize {
+    Span::from(text).width()
+}
+
+/// Splits `text` after the characters that fill `width` columns, always keeping at least one
+/// character: a symbol wider than the row still moves the cut forward, so a caller cannot loop for
+/// ever on a row too narrow for it.
+fn cut_at(text: &str, width: usize) -> (&str, &str) {
+    let mut end = 0;
+    let mut used = 0;
+    for (i, c) in text.char_indices() {
+        let w = text_width(c.encode_utf8(&mut [0; 4]));
+        if used > 0 && used + w > width {
+            break;
+        }
+        used += w;
+        end = i + c.len_utf8();
+    }
+    (&text[..end], &text[end..])
 }
 
 fn draw_net(frame: &mut Frame, state: &UiState, area: Rect) {
@@ -231,6 +335,20 @@ fn draw_net(frame: &mut Frame, state: &UiState, area: Rect) {
     frame.render_widget(chart, area);
 }
 
+/// The world window the rings are scaled into: at least [`RING_VIEW`] on each axis, and widened
+/// until the whole drawing fits the panel.
+///
+/// Terminal cells are twice as tall as wide, so half as much world per cell is spanned across as
+/// down — the same world distance per cell on both axes is exactly what keeps the circles round.
+/// The axis that is tight for the panel ends up at `RING_VIEW` and is filled by the drawing; the
+/// other one only grows, so nothing is ever clipped.
+fn ring_bounds(inner: Rect) -> (f64, f64) {
+    let w = f64::from(inner.width.max(1));
+    let h = f64::from(inner.height.max(1));
+    let yr = RING_VIEW.max(2.0 * RING_VIEW * h / w);
+    (yr * w / (2.0 * h), yr)
+}
+
 fn draw_rings(frame: &mut Frame, state: &UiState, area: Rect) {
     if area.is_empty() {
         return;
@@ -238,13 +356,13 @@ fn draw_rings(frame: &mut Frame, state: &UiState, area: Rect) {
     let t = state.elapsed_ms as f64 / 1000.0;
     let level = state.voice_level() as f64;
     let speed = if state.busy() { 2.2 } else { 0.5 };
-    // Terminal cells are twice as tall as wide; the bounds compensate so the rings stay round.
-    let xr = 50.0 * area.width as f64 / (area.height.max(1) as f64 * 2.0);
+    let block = panel(state.strings().core);
+    let (xr, yr) = ring_bounds(block.inner(area));
     let canvas = Canvas::default()
-        .block(panel(state.strings().core))
+        .block(block)
         .marker(Marker::Braille)
         .x_bounds([-xr, xr])
-        .y_bounds([-50.0, 50.0])
+        .y_bounds([-yr, yr])
         .paint(move |ctx| {
             ctx.draw(&Circle { x: 0.0, y: 0.0, radius: 46.0, color: DIM });
             for (r, n, dir, color) in [(40.0, 3, 1.0, CYAN), (33.0, 6, -1.6, DIM), (27.0, 2, 2.4, GOLD)] {
@@ -394,5 +512,88 @@ fn human(bps: f64) -> String {
         b if b >= 1e6 => format!("{:.1} MB/s", b / 1e6),
         b if b >= 1e3 => format!("{:.1} KB/s", b / 1e3),
         b => format!("{b:.0} B/s"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn es() -> &'static crate::strings::Strings {
+        crate::strings::strings(UiLanguage::Es)
+    }
+
+    fn done(text: &str, first_audio_ms: u64) -> LogEntry {
+        LogEntry {
+            who: Who::Assistant,
+            text: text.into(),
+            first_audio_ms: Some(first_audio_ms),
+            error: None,
+            pending: false,
+        }
+    }
+
+    fn rendered(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn wrap_breaks_only_on_spaces() {
+        let pieces = vec![Piece { text: "uno dos tres cuatro".into(), style: Style::new() }];
+        assert_eq!(rendered(&wrap(pieces, 8)), ["uno dos", "tres", "cuatro"]);
+    }
+
+    #[test]
+    fn wrap_cuts_a_word_that_does_not_fit_a_row_and_never_inside_a_character() {
+        let pieces = vec![Piece { text: "tú supercalifragilístico".into(), style: Style::new() }];
+        assert_eq!(rendered(&wrap(pieces, 6)), ["tú", "superc", "alifra", "gilíst", "ico"]);
+    }
+
+    #[test]
+    fn wrap_keeps_the_marker_first_and_the_timing_whole() {
+        let rows = rendered(&wrap(log_pieces(&done("Ozú, quillo, eso es de backend", 1500), es()), 20));
+        assert_eq!(rows.first().map(String::as_str), Some("◆  Ozú, quillo, eso"), "the marker opens the entry");
+        assert!(rows.iter().any(|row| row.contains("1.5s")), "the timing must stay whole: {rows:?}");
+        assert_eq!(rows.concat().replace(' ', ""), "◆Ozú,quillo,esoesdebackend1.5s", "nothing may be dropped");
+    }
+
+    #[test]
+    fn wrap_keeps_a_user_prefix_on_the_first_row_and_wraps_an_error() {
+        let mut entry = LogEntry {
+            who: Who::User,
+            text: "¿y el ticket de la cena?".into(),
+            first_audio_ms: None,
+            error: None,
+            pending: false,
+        };
+        let rows = rendered(&wrap(log_pieces(&entry, es()), 12));
+        assert_eq!(rows.first().map(String::as_str), Some("tú ¿y el"), "the prefix opens the entry");
+        assert!(rows.iter().all(|row| text_width(row) <= 12), "{rows:?}");
+        assert_eq!(rows.concat().replace(' ', ""), "tú¿yelticketdelacena?", "nothing may be dropped");
+
+        entry.who = Who::Assistant;
+        entry.error = Some("no hay conexión con el servidor".into());
+        let rows = rendered(&wrap(log_pieces(&entry, es()), 12));
+        assert!(rows.first().is_some_and(|row| row.starts_with("◆  ✗ ")), "{rows:?}");
+        assert!(rows.iter().all(|row| text_width(row) <= 12), "{rows:?}");
+        assert_eq!(rows.concat().replace(' ', ""), "◆✗nohayconexiónconelservidor");
+    }
+
+    #[test]
+    fn wrap_wraps_a_pending_reply_too() {
+        let mut entry = done("estoy pensando en la respuesta", 1500);
+        entry.first_audio_ms = None;
+        entry.pending = true;
+        let rows = rendered(&wrap(log_pieces(&entry, es()), 12));
+        assert_eq!(rows, ["◆  estoy", "pensando en", "la respuesta"]);
+    }
+
+    #[test]
+    fn a_row_too_narrow_for_the_marker_still_terminates() {
+        let rows = rendered(&wrap(log_pieces(&done("hola", 1500), es()), 1));
+        assert_eq!(rows.concat(), "◆hola1.5s", "nothing may loop for ever or be lost: {rows:?}");
     }
 }
