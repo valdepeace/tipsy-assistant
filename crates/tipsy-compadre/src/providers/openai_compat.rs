@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use super::sse::{SseItem, SseParser};
-use super::{ChatProvider, ChatRequest, ProviderError, TextStream};
+use super::{ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest, TextStream};
+use crate::audio::pcm::{decode_audio, pcm_s16le_to_pcm, Pcm};
 
 const CHAT_TIMEOUT: Duration = Duration::from_secs(30);
+const SPEECH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct OpenAiCompat {
     client: reqwest::Client,
@@ -100,5 +102,57 @@ impl ChatProvider for OpenAiCompat {
             })
             .flat_map(futures::stream::iter);
         Ok(stream.boxed())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechFormat {
+    Mp3,
+    /// Raw signed 16-bit little-endian mono at 24 kHz (Gemini only accepts this).
+    Pcm24k,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeechQuirks {
+    pub format: SpeechFormat,
+    pub instructions: bool,
+}
+
+pub fn speech_quirks(model: &str) -> SpeechQuirks {
+    if model.starts_with("google/") {
+        SpeechQuirks { format: SpeechFormat::Pcm24k, instructions: true }
+    } else if model.starts_with("openai/") {
+        SpeechQuirks { format: SpeechFormat::Mp3, instructions: true }
+    } else {
+        SpeechQuirks { format: SpeechFormat::Mp3, instructions: false }
+    }
+}
+
+#[async_trait]
+impl SpeechProvider for OpenAiCompat {
+    async fn synthesize(&self, req: SpeechRequest) -> Result<Pcm, ProviderError> {
+        let quirks = speech_quirks(&self.model);
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "input": req.text,
+            "response_format": match quirks.format { SpeechFormat::Mp3 => "mp3", SpeechFormat::Pcm24k => "pcm" },
+        });
+        if let Some(voice) = &req.voice {
+            body["voice"] = serde_json::json!(voice);
+        }
+        if quirks.instructions && !req.instructions.is_empty() {
+            body["instructions"] = serde_json::json!(req.instructions);
+        }
+        let resp = self
+            .authed(self.client.post(self.url("audio/speech")))
+            .timeout(SPEECH_TIMEOUT)
+            .json(&body)
+            .send()
+            .await?;
+        let bytes = Self::check(resp).await?.bytes().await?;
+        match quirks.format {
+            SpeechFormat::Pcm24k => Ok(pcm_s16le_to_pcm(&bytes, 24000)),
+            SpeechFormat::Mp3 => decode_audio(bytes.to_vec()).map_err(ProviderError::BadResponse),
+        }
     }
 }

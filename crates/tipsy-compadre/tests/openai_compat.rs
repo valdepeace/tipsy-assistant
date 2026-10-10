@@ -1,6 +1,8 @@
 use futures::StreamExt;
-use tipsy_compadre::providers::openai_compat::OpenAiCompat;
-use tipsy_compadre::providers::{ChatMessage, ChatProvider, ChatRequest, ProviderError};
+use tipsy_compadre::providers::openai_compat::{speech_quirks, OpenAiCompat, SpeechFormat};
+use tipsy_compadre::providers::{
+    ChatMessage, ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest,
+};
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -124,4 +126,98 @@ async fn trailing_slash_in_base_url_is_ignored() {
         .await;
     let p = OpenAiCompat::new(format!("{}/v1/", server.uri()), "m", None);
     assert_eq!(collect(&p).await.unwrap(), vec!["ok".to_string()]);
+}
+
+fn wav_bytes() -> Vec<u8> {
+    // 100 ms of a 440 Hz tone at 16 kHz, encoded as WAV (the decoder accepts WAV like MP3).
+    let samples: Vec<f32> =
+        (0..1600).map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 16000.0).sin() * 0.5).collect();
+    tipsy_compadre::audio::pcm::encode_wav_16k(&tipsy_compadre::audio::pcm::Pcm { samples, sample_rate: 16000 })
+}
+
+#[test]
+fn quirks_by_model() {
+    assert_eq!(speech_quirks("google/gemini-3.8-flash-tts").format, SpeechFormat::Pcm24k);
+    assert!(speech_quirks("google/gemini-3.8-flash-tts").instructions);
+    assert_eq!(speech_quirks("openai/gpt-4o-mini-tts").format, SpeechFormat::Mp3);
+    assert!(speech_quirks("openai/gpt-4o-mini-tts").instructions);
+    assert_eq!(speech_quirks("elevenlabs/eleven-flash-v2.5").format, SpeechFormat::Mp3);
+    assert!(!speech_quirks("elevenlabs/eleven-flash-v2.5").instructions);
+}
+
+#[tokio::test]
+async fn speech_gemini_sends_pcm_format_and_instructions() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .and(body_partial_json(serde_json::json!({
+            "model": "google/gemini-3.8-flash-tts", "input": "Ozú", "voice": "Charon",
+            "instructions": "andaluz", "response_format": "pcm"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0x00, 0x40, 0x00, 0xC0]))
+        .mount(&server)
+        .await;
+    let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "google/gemini-3.8-flash-tts", Some("k".into()));
+    let pcm = p
+        .synthesize(SpeechRequest { text: "Ozú".into(), instructions: "andaluz".into(), voice: Some("Charon".into()) })
+        .await
+        .unwrap();
+    assert_eq!(pcm.sample_rate, 24000);
+    assert_eq!(pcm.samples.len(), 2);
+}
+
+#[tokio::test]
+async fn speech_mp3_models_decode_and_skip_instructions() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .and(body_partial_json(
+            serde_json::json!({"model": "elevenlabs/eleven-flash-v2.5", "response_format": "mp3", "voice": "george"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(wav_bytes()))
+        .mount(&server)
+        .await;
+    let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "elevenlabs/eleven-flash-v2.5", None);
+    let pcm = p
+        .synthesize(SpeechRequest { text: "hola".into(), instructions: "ignored".into(), voice: Some("george".into()) })
+        .await
+        .unwrap();
+    assert_eq!(pcm.sample_rate, 16000);
+    assert_eq!(pcm.samples.len(), 1600);
+    let received = &server.received_requests().await.unwrap()[0];
+    let body: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+    assert!(body.get("instructions").is_none(), "instructions must not be sent: {body}");
+}
+
+#[tokio::test]
+async fn speech_without_voice_omits_the_field() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(wav_bytes()))
+        .mount(&server)
+        .await;
+    let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "x/y", None);
+    p.synthesize(SpeechRequest { text: "hola".into(), instructions: String::new(), voice: None }).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert!(body.get("voice").is_none());
+}
+
+#[tokio::test]
+async fn speech_errors_are_mapped() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_string(r#"{"error":{"message":"Gemini TTS only supports response_format=\"pcm\"."}}"#),
+        )
+        .mount(&server)
+        .await;
+    let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "x/y", None);
+    let err = p
+        .synthesize(SpeechRequest { text: "a".into(), instructions: String::new(), voice: None })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProviderError::BadResponse(m) if m.contains("only supports")));
 }
