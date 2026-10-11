@@ -712,7 +712,6 @@ mod tests {
     // import only, and the click test below is what needs it.
     use crate::config_form::ConfigTab;
     use ratatui::layout::Rect;
-    use tipsy_protocol::*;
 
     fn welcome(lang: UiLanguage) -> Event {
         welcome_mode(lang, ListeningMode::Push)

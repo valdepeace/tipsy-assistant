@@ -3,6 +3,7 @@
 pub mod config_form;
 pub mod render;
 pub mod render_config;
+pub mod render_login;
 pub mod state;
 pub mod strings;
 

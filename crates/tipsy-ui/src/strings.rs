@@ -72,6 +72,29 @@ pub struct Strings {
     /// The HUD's notice for `hands_free`: the third mode the configuration accepts and the one this
     /// plan does not implement. It says what is missing rather than staying quiet.
     pub hands_free_unimplemented: &'static str,
+    /// The login widget's one line, when it has nothing else to say (spec §6.1, §8).
+    pub login_prompt: &'static str,
+    /// What the transcriber heard, with the answer in `{text}`: a misheard accent is visible rather
+    /// than mysterious.
+    pub login_heard: &'static str,
+    /// The refusal, and the only thing a wrong answer ever says.
+    pub login_refusal: &'static str,
+    /// The door opening, with the matched entry's name in `{name}`.
+    pub login_pass: &'static str,
+    /// The same, for an entry that carries no name.
+    pub login_pass_anon: &'static str,
+    /// `ErrorCode::NothingHeard` on the screen: the UI's own wording, because the server's message for
+    /// it is English.
+    pub login_nothing_heard: &'static str,
+    /// A microphone the screen wanted and did not get: typing always works (spec §9).
+    pub login_no_mic: &'static str,
+    /// The widget's title, right-aligned and red while the capture is open.
+    pub login_rec: &'static str,
+    /// The keys, on the widget's bottom border.
+    pub login_keys: &'static str,
+    /// The same border from the third refusal in a row: the escape hatch that keeps a locked-out owner
+    /// from being stuck (spec §6, L8).
+    pub login_keys_lost: &'static str,
 }
 
 pub static ES: Strings = Strings {
@@ -138,6 +161,16 @@ pub static ES: Strings = Strings {
     mode_auto: "auto",
     mode_hands_free: "hands free",
     hands_free_unimplemented: "manos libres aún no está: espera a la palabra clave",
+    login_prompt: "¿Y tú quién eres? Dímelo, que aquí no entra cualquiera.",
+    login_heard: "Te he oído: «{text}»",
+    login_refusal: "Anda, que te peinen para el lado.",
+    login_pass: "Pasa, {name}.",
+    login_pass_anon: "Pasa.",
+    login_nothing_heard: "No te he oído. Repite, si eso.",
+    login_no_mic: "Sin micro: escribe, que también vale.",
+    login_rec: "● rec",
+    login_keys: "Tab micro · Enter entrar · esc salir",
+    login_keys_lost: "Tab micro · Enter entrar · ¿olvidado? [login] en config.toml",
 };
 
 pub static EN: Strings = Strings {
@@ -204,6 +237,16 @@ pub static EN: Strings = Strings {
     mode_auto: "auto",
     mode_hands_free: "hands free",
     hands_free_unimplemented: "hands free is not implemented yet: it waits for the wake word",
+    login_prompt: "So who are you, then? Tell me — this door isn't for just anyone.",
+    login_heard: "I heard: \"{text}\"",
+    login_refusal: "Off you go, and get your hair combed somewhere else.",
+    login_pass: "Come in, {name}.",
+    login_pass_anon: "Come in.",
+    login_nothing_heard: "I heard nothing. Try again, if you like.",
+    login_no_mic: "No mic: type it, that works too.",
+    login_rec: "● rec",
+    login_keys: "Tab mic · Enter in · esc quit",
+    login_keys_lost: "Tab mic · Enter in · forgotten it? [login] in config.toml",
 };
 
 pub fn strings(lang: UiLanguage) -> &'static Strings {
