@@ -932,8 +932,16 @@ async fn a_call_that_outlives_the_apis_session_cap_reopens_instead_of_ending() {
     }
 
     // A reopen is not a new call: the HUD was told the call is live once, when the first socket came
-    // up, and the second one changes nothing it can see.
-    let seen = collect_until(&mut from_call, |seen| events_of(seen).len() >= 2).await;
+    // up, and the second one changes nothing it can see. It *is* a fresh session, though, and the log
+    // says so: the reopened socket is configured from `session.update` alone, with no history
+    // replayed, so the assistant has forgotten everything said before the cap.
+    let seen = collect_until(&mut from_call, |seen| error_of(seen).is_some()).await;
+    let notice = error_of(&seen).expect("the reopen is reported, not silent");
+    assert!(notice.contains("60-minute cap"), "the notice names what was reached: {notice}");
+    assert!(
+        notice.contains("remembers nothing"),
+        "and what the user loses: the conversation before the reopen: {notice}"
+    );
     assert_eq!(
         events_of(&seen).iter().filter(|event| matches!(event, Event::Live { active: true })).count(),
         1,

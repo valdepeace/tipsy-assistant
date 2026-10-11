@@ -243,6 +243,10 @@ The mode is off until you turn it on, and it will not start while it is off: the
 names (`openai` by default) has to resolve first. Turn detection reuses `[listening] silence_ms`, so
 one number, not two, decides how long a pause ends your turn.
 
+A call that reaches the API's own 60-minute cap reopens a fresh session and the assistant starts from
+nothing: the call carries on and the microphone stays open, but nothing said before the reopen is
+remembered. The log says when it happened.
+
 ```toml
 [realtime]
 enabled = false          # a call bills while it is open: this is the switch
