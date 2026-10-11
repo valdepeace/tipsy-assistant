@@ -223,7 +223,7 @@ introduced by the task that owns them and no other task may invent a variant of 
 | `ErrorCode`'s new variants | Task 1.1 | `lib.rs:51-64` has ten variants and **none of them can spell this tier's refusals**. Add `ProtocolVersion`, `TokenRequired`, `TokenInvalid`, `BadMessage` and `InsecureTransport` (serde `snake_case` → `protocol_version`, `token_required`, `token_invalid`, `bad_message`, `insecure_transport`). **The `message` field stays the human half** — the v1 spec §4.2 defines it as "already localized to the profile's language", so a client may not branch on it, which is exactly why the codes exist. Adding variants breaks every exhaustive match on `ErrorCode`: the owning task greps for them and adds behaviour-free arms, as it does for `Event` |
 | `Hub` | Task 1.3 | `tipsy-compadre::server::hub`, `#[derive(Clone)]`. Holds the configuration, its path, the `KeyResolver` (behind an `Arc`; it is not `Clone`) **and the one shared `ProviderSlot`**. `Hub::new(config, config_path, keys, providers)`. The slot is built by the caller — `main.rs`'s `serve` arm, through `Settings.providers` — and **`Hub::spawn(policy: SessionPolicy) -> SessionEnds` clones it per session** (no `config`, no `brain_config`, no `providers`: the hub holds the first, defaults the second because nothing in this plan configures a `BrainConfig`, and owns the third, so the only per-connection fact a caller passes is the policy), so every `Brain` in the process holds the same slot. **`spawn` is the only entry point: there is no `spawn_with`.** The difference between one caller and another is the slot handed to `Hub::new`, never an argument to `spawn` — a second entry point taking providers again would reopen the ownership question this row just closed. The rest of the surface, none of which a sibling task invents: `path`, `config`, `providers`, `config_view(include_token)`, `attach(session_id, to_server, events)`, `detach`, `broadcast(ToClient) -> usize`, `session_ids`, `resend_welcome`, `reconfigure_all() -> bool` (rebuild the connectors, `replace` them in the shared slot, then hand `Command::UpdateConfig` to every session so each re-derives its own `Brain` — the two halves of a change), `apply_config(Config) -> bool` (persist, remember, re-derive; the one place a change becomes durable), `update_config`, `update_config_from_view`, `set_profile`, `set_listening_mode`, `set_key` **One slot for the whole server, not one per connection**, because that is what the code already does (`client.rs` builds one and `ProviderSlot::replace` exists for exactly this) and because it makes a configuration change atomic: `reconfigure_all` rebuilds the connectors from the new configuration, `replace`s them in the slot, and tells each session to re-derive its `Brain` (the profile's prompt and voice are per session), then `ConfigChanged` goes out. **`Hub::spawn(...)` is the only way a connection starts a session**: it attaches the session to the hub *before* `Welcome`, which is what stops a broadcast from missing a session or a session from missing a broadcast. `Hub::config_view(include_token: bool) -> ConfigView` is §4.3's rule expressed as one `bool`. Also `attach(&self, session_id: u64, to_server: UnboundedSender<ToServer>, events: UnboundedSender<ToClient>)` (**two** senders: `reconfigure_all` talks to the session, not to its client), `detach`, `broadcast(ToClient) -> usize`, `resend_welcome`, `reconfigure_all`. Task 1.6 uses `Hub::spawn` and must not hand-roll attach ordering |
 | `server::run(settings, bound) -> Result<(), ServerError>` | Task 1.4 | `tipsy-compadre::server`. The listener, the router and the bind rule; called by `main.rs`. **The final `Settings` shape, which Tasks 1.7 and 1.8 both extend in place:** `Settings { bind: String, lan: bool, token: String, config: Config, config_path: PathBuf, keys: KeyResolver, providers: ProviderSlot, tls: Option<TlsFiles> }`. **`tls` is a three-state field, not an `Option` around one thing**, because `--tls` alone and `--tls` with a user-supplied pair are different promises (§5.5) and one `Option<(PathBuf, PathBuf)>` cannot tell them apart: `None` is TLS off; `Some(TlsFiles::Generated)` means *`--tls` with no paths* — generate the pair in the config directory on first use and reuse it afterwards; `Some(TlsFiles::Supplied { cert, key })` means *the user named these files* — read them, and **refuse to start naming the path** when one is absent or unparseable (§10). A single `Option<(PathBuf, PathBuf)>` would silently generate over a path the user pointed at, which is the one outcome §10 forbids. `TlsFiles` is **Task 1.4's type, defined in `server/mod.rs` beside `Settings`** — not Task 1.8's, and the ordering is why: Tasks 1.7 and 1.8 must both name the field's type, and 1.7 builds a `Settings` literal (`tls: None`) **before** `1.8`'s `server/tls.rs` exists, so a type introduced by 1.8 would leave 1.4 and 1.7 uncompilable in the interval. Task 1.8 *consumes* it and owns the loading, in `server/tls.rs`, called from **inside `server::run`** so a bad path becomes a `ServerError` carrying the path (§10) rather than a second error type in `main.rs` — which is also what keeps `Settings`' `Clone` and `Debug` derives honest, since `RustlsConfig` is neither. **`config_path` and `keys` are in the struct because `server::run` builds the `Hub` from the `Settings` it is handed** — `Hub::new(config, config_path, keys, providers)` — rather than taking a pre-built hub from `main.rs`; a task that builds a `Settings` literal must supply all eight fields or it does not compile. `bound` is a oneshot sender the listener uses after **both** halves of §5.1's rule pass, so a test on port 0 learns the port and a test that ends instead has proved a refusal |
-| `assets::{PAGE_CLIENT, PAGE_TERMINAL, page_missing(), asset(path)}` | Task 1.5 | `tipsy-compadre::server::assets`. Returns bytes plus a content type, or `None` when the bundle is absent |
+| `assets::{PAGE_CLIENT, PAGE_TERMINAL, resolve(path), fallback(), asset(path), web_bundle()}` | Task 1.5 | `tipsy-compadre::server::assets`. Returns bytes plus a content type, or `None` when the bundle is absent. **`resolve` and `fallback` are pinned by Task 1.4**, which had to create this file as a placeholder because its own router could not compile without it; Task 1.5 fills their bodies and adds the rest |
 | `server::conn::serve(socket, session_ends, hub)` | Task 1.6 | The per-connection bridge |
 | `client::bridge::connect(url, token) -> Result<SessionEnds, BridgeError>` | Task 1.7 | `tipsy-compadre::client::bridge`. Returns a `SessionEnds` **indistinguishable in shape** from `spawn_with_events`' |
 | `server::tls::{load_or_generate(paths) -> Result<Certificate, TlsError>}` | Task 1.8 | `tipsy-compadre::server::tls`. **Ratified: `sha2 = "0.10"` is added as a direct dependency** for the certificate fingerprint, because the lock already carries `sha2` at **both `0.10.9` and `0.11.0`** (verified) — declaring `"0.10"` reuses the existing entry instead of introducing a third. The fingerprint is hashed from the DER at runtime and its test asserts its shape, never a hard-coded value. Zero-dependency fallback if a reviewer refuses the edge: print the pair's paths and SANs and drop `Certificate::fingerprint` |
@@ -251,6 +251,21 @@ a style preference:
   from 1.4, because `TlsError` does not exist until 1.8's `server/tls.rs` does — and **Task 2.1 adds
   `Message(String)`**, because 2.1 is the first task that needs it. A first draft had both tasks
   mapping into variants nobody had declared, which is a compile error in both.
+
+- **The hub is the only writer of the configuration, and the connection layer is what routes to it.**
+  A `Command::{UpdateConfig, SetKey, SetProfile, SetListeningMode}` that arrives **from a socket** is the
+  bridge's to put through `Hub::update_config_from_view`, `set_key`, `set_profile` or
+  `set_listening_mode` — never the session's. The session's own arms are the *hub's fan-out half*: they
+  exist so that each session can apply a change the hub has already written and announced, and a session
+  that writes as well is a second writer — which is exactly what made Task 1.3's first implementation
+  spin for ever (one `SetListeningMode`, fanned out, every session calling the hub back, for ever, at
+  full CPU). **Task 1.3 ships this contract half-done, and Task 1.6 is what completes it**: its
+  `SetListeningMode` and `SetProfile` arms do route, with the local field moved first so the echo stops
+  there, but its `UpdateConfig` arm does **not**, because routing from there *was* the loop — so a
+  client's `UpdateConfig` today reaches its own session and nothing else, while spec §4.2 requires the
+  server to persist it and broadcast `ConfigChanged`. That arm's comment already asserts the invariant
+  ("by the time this message exists the hub has already written the file"); **Task 1.6's bridge is what
+  makes that sentence true**, and the whole-branch review must check that it does.
 
 Both of the first two were found by a reconciliation pass over eleven cross-task conflicts, and
 neither was catchable by checking names: they were two *schedules* of one symbol. Whoever executes
@@ -3307,14 +3322,16 @@ Task 1.4 does not create `server/tls.rs`: 1.8 adds that file with the loading th
 
 **Interfaces:**
 - Consumes: `Event::Welcome { .., web_bundle: bool, .. }` — `tipsy-protocol/src/lib.rs:135-145`; `Session::welcome(&self)` — `session.rs:241`; `UiState::apply(&mut self, ev: &Event)` — `state.rs:289`; `UiState::strings(&self) -> &'static Strings` — `state.rs:162`; `UiState::notify(&mut self, text: impl Into<String>)` — `state.rs:166`; `Strings` — `strings.rs:5`.
-- Produces: `crate::server::assets::{DIST_COMMAND, PAGE_CLIENT, PAGE_TERMINAL, page, page_missing, asset, web_bundle}` with the exact shapes below; `pub struct UiState { …, pub web_bundle: bool }`; `Strings::web_unavailable`.
+- Produces: `crate::server::assets::{DIST_COMMAND, PAGE_CLIENT, PAGE_TERMINAL, resolve, fallback, asset, web_bundle}` with the exact shapes below; `pub struct UiState { …, pub web_bundle: bool }`; `Strings::web_unavailable`.
+
+**`resolve` and `fallback` are not the names an earlier draft of this task pinned, and the change is deliberate.** Task 1.4 could not compile without a `server/assets.rs` — its router and its six tests call `assets::resolve(path) -> Option<(&'static str, Vec<u8>)>` and `assets::fallback() -> (&'static str, Vec<u8>)`, and `server/mod.rs`'s `page_of`/`page_response` are the callers — so Task 1.4 created that file as a loudly-commented placeholder with exactly those two signatures and registered `/` and `/terminal` against them. **Fill those two bodies; do not rename them** to the `page`/`page_missing` this document used to say, because a rename breaks Task 1.4's six tests. `asset`, `web_bundle`, `DIST_COMMAND`, `PAGE_CLIENT` and `PAGE_TERMINAL` are new and entirely this task's; `/assets/{*path}` is yours to register, since Task 1.4 deliberately left it out.
 
 ```rust
 pub const DIST_COMMAND: &str = "cargo xtask dist";
 pub const PAGE_CLIENT: &str = "client/index.html";
 pub const PAGE_TERMINAL: &str = "terminal/index.html";
-pub fn page(path: &str) -> Option<(&'static str, Vec<u8>)>;          // bytes + content type, or None
-pub fn page_missing() -> (&'static str, String);                    // bytes + content type, always
+pub fn resolve(path: &str) -> Option<(&'static str, Vec<u8>)>;       // bytes + content type, or None
+pub fn fallback() -> (&'static str, Vec<u8>);                       // bytes + content type, always
 pub fn asset(path: &str) -> Option<(&'static str, Vec<u8>)>;
 pub fn web_bundle() -> bool;
 ```
@@ -3483,13 +3500,17 @@ pub fn web_bundle() -> bool {
 
 /// The page for a route: the embedded file, or `None` when the route has no page in this binary.
 /// Today that is always `None`, because `web/` does not exist until Phase 2 and Phase 3 build it.
-pub fn page(path: &str) -> Option<(&'static str, Vec<u8>)> {
+/// **Keep the name and the signature**: Task 1.4's `server/mod.rs` calls both, and this file was
+/// created by that task as a placeholder with exactly this shape.
+pub fn resolve(path: &str) -> Option<(&'static str, Vec<u8>)> {
     embedding(path).map(|bytes| (HTML, bytes))
 }
 
 /// The honest page: which command builds the bundle this binary does not have. Hand-written HTML —
-/// there is no markdown renderer in the tree and none is added for one page.
-pub fn page_missing() -> (&'static str, String) {
+/// there is no markdown renderer in the tree and none is added for one page. **Returns `Vec<u8>`, not
+/// the `String` an earlier draft of this task specified**, because Task 1.4 pinned the signature when
+/// it made this file a placeholder: the `format!` below therefore ends in `.into_bytes()`.
+pub fn fallback() -> (&'static str, Vec<u8>) {
     (
         HTML,
         format!(
