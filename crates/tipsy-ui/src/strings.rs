@@ -18,6 +18,10 @@ pub struct Strings {
     pub transcribing: &'static str,
     pub thinking: &'static str,
     pub speaking: &'static str,
+    /// The header indicator for the whole of a live call (Plan 2C).
+    pub live: &'static str,
+    /// Why a call did not start while `[realtime] enabled` is false.
+    pub live_off: &'static str,
     pub cleared: &'static str,
     pub help: &'static str,
     pub weekdays: [&'static str; 7],
@@ -86,8 +90,10 @@ pub static ES: Strings = Strings {
     transcribing: "Transcribiendo...",
     thinking: "Pensando...",
     speaking: "Hablando...",
+    live: "EN VIVO",
+    live_off: "El modo en vivo está apagado ([realtime] enabled = false)",
     cleared: "Conversación borrada",
-    help: " Enter preguntar · !texto recitar · Tab micro · F4 borrar · ←→ chat/red · Esc salir",
+    help: " Enter preguntar · !texto recitar · Tab micro · F4 borrar · F10 llamada · ←→ chat/red · Esc salir",
     weekdays: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
     months: ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
     cfg_title: "CONFIGURACIÓN",
@@ -150,8 +156,10 @@ pub static EN: Strings = Strings {
     transcribing: "Transcribing...",
     thinking: "Thinking...",
     speaking: "Speaking...",
+    live: "LIVE",
+    live_off: "The live mode is off ([realtime] enabled = false)",
     cleared: "Conversation cleared",
-    help: " Enter ask · !text recite · Tab mic · F4 clear · ←→ chat/network · Esc quit",
+    help: " Enter ask · !text recite · Tab mic · F4 clear · F10 call · ←→ chat/network · Esc quit",
     weekdays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
     months: ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
     cfg_title: "CONFIGURATION",
@@ -202,5 +210,23 @@ pub fn strings(lang: UiLanguage) -> &'static Strings {
     match lang {
         UiLanguage::Es => &ES,
         UiLanguage::En => &EN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The indicator's copy exists in both languages — Review Focus 3's "the mode is never silently
+    /// on" starts with a word for it in the table the user's profile selects.
+    #[test]
+    fn the_live_indicator_has_copy_in_both_languages() {
+        assert_eq!(strings(UiLanguage::Es).live, "EN VIVO");
+        assert_eq!(strings(UiLanguage::En).live, "LIVE");
+        assert_ne!(strings(UiLanguage::Es).live_off, strings(UiLanguage::En).live_off);
+        for table in [strings(UiLanguage::Es), strings(UiLanguage::En)] {
+            assert!(!table.live_off.is_empty(), "a refusal has to say something");
+            assert!(table.help.contains("F10"), "the help line names the key: {}", table.help);
+        }
     }
 }

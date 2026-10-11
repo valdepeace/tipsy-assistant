@@ -139,9 +139,11 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str, dirt
 ///
 /// The mode sits immediately before the gear, at the right edge, so the gear is the last thing read
 /// on the row, and the status — the one span whose length the user's own data decides, a `⚠` notice
-/// or a failure — is cut to whatever is left between the badge and the mode. The unsaved marker is
-/// measured before the status and takes its room from it: while the screen is open that marker is the
-/// only thing saying the edits are unsaved, and a status the user cannot act on may be cut instead.
+/// or a failure — is cut to whatever is left between the badge and the mode. The live indicator,
+/// while a call lasts, is the status: it is drawn first of all and nothing else on the row may
+/// stand in front of it (Plan 2C, Review Focus 3). The unsaved marker is measured before the status
+/// and takes its room from it: while the screen is open that marker is the only thing saying the
+/// edits are unsaved, and a status the user cannot act on may be cut instead.
 fn header(state: &UiState, area: Rect, title: &str, dirty: Option<&str>) -> (Line<'static>, Hit, Hit) {
     let strings = state.strings();
     let spin = SPINNER[(state.elapsed_ms / 150) as usize % SPINNER.len()];
@@ -150,7 +152,11 @@ fn header(state: &UiState, area: Rect, title: &str, dirty: Option<&str>) -> (Lin
         ListeningMode::Auto => strings.mode_auto,
         ListeningMode::HandsFree => strings.mode_hands_free,
     };
-    let status: Span = if state.mic_open {
+    let status: Span = if state.live {
+        // A live call outranks everything else in the header: it bills for as long as it lasts, so
+        // no spinner and no notice may hide it (Review Focus 3).
+        Span::from(format!(" ⏺ {} ", strings.live)).fg(Color::Black).bg(Color::Red).bold()
+    } else if state.mic_open {
         Span::from(strings.listening).fg(Color::Red).bold()
     } else if state.busy() {
         let what = match state.status {

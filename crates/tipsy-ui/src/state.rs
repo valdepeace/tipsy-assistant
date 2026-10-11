@@ -95,6 +95,9 @@ pub enum UiAction {
     /// Regenerate mints a token. Applying it twice is harmless because those three actions only set
     /// the form dirty, which is what the form has already done here.
     Config(ConfigAction),
+    /// Start a live call, or end the one that is running (Plan 2C). The client owns the socket and
+    /// the HUD only asks: the indicator turns on when the socket says it is live, never here.
+    ToggleLive,
 }
 
 pub struct UiState {
@@ -102,6 +105,9 @@ pub struct UiState {
     pub lang: UiLanguage,
     pub listening_mode: ListeningMode,
     pub status: AssistantState,
+    /// True for as long as a live call lasts (Plan 2C). The header says so for the whole call — the
+    /// mode bills while it is open — and the flag is set by `Event::Live`, never by the key.
+    pub live: bool,
     pub mic_open: bool,
     pub log: Vec<LogEntry>,
     pub selected: Option<usize>,
@@ -138,6 +144,7 @@ impl UiState {
             lang: UiLanguage::Es,
             listening_mode: ListeningMode::Push,
             status: AssistantState::Idle,
+            live: false,
             mic_open: false,
             log: Vec::new(),
             selected: None,
@@ -365,12 +372,22 @@ impl UiState {
                 }
             }
             // A live-call event is raised by the call, not by a turn: the status rings and the log
-            // say nothing about it (Plan 2C Task 6 owns the indicator and its own tests), so the arm
-            // records nothing. It is here to keep the match exhaustive and this task behaviour-free.
-            Event::Live { active: _ } => {}
+            // say nothing about it. What it *does* own is the header's indicator, which only this
+            // event may raise or lower (Plan 2C Task 6).
+            Event::Live { active } => {
+                self.live = *active;
+                if !self.live {
+                    // A call that ended is not still thinking: its turns were started by the socket,
+                    // so a reply that was cut off mid-answer never gets its `Done` and would leave
+                    // the spinner running for ever — the same rule the session's `Idle` applies
+                    // above.
+                    self.end_pending_replies();
+                }
+            }
             // A login utterance and its verdict belong to the login screen's own state, which Task 4
-            // adds to this reducer along with the arms that use them. They are here for the same
-            // reason `Live` above is: to keep the match exhaustive and this task behaviour-free.
+            // adds to this reducer along with the arms that use them. They are here to keep the match
+            // exhaustive and this task behaviour-free, exactly as the `Live` arm above was until
+            // Task 6 gave it the indicator's flag.
             Event::LoginHeard { .. } => {}
             Event::LoginVerdict { .. } => {}
             Event::Error { message, .. } => {
@@ -459,6 +476,7 @@ impl UiState {
                 Vec::new()
             }
             KeyInput::Esc => vec![UiAction::Quit],
+            KeyInput::F(10) => vec![UiAction::ToggleLive],
             KeyInput::F(_) => Vec::new(),
         }
     }
@@ -1047,6 +1065,35 @@ mod tests {
         assert!(!s.log[1].pending);
         assert_eq!(s.log[1].first_audio_ms, Some(900));
         assert!(!s.busy());
+    }
+
+    #[test]
+    fn f10_asks_for_the_call_and_the_socket_answers() {
+        let mut s = UiState::new();
+        assert_eq!(s.on_key(KeyInput::F(10)), vec![UiAction::ToggleLive]);
+        // The key asks; the flag is the socket's to set, so it is untouched here.
+        assert!(!s.live, "a key press is not a call: only `Event::Live` turns the indicator on");
+        s.apply(&Event::Live { active: true });
+        assert!(s.live);
+        // And the same key again is the way out, asked for the same way.
+        assert_eq!(s.on_key(KeyInput::F(10)), vec![UiAction::ToggleLive]);
+        assert!(s.live, "the indicator goes down when the socket says so, not when the key is pressed");
+    }
+
+    #[test]
+    fn the_end_of_a_call_takes_the_indicator_down_and_stops_the_spinner() {
+        let mut s = UiState::new();
+        s.apply(&Event::Live { active: true });
+        // A call's turns are started by the socket: `Heard` and the deltas open the reply entry
+        // (`reply_entry`), and no `Done` ever arrives for a call that dies mid-answer.
+        s.apply(&Event::Heard { text: "¿y el ticket?".into() });
+        s.apply(&Event::ReplyDelta { text: "Aquí andamos".into() });
+        assert!(s.busy(), "the reply is being said");
+
+        s.apply(&Event::Live { active: false });
+        assert!(!s.live, "the indicator is the first thing to go");
+        assert!(!s.busy(), "a call that ended is not still thinking: {:#?}", s.log);
+        assert_eq!(s.log.last().unwrap().text, "Aquí andamos", "the partial reply stays readable");
     }
 }
 

@@ -11,6 +11,7 @@ fn state(lang: UiLanguage) -> UiState {
         ui_language: lang,
         listening_mode: ListeningMode::Push,
         web_bundle: false,
+        login: None,
     });
     s
 }
@@ -228,6 +229,7 @@ fn the_header_shows_the_gear_and_the_listening_mode() {
         ui_language: UiLanguage::Es,
         listening_mode: ListeningMode::Auto,
         web_bundle: false,
+        login: None,
     });
     let (_, hits, term) = render(&s);
     assert_eq!(text_at(&term, hits[0].area), " auto ", "the configured mode, not a fixed word");
@@ -238,6 +240,7 @@ fn the_header_shows_the_gear_and_the_listening_mode() {
         ui_language: UiLanguage::En,
         listening_mode: ListeningMode::HandsFree,
         web_bundle: false,
+        login: None,
     });
     let (_, hits, term) = render(&s);
     assert_eq!(text_at(&term, hits[0].area), " hands free ", "the English table's spelling");
@@ -285,4 +288,40 @@ fn the_screen_survives_a_terminal_too_small_for_it() {
         })
         .unwrap();
     }
+}
+
+#[test]
+fn the_header_shows_the_live_indicator_instead_of_anything_else() {
+    let mut s = state(UiLanguage::Es);
+    s.apply(&Event::Live { active: true });
+    // A turn in flight is not a reason to hide it: the call is billing while it lasts, so the
+    // spinner that would otherwise be there is exactly what must not cover the indicator.
+    s.apply(&Event::Heard { text: "¿y el ticket?".into() });
+    s.apply(&Event::ReplyDelta { text: "Aquí andamos".into() });
+    s.apply(&Event::Status { state: AssistantState::Thinking, detail: None });
+    assert!(s.busy(), "the test is only worth anything while the spinner would be drawn");
+    let (text, _, _) = render(&s);
+    assert!(text.contains("EN VIVO"), "missing the live indicator");
+    assert!(!text.contains("Pensando"), "a spinner may not sit in front of it");
+    assert!(!text.contains("Listo"), "the indicator is the header while a call lasts");
+}
+
+#[test]
+fn english_header_uses_the_english_live_indicator() {
+    let mut s = state(UiLanguage::En);
+    s.apply(&Event::Live { active: true });
+    let (text, _, _) = render(&s);
+    assert!(text.contains("LIVE"));
+    assert!(!text.contains("EN VIVO"));
+    assert!(!text.contains("Ready"));
+}
+
+#[test]
+fn the_live_indicator_disappears_when_the_call_ends() {
+    let mut s = state(UiLanguage::Es);
+    s.apply(&Event::Live { active: true });
+    s.apply(&Event::Live { active: false });
+    let (text, _, _) = render(&s);
+    assert!(!text.contains("EN VIVO"), "the indicator is not left behind by a call that ended");
+    assert!(text.contains("Listo"), "the header is the quiet one again");
 }
