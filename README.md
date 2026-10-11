@@ -245,13 +245,14 @@ no security to the application — it protects the joke, and that is the whole o
 
 The rules, so that what you write behaves the way you expect. The **first entry in file order** whose
 keywords all appear wins, and its `name` is the greeting; file order is your ranking, so put the most
-specific person first. Every keyword is matched as a **whole word**, case- and accent-insensitively:
-`andres` matches `Andrés` and `ANDRÉS`, and it does not match `andresito`; `core` does not match
-`score`. An entry with several keywords needs all of them, and a multi-word keyword such as
-`"andres del equipo"` has to be said in one run. An entry with no usable keyword is ignored, so
-`enabled = true` with an empty or half-edited allowlist shows no screen at all rather than a door
-nobody can open. The section is hand-edited — there is no Login tab — but saving anything else on the
-configuration screen carries it through untouched.
+specific person first. Every keyword is matched as a **whole word**, case- and accent-insensitively —
+for the accented letters these profiles write (`á é í ó ú ü ñ ç` and their relatives; any other letter
+keeps its own lowercase form, so this is not full Unicode normalization): `andres` matches `Andrés` and
+`ANDRÉS`, and it does not match `andresito`; `core` does not match `score`. An entry with several
+keywords needs all of them, and a multi-word keyword such as `"andres del equipo"` has to be said in one
+run. An entry with no usable keyword is ignored, so `enabled = true` with an empty or half-edited
+allowlist shows no screen at all rather than a door nobody can open. The section is hand-edited — there
+is no Login tab — but saving anything else on the configuration screen carries it through untouched.
 
 The screen is one screen: no second one opens while it is up, `Tab` turns the microphone on and off,
 `Enter` sends what you typed — or, with the box empty after a refusal, re-arms the microphone — `Esc`

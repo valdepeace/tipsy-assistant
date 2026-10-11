@@ -424,6 +424,27 @@ fn row_text(term: &Terminal<TestBackend>, y: u16) -> String {
     (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
 }
 
+/// Review finding 3, on the widget: `● rec` is the *login's* capture and not the HUD's `Tab` switch.
+/// The switch belongs to a microphone the veil is hiding, and the door may well find it in either
+/// position — a lit badge over a screen that is not recording would be the one lie §6 cannot tell.
+#[test]
+fn the_recording_badge_follows_the_screens_own_capture() {
+    // The HUD's switch is on and the screen's capture is not: nothing is recording.
+    let mut hud_only = state(UiLanguage::Es);
+    hud_only.mic_open = true;
+    hud_only.show_login(true);
+    let (text, _, _) = login_frame(&hud_only, 150, 40);
+    assert!(!text.contains(strings(UiLanguage::Es).login_rec), "the HUD's switch is not this screen's:\n{text}");
+
+    // The screen's capture is open while the HUD's switch is off: it is recording, and says so.
+    let mut login_only = state(UiLanguage::Es);
+    login_only.show_login(true);
+    login_only.login.as_mut().unwrap().open = true;
+    assert!(!login_only.mic_open, "the client no longer writes the HUD's switch for the login");
+    let (text, _, _) = login_frame(&login_only, 150, 40);
+    assert!(text.contains(strings(UiLanguage::Es).login_rec), "the screen's own capture is lit:\n{text}");
+}
+
 /// `Tab` is consent and the guard only stops *automatic* listening: the third refusal in a row is
 /// where the bottom border swaps to the escape hatch (spec §6, L8).
 #[test]
@@ -495,6 +516,52 @@ fn a_two_hundred_character_heard_line_is_cut_on_a_character_boundary() {
     }
     let (text, _, _) = login_frame(&typed, 60, 20);
     assert!(text.contains('❯'), "the input row is drawn:\n{text}");
+}
+
+/// Review finding 2, on the screen itself: while the answer is with the transcriber the row says so,
+/// because the alternative is a refused screen that looks frozen — and a user who thinks the machine
+/// did not hear them says the answer again, which cancels the transcription in flight (spec §4.1).
+#[test]
+fn a_login_answer_being_transcribed_says_so_on_the_status_line() {
+    let mut s = login(true, true, true);
+    // A refusal that has been read: the capture is still open, so the row is the prompt and not a
+    // verdict the user has already seen.
+    s.apply(&Event::LoginVerdict { ok: false, name: None });
+    assert!(login_frame(&s, 150, 40).0.contains("¿Y tú quién eres?"), "the row is ready again");
+
+    s.apply(&Event::Status { state: AssistantState::Transcribing, detail: None });
+    let (text, _, _) = login_frame(&s, 150, 40);
+    assert!(text.contains(strings(UiLanguage::Es).transcribing), "the wait has a face:\n{text}");
+    assert!(!text.contains("Anda, que te peinen"), "and is not the last refusal over again:\n{text}");
+
+    // What was heard is the next face of the same wait, and the verdict ends it.
+    s.apply(&Event::LoginHeard { text: "soy andres".into() });
+    let (text, _, _) = login_frame(&s, 150, 40);
+    assert!(text.contains("Te he oído"), "the heard line:\n{text}");
+    assert!(!text.contains(strings(UiLanguage::Es).transcribing), "the wait is over:\n{text}");
+
+    // The third refusal in a row is the one that shuts the capture, and there the row keeps it: there
+    // is no next attempt for it to be stale in, and it is read beside the escape hint.
+    s.apply(&Event::LoginVerdict { ok: false, name: None });
+    s.apply(&Event::LoginVerdict { ok: false, name: None });
+    let (text, _, _) = login_frame(&s, 150, 40);
+    assert!(text.contains("Anda, que te peinen"), "the last refusal is what the row keeps:\n{text}");
+    // The escape hint is on the bottom border, cut to the widget's own width — the third-refusal test
+    // above is where its whole text is asserted, on a frame wide enough to hold it.
+    assert!(text.contains("¿olvidado?"), "beside the escape hint:\n{text}");
+}
+
+/// A typed answer is judged rather than recorded, so the row may never claim it is being transcribed:
+/// the server says nothing about a typed answer, and the screen must not invent the wait.
+#[test]
+fn a_typed_answer_is_not_dressed_up_as_a_transcription() {
+    let mut s = login(true, true, true);
+    for c in "andres".chars() {
+        s.on_key(KeyInput::Char(c));
+    }
+    s.on_key(KeyInput::Enter);
+    let (text, _, _) = login_frame(&s, 150, 40);
+    assert!(!text.contains(strings(UiLanguage::Es).transcribing), "a typed answer is not a recording:\n{text}");
 }
 
 /// Only what is drawn reports a hit (spec §6): the title answers `Tab`, the input row answers `Enter`,
