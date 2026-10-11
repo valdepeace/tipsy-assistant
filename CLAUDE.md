@@ -22,9 +22,15 @@ while it is open (a cost of drawing the header over the full-screen form, and un
 `client.rs` that overclaims where a read error is shown, one mangled test line `cargo fmt` would fix,
 and the help text that lost the true half of the toggle key (`Enter` still toggles a switch row).
 
-**Written and not started:** Plan 2C
-(`docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md`), the OpenAI Realtime voice mode —
-six tasks, a WebSocket call whose transcript lands in the HUD, off by default with its cost documented.
+**Complete as a branch, merge gated:** Plan 2C
+(`docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md`) — the OpenAI Realtime voice mode:
+`[realtime]` in the config, the socket over `tokio-tungstenite`, the pure wire-event mapping, the turn
+plumbing with one exit for every way a socket dies, honest barge-in truncation, and the live indicator
+with `F10`. All six tasks, the whole-branch review, one fix wave and one scoped re-review ("all
+findings addressed, no open findings") on branch `plan-2c-openai-realtime`; **362 tests green**. Its
+merge waits on the login branch: another agent's `Login*` arms sit inside 2C's commits and their
+protocol change is still uncommitted, so 2C does not compile without their work. Four residual Minors
+are parked in its ledger, and the release checklist still owes one live-key spoken exchange.
 
 **Not started:** the two throwaway spikes in a scratch directory outside the repo — Ratzilla
 (ratatui `Canvas` with Braille + mouse on wasm32) and Rustpotter (a custom Spanish wake word; the
