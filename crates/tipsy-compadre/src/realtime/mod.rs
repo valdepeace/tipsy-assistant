@@ -503,6 +503,14 @@ async fn recv_order(orders: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Con
     }
 }
 
+/// The sentence the user reads when a call outlives the API's own session cap. The reopen is not an
+/// ending — the call carries on and the microphone stays open — but it *is* a fresh session: the new
+/// socket is configured from `session.update` alone, with no `conversation.item.create` replay, so
+/// the assistant remembers nothing said before it. Saying so is the difference between a call that
+/// quietly forgot and one the user knows has started over.
+const REOPENED: &str =
+    "the call reached the API's 60-minute cap: reopened a fresh session, which remembers nothing before it";
+
 /// Reopens the socket when the session has reached the API's own 60-minute cap, and answers whether
 /// it did. The note documents no close code for the cap, so the decision is `session_expired`'s —
 /// never a closed socket's code — and a call whose `max_minutes` is shorter than the cap (the
@@ -513,7 +521,12 @@ async fn at_cap(socket: &mut RealtimeSocket, setup: &CallSetup, out: &UnboundedS
         return false;
     }
     match socket.reopen(&setup.resolver).await {
-        Ok(()) => true,
+        Ok(()) => {
+            // The call is still live, but the conversation in it is not: the log gets the notice
+            // rather than the user discovering the hole when the model answers as a stranger.
+            report(out, ErrorCode::Timeout, REOPENED);
+            true
+        }
         Err(e) => {
             report(out, e.code(), &format!("the call's socket could not be reopened: {e}"));
             false
