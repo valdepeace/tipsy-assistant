@@ -251,6 +251,21 @@ impl UiState {
         self.log.iter_mut().rev().find(|e| reply_pending(e))
     }
 
+    /// The entry a streamed reply fills: the pending one if there is one, and a fresh placeholder if
+    /// there is not.
+    ///
+    /// The session's own path always has a placeholder by the time a delta arrives — `submit` and the
+    /// microphone key both push it — but a live call has no key press to push it with, because the
+    /// socket starts and ends its turns on its own. Without this the first line of a call's reply
+    /// would be dropped on the floor, and a reply nobody pressed anything for still has to be
+    /// readable.
+    fn reply_entry(&mut self) -> &mut LogEntry {
+        if !self.log.iter().any(reply_pending) {
+            self.log.push(LogEntry::pending_assistant("…"));
+        }
+        self.pending_assistant().expect("an entry was just ensured")
+    }
+
     /// Marks every assistant entry that is still waiting for a reply as no longer pending.
     ///
     /// The session emits `Done` before it reports `Idle` for every reply it completed, so an entry
@@ -311,20 +326,18 @@ impl UiState {
                 self.log.insert(at, LogEntry::user(text.clone()));
             }
             Event::ReplyDelta { text } => {
-                if let Some(e) = self.pending_assistant() {
-                    if e.text == "…" {
-                        e.text.clear();
-                    }
-                    e.text.push_str(text);
+                let e = self.reply_entry();
+                if e.text == "…" {
+                    e.text.clear();
                 }
+                e.text.push_str(text);
             }
             Event::Reply { text } => {
-                if let Some(e) = self.pending_assistant() {
-                    e.text = text.clone();
-                    // A recoverable error is advisory: the reply it sat in front of has arrived,
-                    // and the entry is the reply, not the warning that preceded it.
-                    e.error = None;
-                }
+                let e = self.reply_entry();
+                e.text = text.clone();
+                // A recoverable error is advisory: the reply it sat in front of has arrived,
+                // and the entry is the reply, not the warning that preceded it.
+                e.error = None;
             }
             Event::SpeechChunk { .. } => {}
             // A Test result belongs to the configuration screen's notice line (`ConfigForm::notice`,
@@ -355,6 +368,11 @@ impl UiState {
             // say nothing about it (Plan 2C Task 6 owns the indicator and its own tests), so the arm
             // records nothing. It is here to keep the match exhaustive and this task behaviour-free.
             Event::Live { active: _ } => {}
+            // A login utterance and its verdict belong to the login screen's own state, which Task 4
+            // adds to this reducer along with the arms that use them. They are here for the same
+            // reason `Live` above is: to keep the match exhaustive and this task behaviour-free.
+            Event::LoginHeard { .. } => {}
+            Event::LoginVerdict { .. } => {}
             Event::Error { message, .. } => {
                 if let Some(e) = self.pending_assistant() {
                     e.pending = false;
@@ -523,6 +541,8 @@ mod tests {
             ui_language: lang,
             listening_mode: mode,
             web_bundle: false,
+            // No login screen: the HUD tests below are about the HUD.
+            login: None,
         }
     }
 
@@ -618,6 +638,26 @@ mod tests {
         type_text(&mut s, "   ");
         assert!(s.on_key(KeyInput::Enter).is_empty());
         assert!(s.log.is_empty());
+    }
+
+    #[test]
+    fn a_transcript_with_no_placeholder_still_lands_in_the_log() {
+        let mut s = UiState::new();
+        // A call: the socket starts and ends its own turns, so no key press pushed the placeholder
+        // the session path pushes in `submit` and in the microphone key.
+        s.apply(&Event::Heard { text: "¿y el ticket?".into() });
+        s.apply(&Event::ReplyDelta { text: "Aquí".into() });
+        s.apply(&Event::ReplyDelta { text: " andamos.".into() });
+        assert_eq!(s.log.len(), 2, "{:#?}", s.log);
+        assert_eq!(s.log[0].who, Who::User);
+        assert_eq!(s.log[1].who, Who::Assistant);
+        assert_eq!(s.log[1].text, "Aquí andamos.");
+        assert!(s.log[1].pending, "the reply is still being said");
+
+        s.apply(&Event::Done { first_audio_ms: Some(300), total_ms: 1200 });
+        assert!(!s.log[1].pending);
+        assert_eq!(s.log[1].first_audio_ms, Some(300));
+        assert!(!s.busy());
     }
 
     #[test]
@@ -970,6 +1010,7 @@ mod tests {
             ui_language: UiLanguage::Es,
             listening_mode: ListeningMode::Auto,
             web_bundle: false,
+            login: None,
         });
 
         assert_eq!(s.listening_mode, ListeningMode::Auto, "the re-announcement still says what the mode is");

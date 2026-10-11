@@ -22,6 +22,7 @@ use crate::config::store;
 use crate::config::Config;
 use crate::keys::KeyResolver;
 use crate::providers::{build_one, build_providers, ProviderSlot};
+use crate::realtime::Call;
 use crate::session::spawn_with_events;
 use crate::sysmon;
 
@@ -72,6 +73,9 @@ struct Client {
     player: Option<Player>,
     /// The audio of the reply being spoken, kept for `Replay` until a new turn starts.
     reply: Vec<i16>,
+    /// The live call, when one is running: the microphone feeds it instead of the session and the
+    /// audio the device plays arrives from it.
+    call: Option<Call>,
     /// Sample rate announced by the last `SpeechChunk`.
     rate: u32,
     mic_gain: f32,
@@ -92,6 +96,7 @@ impl Client {
             providers,
             player: None,
             reply: Vec::new(),
+            call: None,
             rate: 24000,
             mic_gain,
             mic: None,
@@ -181,6 +186,8 @@ impl Client {
         // Silence the device and stop capturing before the terminal comes back.
         self.flush_playback();
         self.mic = None;
+        // And close the call with the terminal: `Esc` ends a call by ending the client.
+        self.call = None;
         Ok(())
     }
 
@@ -197,6 +204,13 @@ impl Client {
                     && let Some(form) = self.state.config_form.as_mut()
                 {
                     form.test_result(*capability, *ok, *latency_ms, message.clone());
+                }
+                // A call reports that it is over through `Live { active: false }`, whatever ended
+                // it. The client lets go of the handle and silences the device here, because the
+                // device is only reachable from this thread and the audio still queued belongs to a
+                // conversation that is gone (Review Focus 1).
+                if call_ended(&event) {
+                    self.end_call();
                 }
                 // No event ever touches the queued audio or the audio kept for `Replay`: the status
                 // that ends a reply arrives while the device is still speaking it, so the only
@@ -224,6 +238,15 @@ impl Client {
         }
     }
 
+    /// Lets go of the call and silences the device: the audio still queued belongs to a call that is
+    /// over, which is the same rule the user's own barge-in follows (`flush_on_interrupt`).
+    fn end_call(&mut self) {
+        self.call = None;
+        if flush_on_interrupt(true, self.playing()) {
+            self.flush_playback();
+        }
+    }
+
     /// Plays one spoken sentence, and shows the envelope of the reply it belongs to.
     fn on_speech(&mut self, samples: Vec<i16>) {
         if samples.is_empty() {
@@ -240,14 +263,23 @@ impl Client {
     /// Forwards every captured frame and shows its loudness in the oscilloscope.
     fn drain_mic(&mut self, to_server: &UnboundedSender<ToServer>) {
         while let Ok(samples) = self.mic_frames.try_recv() {
-            let _ = to_server.send(ToServer::Audio(Frame::Mic(samples.clone())));
+            match &self.call {
+                // A call owns the microphone while it is live: the session's own
+                // `ListenStart`/`ListenStop` bookkeeping must not see frames it never asked for.
+                Some(call) => call.push_mic(samples.clone()),
+                None => {
+                    let _ = to_server.send(ToServer::Audio(Frame::Mic(samples.clone())));
+                }
+            }
             self.state.push_mic_level(rms(&i16_to_f32(&samples)) * self.mic_gain);
         }
     }
 
-    /// Opens or closes the microphone so it matches `state.mic_open`.
+    /// Opens or closes the microphone so it matches what wants it: the microphone key, or a live
+    /// call, which streams until it ends.
     fn sync_mic(&mut self) {
-        match (self.state.mic_open, self.mic.is_some()) {
+        let wanted = mic_wanted(self.state.mic_open, self.call.is_some());
+        match (wanted, self.mic.is_some()) {
             (true, false) => {
                 let tx = self.mic_tx.clone();
                 match Mic::start(move |samples| {
@@ -500,6 +532,21 @@ fn flush_on_interrupt(interrupting: bool, playing: bool) -> bool {
     interrupting && playing
 }
 
+/// Whether a live-state event ends the call here.
+///
+/// The socket task decides when a call is over — it says so with `Live { active: false }` — and the
+/// client's only job is to let the handle go and quiet the device. A `Live { active: true }` is a
+/// call starting, which `start_call` already holds the handle for.
+fn call_ended(event: &Event) -> bool {
+    matches!(event, Event::Live { active: false })
+}
+
+/// Whether the microphone stream should be open: the user asked for it, or a call is live and
+/// streams it for as long as it lasts.
+fn mic_wanted(mic_open: bool, live: bool) -> bool {
+    mic_open || live
+}
+
 /// Whether a command starts the next turn, which is what makes the audio kept for `Replay` stale.
 ///
 /// The session cancels the running turn and starts another one for `Ask`, `Say` and `ListenStop`
@@ -521,6 +568,9 @@ fn starts_turn(command: &Command) -> bool {
         | Command::Cancel
         | Command::SetProfile { .. }
         | Command::SetListeningMode { .. } => false,
+        // The login screen's three commands belong to the login capture, never to the conversation:
+        // they start no turn, and Task 6 routes them to the screen rather than through this decision.
+        Command::LoginStart | Command::LoginStop | Command::LoginAnswer { .. } => false,
     }
 }
 
@@ -676,6 +726,45 @@ mod tests {
         ] {
             assert!(!interrupts_playback(&command), "{command:?} leaves the reply alone");
         }
+    }
+
+    #[test]
+    fn the_microphone_runs_when_the_user_opened_it_or_when_a_call_is_live() {
+        assert!(mic_wanted(true, false), "the microphone key still opens it");
+        assert!(mic_wanted(false, true), "a call streams the microphone for as long as it lasts");
+        assert!(mic_wanted(true, true));
+        assert!(!mic_wanted(false, false));
+    }
+
+    #[test]
+    fn a_chunk_header_sets_the_rate_the_device_is_told() {
+        let config = Config::default();
+        let keys = resolver();
+        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
+        client.on_message(ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
+        client.on_message(ToClient::Audio(Frame::Speech { seq: 0, samples: vec![5, 6] }));
+        // There is no output device in a test — `Player::new` needs one — so the playback itself is
+        // skipped; what is pinned is the rate it would be handed, which is the announced one and
+        // never a guess about which mode is running.
+        assert_eq!(client.rate, 24000);
+        assert_eq!(client.reply, vec![5, 6], "the reply is kept for `F2` as it always was");
+    }
+
+    #[test]
+    fn the_client_lets_go_of_a_call_when_the_socket_says_it_is_over() {
+        // A `Call` needs a socket, so what this pins is the rule: a call's ending is a live-flag
+        // event and nothing else. A status change must never be mistaken for it — that is what
+        // stops a finished reply from being cut off mid-sentence (`flush_on_interrupt`).
+        assert!(call_ended(&Event::Live { active: false }));
+        assert!(!call_ended(&Event::Live { active: true }));
+        assert!(!call_ended(&Event::Status { state: AssistantState::Idle, detail: None }));
+        let config = Config::default();
+        let keys = resolver();
+        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
+        client.on_message(ToClient::Event(Event::Live { active: false }));
+        assert!(client.call.is_none(), "there was no call, and none is invented");
     }
 
     #[test]
