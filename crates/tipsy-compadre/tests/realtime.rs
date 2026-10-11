@@ -923,8 +923,12 @@ async fn a_call_that_outlives_the_apis_session_cap_reopens_instead_of_ending() {
         CallOptions::at(server.url()).with_cap(Duration::ZERO).with_open_timeout(Duration::from_millis(200));
     let _call = Call::open(wanted, Heard::new(), out);
 
-    // Both connections are configured, which is the whole of `RealtimeSocket::reopen`.
-    let texts = server.texts(2).await;
+    // Both connections are configured, which is the whole of `RealtimeSocket::reopen`. The wait is
+    // bounded: a call whose socket task finishes before this side has seen the first frame would
+    // otherwise leave the test blocked on a number that is never reached — a hang, not a failure.
+    let texts = tokio::time::timeout(Duration::from_secs(5), server.texts(2))
+        .await
+        .expect("the reopen never configured a second socket: its `session.update` never arrived");
     for text in &texts {
         let event: Value = serde_json::from_str(text).expect("JSON");
         assert_eq!(event["type"], "session.update", "the reopened call is configured like the first");
@@ -1005,7 +1009,13 @@ async fn a_barge_in_truncates_the_item_at_the_milliseconds_that_were_heard() {
         .send(r#"{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":3200}"#)
         .await;
 
-    let truncate = server.recv_json().await.expect("the truncate");
+    // The socket task may reach its transition before this test's own `heard.push(...)` calls land —
+    // it is a race the test does not control — and then nothing is ever sent. A few seconds bound it:
+    // a truncate that never arrives must fail here, in words, rather than block the suite for ever.
+    let truncate = tokio::time::timeout(Duration::from_secs(5), server.recv_json())
+        .await
+        .expect("no `conversation.item.truncate` arrived: the barge-in was never acted on")
+        .expect("the truncate");
     assert_eq!(truncate["type"], "conversation.item.truncate");
     assert_eq!(truncate["item_id"], "item_a", "the assistant's item, never the user's `item_1`");
     assert_eq!(truncate["content_index"], 0, "the note fixes the content index at 0");
