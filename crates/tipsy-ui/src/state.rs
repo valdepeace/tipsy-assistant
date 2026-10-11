@@ -351,6 +351,10 @@ impl UiState {
                     self.net_history.pop_front();
                 }
             }
+            // A live-call event is raised by the call, not by a turn: the status rings and the log
+            // say nothing about it (Plan 2C Task 6 owns the indicator and its own tests), so the arm
+            // records nothing. It is here to keep the match exhaustive and this task behaviour-free.
+            Event::Live { active: _ } => {}
             Event::Error { message, .. } => {
                 if let Some(e) = self.pending_assistant() {
                     e.pending = false;

@@ -98,6 +98,24 @@ pub struct ServerForm {
     pub token: String,
 }
 
+/// The `[realtime]` section, carried through the screen but never drawn on it (Plan 2C Task 1).
+///
+/// The section is edited in `config.toml` — realtime is a mode of the client, and no tab of this
+/// screen shows it — but the native client rebuilds the whole configuration from this form on a
+/// save, so a section the form did not carry would come back at its defaults, resetting `enabled`,
+/// the model and the voice the first time anything on the screen was saved. Nothing here is
+/// editable, which is why the values keep the file's own types instead of the text buffers an
+/// editable row needs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RealtimeForm {
+    pub enabled: bool,
+    pub model: String,
+    /// The key's *name*, never the key: the same rule as `ProviderForm::key_name`.
+    pub key_name: String,
+    pub voice: String,
+    pub max_minutes: u32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProfileForm {
     pub id: String,
@@ -123,6 +141,8 @@ pub struct ConfigForm {
     pub active_profile: String,
     pub providers: Vec<ProviderForm>,
     pub listening: ListeningForm,
+    /// Carried, never drawn: see [`RealtimeForm`].
+    pub realtime: RealtimeForm,
     pub profiles: Vec<ProfileForm>,
     pub server: ServerForm,
     pub notice: Option<(NoticeKind, String)>,
@@ -201,6 +221,9 @@ impl Default for ConfigForm {
                 mic_gain: "12.0".into(),
                 mic_device: None,
             },
+            // The placeholder form draws no realtime row either, so its empty carry is never seen;
+            // the native client fills it from the file on the only form that can be saved.
+            realtime: RealtimeForm::default(),
             // One placeholder profile, so the rows below have something to index. The native client
             // replaces every field of this form from the real configuration (Task 6).
             profiles: vec![ProfileForm {
