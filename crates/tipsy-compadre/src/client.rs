@@ -1326,4 +1326,101 @@ mod tests {
         // where it is. Had this been true, a one-word probe would cut a sentence in half.
         assert!(!flush_on_interrupt(test_interrupts_playback(Capability::Speech), true));
     }
+
+    /// The one test that presses the key: `Tab` with a live call is the user taking the floor, and it
+    /// has to reach the socket as `response.cancel` without ending the call. Every link is unit-tested
+    /// on its own — `UiState::on_key(Tab)` → `ListenStart`, `takes_the_floor`, `Call::interrupt`, the
+    /// socket task's control arm — and this is the one that drives them all the way to a real socket
+    /// and back (the final review's item 7).
+    #[tokio::test]
+    async fn tab_with_a_live_call_cancels_the_response_and_leaves_the_call_running() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // A loopback socket that completes a realtime handshake, records what the call sends, and
+        // answers a cancel with one audio delta — the proof that the same call is still reading.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a free port");
+        let url = format!("ws://{}/v1/realtime?model=gpt-realtime-2.1", listener.local_addr().unwrap());
+        let (frames, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("the call connects");
+            let mut socket = tokio_tungstenite::accept_async(stream).await.expect("the handshake");
+            socket
+                .send(Message::text(r#"{"type":"session.created","session":{"id":"sess_fixture"}}"#))
+                .await
+                .expect("the client is listening");
+            while let Some(Ok(message)) = socket.next().await {
+                let Message::Text(text) = message else { continue };
+                let value: serde_json::Value = serde_json::from_str(text.as_str()).expect("JSON");
+                let cancel = value["type"] == "response.cancel";
+                let _ = frames.send(text.as_str().to_string());
+                if cancel {
+                    socket
+                        .send(Message::text(
+                            r#"{"type":"response.output_audio.delta","response_id":"resp_1","item_id":"item_a","content_index":0,"delta":"AAECAw=="}"#,
+                        ))
+                        .await
+                        .expect("the call is listening");
+                }
+            }
+        });
+
+        let config = Config::default();
+        let keys = resolver();
+        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
+        // The call the key will interrupt: the loopback socket above, with an empty key *name* so the
+        // handshake carries no `Authorization` header and no fixture here is a secret.
+        let (events, mut from_call) = tokio::sync::mpsc::unbounded_channel();
+        let options = crate::realtime::socket::CallOptions::at(&url);
+        let setup = CallSetup {
+            url,
+            options,
+            config: crate::config::RealtimeConfig { key: String::new(), ..Default::default() },
+            resolver: Arc::new(KeyResolver::new(Box::new(MemoryStore::default()), Box::new(|_| None))),
+            model: "gpt-realtime-2.1".into(),
+            instructions: "eres un compae".into(),
+            voice: "marin".into(),
+            silence_ms: 1000,
+            language: "es-ES".into(),
+            limit: Duration::from_secs(600),
+        };
+        client.call = Some(Call::open(setup, Heard::new(), events.clone()));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+
+        // The session is configured first, so the key press meets a live call and not a handshake.
+        let update = tokio::time::timeout(Duration::from_secs(5), sent.recv())
+            .await
+            .expect("the call never configured its session")
+            .expect("the fake server is running");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&update).unwrap()["type"], "session.update");
+
+        // The key press, through the same two functions the frame loop uses.
+        for action in client.state.on_key(KeyInput::Tab) {
+            client.on_action(action, &to_server, &events);
+        }
+
+        let cancel = tokio::time::timeout(Duration::from_secs(5), sent.recv())
+            .await
+            .expect("pressing Tab with a live call never sent `response.cancel`")
+            .expect("the fake server is running");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&cancel).unwrap()["type"], "response.cancel");
+
+        // And the call lives on: the same socket answers with the model's audio, which the client
+        // reads exactly as it does in its frame loop.
+        let mut spoke = false;
+        while !spoke {
+            let message = tokio::time::timeout(Duration::from_secs(5), from_call.recv())
+                .await
+                .expect("the call stopped reporting after the cancel")
+                .expect("the call's channel");
+            assert!(
+                !matches!(message, ToClient::Event(Event::Live { active: false })),
+                "a cancel is not an ending: {message:?}"
+            );
+            spoke = matches!(message, ToClient::Audio(Frame::Speech { .. }));
+            client.on_message(message);
+        }
+        assert!(client.call.is_some(), "the call is still the client's to end");
+    }
 }
