@@ -12,6 +12,8 @@ pub mod config;
 
 pub mod keys;
 
+pub mod login;
+
 pub mod providers;
 
 pub mod realtime;
