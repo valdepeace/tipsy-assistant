@@ -972,29 +972,17 @@ async fn a_turn_started_inside_the_guard_keeps_the_detector_paused() {
     assert!(seen.iter().any(is_done), "the reply itself must have finished: {seen:#?}");
 }
 
-/// `Reset` inside the guard must not leave the detector paused for the rest of the session. `resume`
-/// is reachable only from `guard_elapsed`, so a reset that dropped the deadline without resuming
-/// made `auto` mode deaf: `Tab` opened the microphone, frames arrived, `push` reported nothing and
-/// nothing was ever transcribed until some later turn ended. `F4` just after a reply — inside the
-/// guard — is the common way to clear a conversation, which is exactly when it bit.
+/// `Reset` must not leave the detector paused for the rest of the session. `resume` is reachable only
+/// from `guard_elapsed`, so a reset that dropped the deadline without resuming made `auto` mode deaf:
+/// `Tab` opened the microphone, frames arrived, `push` reported nothing and nothing was ever
+/// transcribed until some later turn ended. `F4` just after a reply — inside the guard — is the common
+/// way to clear a conversation, which is exactly when it bit. The shipped `reset` resumes the detector
+/// itself, so the microphone is live again as soon as the guard would have allowed it.
 ///
-/// Why the waits are shaped the way they are. `run`'s `select!` is biased, so a command handled
-/// together with an already elapsed guard deadline is dispatched first and the deadline only fires on
-/// the next loop iteration: frames sent in the same batch as that command meet a detector that has
-/// not resumed yet and are swallowed. A test that only sleeps cannot rule that out, because a session
-/// that is not scheduled while the test sleeps handles the `Reset` late — and then the fresh 300 ms
-/// guard it arms is armed *after* the sleep. So the test observes the reset's own `Idle` reply first;
-/// the greeting's `Idle` is consumed immediately before it, so the next one can only be the reset's,
-/// and that is the moment its guard is known to exist. Then it sleeps a fixed 700 ms, more than twice
-/// the guard, and only then opens the microphone. Opening it is also the command whose reply is
-/// awaited: the deadline is long past by the time the session handles it, so the session resumes the
-/// detector in that same loop iteration, before any frame can be pushed.
+/// The tail is the session's own budget plus a margin, because a learned detector keeps scoring the
+/// first windows of a silence as voice: the budget alone leaves `silence_run` short of what
+/// `SpeechEnded` needs and the utterance never closes. The sibling auto test sends the same margin.
 #[tokio::test]
-#[ignore = "UNRESOLVED: the audio sent after a Reset is not detected in auto mode even though \
-            `reset` now resumes the detector; the frames never reach the transcriber, so this is \
-            either a second gap in the session's auto path or a flaw in this test's setup. The \
-            code fix for the original hole (a reset leaving the detector paused for good) is in \
-            place; see the ledger's fix-wave and Task 9 entries and the scoped re-review."]
 async fn reset_inside_the_guard_leaves_auto_mode_listening() {
     let chat = FakeChat::new(vec![Ok(vec![S1])]);
     let (tx, mut rx, transcribe) =
@@ -1015,7 +1003,7 @@ async fn reset_inside_the_guard_leaves_auto_mode_listening() {
     for frame in 0..SPOKEN_FRAMES {
         send_mic(&tx, candidate_frame(wave, frame));
     }
-    for _ in 0..hangover_frames() {
+    for _ in 0..hangover_frames() + 5 {
         send_mic(&tx, silent_frame());
     }
 
