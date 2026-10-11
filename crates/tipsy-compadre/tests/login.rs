@@ -146,12 +146,15 @@ async fn drain(rx: &mut UnboundedReceiver<ToClient>, wait_ms: u64) -> Vec<ToClie
     }
 }
 
-/// Waits out the greeting turn the session starts with — its `Done`, then the tail behind it — so that
-/// what the session sends after this is only what the test itself asked for. `tests/session.rs` waits
-/// for the same `Done` before every one of its own commands.
-async fn greeting_is_over(rx: &mut UnboundedReceiver<ToClient>) {
-    let _ = next_event_matching(rx, |e| matches!(e, Event::Done { .. }), 5000).await;
-    let _ = drain(rx, 50).await;
+/// Waits until the session has been quiet for 200 ms, so that what it sends next is only what the test
+/// itself provokes.
+///
+/// With no login screen the session opens with its greeting turn, and this waits that out; behind a
+/// login screen the greeting is withheld (spec §10), so there is nothing to wait for and the quiet
+/// window is simply the price of being sure. Every test that asserts on the silence of its own
+/// commands starts here.
+async fn session_is_quiet(rx: &mut UnboundedReceiver<ToClient>) {
+    let _ = drain(rx, 200).await;
 }
 
 fn allowed() -> Vec<LoginEntry> {
@@ -187,7 +190,7 @@ async fn a_typed_answer_is_judged_without_ever_asking_the_chat_provider() {
     let mut config = Config::default();
     config.login.allowed = allowed();
     let (to_server, mut from_server, chat) = session_with(config);
-    greeting_is_over(&mut from_server).await;
+    session_is_quiet(&mut from_server).await;
 
     to_server.send(ToServer::Command(Command::LoginAnswer { text: "soy Andrés del score".into() })).unwrap();
     let refused = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
@@ -209,7 +212,7 @@ async fn a_typed_answer_opens_when_the_screen_does_not_apply() {
     config.login.enabled = false;
     config.login.allowed = allowed();
     let (to_server, mut from_server, _chat) = session_with(config);
-    greeting_is_over(&mut from_server).await;
+    session_is_quiet(&mut from_server).await;
 
     to_server.send(ToServer::Command(Command::LoginAnswer { text: "quien sea".into() })).unwrap();
     let verdict = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
@@ -224,7 +227,7 @@ async fn commands_outside_the_login_are_ignored_while_the_capture_is_open() {
     let mut config = Config::default();
     config.login.allowed = allowed();
     let (to_server, mut from_server, chat) = session_with(config);
-    greeting_is_over(&mut from_server).await;
+    session_is_quiet(&mut from_server).await;
 
     to_server.send(ToServer::Command(Command::LoginStart)).unwrap();
     to_server.send(ToServer::Command(Command::Ask { text: "¿qué tal?".into() })).unwrap();
@@ -247,4 +250,55 @@ async fn commands_outside_the_login_are_ignored_while_the_capture_is_open() {
     )
     .await;
     assert!(matches!(started, Event::Status { state: AssistantState::Thinking, .. }), "the capture's guard must lift with `LoginStop`");
+}
+
+/// Spec §10: while a login screen applies, nothing is said behind the widget. The greeting is withheld
+/// until a verdict opens the door, a refusal is answered with silence, and the greeting itself lands
+/// after the verdict that earned it.
+#[tokio::test]
+async fn the_greeting_waits_for_the_login_verdict() {
+    let mut config = Config::default();
+    config.login.allowed = allowed();
+    let (to_server, mut from_server, _chat) = session_with(config);
+
+    let first = next_event(&mut from_server).await;
+    assert!(matches!(first, Event::Welcome { login: Some(_), .. }), "the screen is announced, got {first:?}");
+    let quiet = tokio::time::timeout(Duration::from_millis(200), from_server.recv()).await;
+    assert!(quiet.is_err(), "nothing is said behind the login screen, got {:?}", quiet.map(|m| m.map(|m| format!("{m:?}"))));
+
+    to_server.send(ToServer::Command(Command::LoginAnswer { text: "soy Andrés del score".into() })).unwrap();
+    let refused = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
+    assert_eq!(refused, Event::LoginVerdict { ok: false, name: None });
+    let quiet = tokio::time::timeout(Duration::from_millis(200), from_server.recv()).await;
+    assert!(quiet.is_err(), "a refused visitor is not greeted, got {:?}", quiet.map(|m| m.map(|m| format!("{m:?}"))));
+
+    to_server.send(ToServer::Command(Command::LoginAnswer { text: "yo soy Andrés del equipo del core".into() })).unwrap();
+    let opened = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
+    assert_eq!(opened, Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+    let greeting = next_event_matching(&mut from_server, |e| matches!(e, Event::SpeechChunk { .. }), 2000).await;
+    assert!(matches!(greeting, Event::SpeechChunk { .. }), "the greeting follows the verdict that opened, got {greeting:?}");
+}
+
+/// The greeting is spoken exactly once. A typed answer can land while a transcription is still in
+/// flight, and both can come back `ok`; a second greeting would be a second voice in the room.
+#[tokio::test]
+async fn a_second_ok_verdict_does_not_greet_twice() {
+    let mut config = Config::default();
+    config.login.allowed = allowed();
+    let (to_server, mut from_server, _chat) = session_with(config);
+    let _ = next_event(&mut from_server).await; // Welcome, and no greeting behind it
+
+    to_server.send(ToServer::Command(Command::LoginAnswer { text: "yo soy Andrés del equipo del core".into() })).unwrap();
+    let opened = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
+    assert_eq!(opened, Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+    // The greeting plays out in full: its `Done` is the end of it, and the idle behind it is drained so
+    // that what follows can only be a second greeting.
+    let _ = next_event_matching(&mut from_server, |e| matches!(e, Event::Done { .. }), 2000).await;
+    let _ = drain(&mut from_server, 50).await;
+
+    to_server.send(ToServer::Command(Command::LoginAnswer { text: "yo soy Andrés del equipo del core".into() })).unwrap();
+    let again = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
+    assert_eq!(again, Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+    let quiet = tokio::time::timeout(Duration::from_millis(200), from_server.recv()).await;
+    assert!(quiet.is_err(), "the greeting is owed once, got {:?}", quiet.map(|m| m.map(|m| format!("{m:?}"))));
 }
