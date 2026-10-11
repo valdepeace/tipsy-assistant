@@ -239,22 +239,22 @@ impl Client {
                 // interruption is one the user asks for, in `on_action`.
                 self.state.apply(&event);
                 // `Welcome.login` is the only authority on whether there is a screen (spec §3), and
-                // the screen is shown **once per run**: a second `Welcome` — the one `SetProfile` and
-                // `SetListeningMode` make the session send — must leave the half-typed answer, the
-                // phase and the refusal streak exactly where the user left them.
+                // the screen is shown **once per run** — `show_login` owns that rule and says so,
+                // because the state cannot express it with `login` alone: a second `Welcome` (the one
+                // `SetProfile` and `SetListeningMode` make the session send) must leave the half-typed
+                // answer, the phase and the refusal streak exactly where the user left them, and must
+                // not reopen a door that has already been walked through.
                 if let Event::Welcome { login, .. } = &event
                     && let Some(view) = login
-                    && self.state.login.is_none()
+                    && self.state.show_login(view.voice)
+                    && let Some(login) = self.state.login.as_mut()
                 {
-                    self.state.show_login(view.voice);
-                    if let Some(login) = self.state.login.as_mut() {
-                        // With the voice on, the capture opens *with* the screen: the reconciliation
-                        // below sees the state on the very first frame and opens the stream then. The
-                        // phase follows it, because the screen's own key table reads the phase to
-                        // decide what `Tab` and `Enter` mean.
-                        login.open = view.voice;
-                        login.phase = if view.voice { LoginPhase::Listening } else { LoginPhase::Waiting };
-                    }
+                    // With the voice on, the capture opens *with* the screen: the reconciliation
+                    // below sees the state on the very first frame and opens the stream then. The
+                    // phase follows it, because the screen's own key table reads the phase to
+                    // decide what `Tab` and `Enter` mean.
+                    login.open = view.voice;
+                    login.phase = if view.voice { LoginPhase::Listening } else { LoginPhase::Waiting };
                 }
             }
             ToClient::Audio(Frame::Speech { samples, .. }) => self.on_speech(samples),
@@ -1192,6 +1192,30 @@ mod tests {
 
         let after = client.state.login.clone().expect("the screen is still up");
         assert_eq!(after, typed, "a second Welcome is not a second screen");
+    }
+
+    /// The door, once walked through, does not come back. The session re-sends `Welcome` on
+    /// `SetProfile` and `SetListeningMode` — a save from the configuration screen sends both — and the
+    /// login spec's rule is **once per client run** (login spec §3). The guard this replaces,
+    /// `self.state.login.is_none()`, could not tell "let in" from "never asked": `UiAction::LoginDone`
+    /// puts `login` back to `None`, so the next `Welcome` showed the screen again and the user met the
+    /// door a second time on a save.
+    #[test]
+    fn a_welcome_after_the_door_opened_does_not_reopen_it() {
+        let mut client = mock_client();
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        assert!(client.state.login.is_some(), "the first Welcome shows the screen");
+
+        client.on_action(UiAction::LoginDone, &to_server, &events);
+        assert!(client.state.login.is_none(), "the door opens");
+
+        // Exactly what `SetProfile` and `SetListeningMode` make the session send.
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        assert!(client.state.login.is_none(), "and the screen does not come back");
+        assert!(client.state.login_seen, "the run remembers that it was asked");
     }
 
     /// With no screen up, the login's events belong to nothing: they must not touch the HUD, open a

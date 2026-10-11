@@ -198,6 +198,13 @@ pub struct UiState {
     /// The login screen while it is up: `None` is a client that has been let in, or one the server
     /// never asked (spec §3 — `Welcome.login` is the only authority).
     pub login: Option<LoginState>,
+    /// Whether a login screen has been shown at all in this client's run. The login spec's rule is
+    /// **once per client run** (login spec §3), and `login` alone cannot express it: the session
+    /// re-sends `Welcome` on `SetProfile` and `SetListeningMode`, and when the door opens `login` goes
+    /// back to `None` — which is exactly what it holds before the first screen is ever shown. This bit
+    /// is the difference between "asked already and let in" and "never asked", and without it a save
+    /// from the configuration screen reopens a door the user has already walked through.
+    pub login_seen: bool,
 }
 
 impl Default for UiState {
@@ -233,6 +240,7 @@ impl UiState {
             voice_pos_ms: 0,
             config_form: None,
             login: None,
+            login_seen: false,
         }
     }
 
@@ -267,8 +275,17 @@ impl UiState {
         self.config_form = Some(form);
     }
 
-    /// Shows the login screen, the client's answer to `Welcome.login`.
-    pub fn show_login(&mut self, voice: bool) {
+    /// Shows the login screen, the client's answer to `Welcome.login` — **once per client run**, which
+    /// is what the login spec requires (§3) and what a bare assignment cannot deliver: the session
+    /// re-sends `Welcome` on `SetProfile` and `SetListeningMode`, so a screen shown again would wipe a
+    /// half-typed answer, reset the phase and restart the refusal streak on a keypress the user never
+    /// made. Returns whether this call was the one that showed it, so a caller can run its first-show
+    /// setup (the capture switch and the phase) without asking the state a second time.
+    pub fn show_login(&mut self, voice: bool) -> bool {
+        if self.login_seen {
+            return false;
+        }
+        self.login_seen = true;
         self.login = Some(LoginState {
             input: String::new(),
             voice,
@@ -278,6 +295,7 @@ impl UiState {
             name: None,
             refusals: 0,
         });
+        true
     }
 
     /// A click, dispatched the way the control that reported it meant it.
@@ -1320,6 +1338,25 @@ mod tests {
         assert_eq!(s.login.as_ref().unwrap().input.chars().count(), LOGIN_INPUT_MAX);
         let _ = s.on_key(KeyInput::Backspace);
         assert_eq!(s.login.as_ref().unwrap().input.chars().count(), LOGIN_INPUT_MAX - 1);
+    }
+
+    /// The screen is shown **once per client run**, and the state owns that rule rather than each
+    /// caller: a second `Welcome` — the one `SetProfile` and `SetListeningMode` make the session send —
+    /// must neither wipe a half-typed answer nor reopen a door that has already been walked through
+    /// (login spec §3). The second case is the one a bare `login.is_none()` guard cannot tell apart
+    /// from "never asked", because the door coming down puts `login` back to `None`.
+    #[test]
+    fn the_screen_is_shown_once_per_run() {
+        let mut s = UiState::new();
+        assert!(s.show_login(true), "the first view shows the screen");
+        type_text(&mut s, "yo soy andres");
+        assert!(!s.show_login(true), "a second view while it is up shows nothing");
+        assert_eq!(s.login.as_ref().unwrap().input, "yo soy andres", "and wipes nothing");
+
+        // The door opens: the client takes the screen down, and the run's own bit is what remembers.
+        s.login = None;
+        assert!(!s.show_login(true), "a view after the door opened does not reopen it");
+        assert!(s.login.is_none(), "the HUD stays in front");
     }
 
     /// A typed answer is a `LoginAnswer` the server judges; the box empties and the screen says it is
