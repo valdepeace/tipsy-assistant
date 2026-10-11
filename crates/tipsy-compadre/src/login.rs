@@ -195,11 +195,24 @@ mod tests {
 
     /// R6: a keyword written the way a person writes it behaves like its folded form, and an empty
     /// name is a `None` rather than an empty greeting.
+    ///
+    /// Review finding 4: the blank-name case used to assert `Verdict::open()`, which is the
+    /// *no-screen* verdict — `{ ok: true, name: None }` — so it could not tell a trimmed name from a
+    /// screen that never applied, and deleting the trim would not have failed it. The config here
+    /// applies and carries a second entry, so the whole verdict is discriminating and a refusal for an
+    /// answer matching neither entry proves the screen really is up.
     #[test]
     fn keywords_are_normalized_as_written_and_an_empty_name_is_none() {
         let written = login(true, vec![entry("Andrés", &["Andrés", "CORE"])]);
         assert_eq!(judge(&written, "soy andres del core"), Verdict { ok: true, name: Some("Andrés".into()) });
-        let nameless = login(true, vec![entry("  ", &["andres"])]);
-        assert_eq!(judge(&nameless, "andres"), Verdict::open(), "an empty name opens without one");
+
+        let nameless = login(true, vec![entry("  ", &["andres"]), entry("Andrés", &["core"])]);
+        assert!(applies(&nameless), "the screen is up, so nothing here is the no-screen verdict");
+        assert_eq!(
+            judge(&nameless, "andres"),
+            Verdict { ok: true, name: None },
+            "the matched entry's blank name greets without one (spec §6.1's `Pasa.`)"
+        );
+        assert_eq!(judge(&nameless, "nadie"), Verdict::refused(), "and the screen can refuse");
     }
 }

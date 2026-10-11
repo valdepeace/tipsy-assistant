@@ -205,7 +205,11 @@ fn layout(widget: Rect) -> (Rect, Option<Rect>, Rect, Rect) {
 fn draw_chrome(frame: &mut Frame, state: &UiState, login: &LoginState, area: Rect) {
     let strings = state.strings();
     let mut titles = vec![cut_to(&format!(" {TITLE} "), Style::new().fg(CARET).bold(), area.width as usize)];
-    if state.mic_open {
+    // The screen's own capture is what `● rec` means, and it is the screen's own state — not the
+    // HUD's `Tab` switch, which belongs to a microphone the veil is hiding and which the door may
+    // find in either position (review finding 3). With the door shut there is exactly one microphone
+    // that matters.
+    if login.voice && login.open {
         // `● rec`, right-aligned and red, exactly while the microphone is open: the v1 rule about a
         // visible indicator, kept without a header.
         let rec = Span::from(format!(" {} ", strings.login_rec)).fg(Color::Red).bold();
@@ -236,6 +240,9 @@ fn status_line(state: &UiState, login: &LoginState) -> Vec<Span<'static>> {
         (LoginLine::Refused, _) => text(strings.login_refusal.to_string(), Style::new().fg(GOLD).bold()),
         (LoginLine::NothingHeard, _) => text(strings.login_nothing_heard.to_string(), Style::new().fg(GOLD).bold()),
         (LoginLine::Heard(heard), _) => text(strings.login_heard.replace("{text}", heard), Style::new().fg(CYAN)),
+        // An answer is with the transcriber: the same word the HUD uses for the wait, in the same
+        // ink the HUD's own spinner is.
+        (LoginLine::Transcribing, _) => text(strings.transcribing.to_string(), Style::new().fg(CYAN)),
         // `Waiting` with nothing to report: the prompt.
         _ => text(strings.login_prompt.to_string(), Style::new().fg(INK)),
     }

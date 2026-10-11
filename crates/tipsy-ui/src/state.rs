@@ -124,12 +124,16 @@ pub enum LoginPhase {
 }
 
 /// Which sentence the widget's one line shows (spec §6.1), in this precedence: `Passed`, `Refused`,
-/// `Heard`, a failure, and the prompt.
+/// `Heard`, a failure, the transcription, and the prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginLine {
     Prompt,
     Heard(String),
     Refused,
+    /// An answer is with the transcriber. The server sends `Status { Transcribing }` and that is what
+    /// sets this: the wait before a verdict is the one thing §6.1 keeps `strings.transcribing` for,
+    /// and the login screen is the only screen where nothing the user does ends it.
+    Transcribing,
     /// `NothingHeard`, whose wording is the UI's: the server's message for it is English.
     NothingHeard,
     /// Any other `Event::Error`: the provider's own words.
@@ -457,6 +461,16 @@ impl UiState {
                     // The turn is over: nothing is mid-reply any more.
                     self.end_pending_replies();
                 }
+                // While the door is shut, the server's `Transcribing` is the login's own wait: the row
+                // says so, because the alternative is a refused screen that looks frozen and invites
+                // the user to repeat the answer — which cancels the transcription in flight (§4.1,
+                // review finding 2). Only a capture that is open transcribes anything.
+                if *state == AssistantState::Transcribing
+                    && let Some(login) = self.login.as_mut()
+                    && login.open
+                {
+                    login.line = LoginLine::Transcribing;
+                }
             }
             Event::Heard { text } => {
                 let at = self
@@ -538,6 +552,15 @@ impl UiState {
                         login.refusals += 1;
                         if login.needs_a_key() {
                             login.open = false;
+                        }
+                        // A capture that is still open has another attempt in front of it, and the
+                        // refusal has been read: a verdict is not a state to carry into the next
+                        // utterance, because the row would then read "Anda, que te peinen…" — or a
+                        // stale "Transcribiendo…" — for the whole of the wait that follows it, which
+                        // is what made a working screen look deaf (review finding 2). The row's own
+                        // next marks are the server's `Transcribing` and its `LoginHeard`.
+                        if login.open {
+                            login.line = LoginLine::Prompt;
                         }
                     }
                 }
@@ -1322,7 +1345,11 @@ mod tests {
         let _ = s.on_key(KeyInput::Tab);
         assert!(s.login.as_ref().unwrap().open);
         refused(&mut s);
-        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Refused);
+        assert_eq!(
+            s.login.as_ref().unwrap().line,
+            LoginLine::Prompt,
+            "the refusal has been read: the row is ready for the next attempt (review finding 2)"
+        );
         assert!(s.login.as_ref().unwrap().open, "attempt 1 leaves the capture open");
         refused(&mut s);
         assert!(s.login.as_ref().unwrap().open, "and so does attempt 2");
@@ -1440,6 +1467,50 @@ mod tests {
         assert!(s.login.is_none());
         assert!(s.log.is_empty());
         assert!(s.notice.is_none());
+    }
+
+    /// Review finding 2: while an answer is being transcribed the row must say so — the server sends
+    /// `Status { Transcribing }` and that is the honest trigger — and a verdict must not be carried
+    /// into the next attempt. In that window the spoken answer is in flight, `● rec` is lit and the row
+    /// read "Anda, que te peinen para el lado": a user reads that as "it did not hear me", says it
+    /// again, and cancels the transcription (§4.1).
+    #[test]
+    fn a_login_capture_in_flight_says_it_is_transcribing() {
+        let mut s = login_state(true);
+        let _ = s.on_key(KeyInput::Tab);
+        refused(&mut s);
+        // The refusal has been read: a capture that is still open is three seconds from the next
+        // attempt, and the row says so rather than repeating a verdict.
+        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Prompt);
+
+        // The next utterance ends and the server starts transcribing: the row is the wait.
+        s.apply(&Event::Status { state: AssistantState::Transcribing, detail: None });
+        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Transcribing, "the wait has a face");
+        assert!(s.login.as_ref().unwrap().open, "and the capture is still open");
+
+        // What the transcriber heard replaces it, and the verdict replaces that — and clears it again.
+        s.apply(&Event::LoginHeard { text: "soy andres".into() });
+        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Heard("soy andres".into()));
+        s.apply(&Event::LoginVerdict { ok: false, name: None });
+        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Prompt);
+        assert_eq!(s.login.as_ref().unwrap().refusals, 2);
+
+        // The third refusal in a row is the one that stops the capture, and there the refusal is what
+        // the row keeps: there is no next attempt for it to be stale in, and it is read beside the
+        // escape hint. Nothing in flight may wear the transcription line either.
+        for _ in 0..LOGIN_AUTO_REARM {
+            refused(&mut s);
+        }
+        assert!(!s.login.as_ref().unwrap().open);
+        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Refused);
+        s.apply(&Event::Status { state: AssistantState::Transcribing, detail: None });
+        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Refused, "a shut capture transcribes nothing");
+
+        // And a door that has opened is never covered by it (spec §6.1's precedence).
+        let mut passed = login_state(true);
+        passed.apply(&Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+        passed.apply(&Event::Status { state: AssistantState::Transcribing, detail: None });
+        assert_eq!(passed.login.as_ref().unwrap().line, LoginLine::Passed);
     }
 }
 
