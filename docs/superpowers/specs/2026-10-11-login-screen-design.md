@@ -488,3 +488,18 @@ changing it changes no code path.
 - **Deliberately left out**, and to be said out loud whenever this feature is described: passwords,
   lockouts, rate limiting, per-person tokens, attempt logs, a re-login on reconnect, and any claim
   that this screen protects anything. It does not. The token does.
+- **Plan 3 owes this feature two things, and its own plan as written does not say so.** Checked on
+  2026-10-11 against `docs/superpowers/plans/2026-10-11-plan-3-web-tier.md` (19 tasks in three phases;
+  the login screen appears in it only as "in flight, in its own worktree" and in a comment saying an
+  HUD test is about the HUD):
+  1. **The browser wiring.** §3 hands the web client the same screen and says the server needs no
+     change for it, but the *wiring* is per client: `tipsy-web` must show the screen on
+     `Welcome.login`, drive its own capture (`getUserMedia` → `Frame::Mic`) in step with
+     `LoginState::open`, send the same three commands and honour the once-per-run rule. None of Plan
+     3's Phase 3 tasks (3.2–3.6) mentions it, so it needs a task or an explicit extension of one.
+  2. **Two sentences of this spec that Plan 3 supersedes.** Its Task 1.1 extends `LoginView` with
+     `enabled` and `allowed` (for `ConfigView`, so the configuration screen can show and edit the
+     section over the wire). That makes §1's "no Login tab" non-goal and the L2 sentence "the allowlist
+     never leaves it" no longer true as written. The *judging* stays server-side and the token stays
+     the only door, so the decision itself survives; what has to change is the sentence. Amend both
+     when Plan 3 lands, and say in Plan 3's own record that it made the section editable.
