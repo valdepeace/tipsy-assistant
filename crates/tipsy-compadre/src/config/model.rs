@@ -201,7 +201,7 @@ pub struct LoginConfig {
     pub allowed: Vec<LoginEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoginEntry {
     /// What the screen greets them with. May be empty.
@@ -213,12 +213,6 @@ pub struct LoginEntry {
 impl Default for LoginConfig {
     fn default() -> Self {
         Self { enabled: true, voice: true, allowed: Vec::new() }
-    }
-}
-
-impl Default for LoginEntry {
-    fn default() -> Self {
-        Self { name: String::new(), keywords: Vec::new() }
     }
 }
 
