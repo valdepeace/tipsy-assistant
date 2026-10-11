@@ -218,6 +218,49 @@ device does not change what is recorded — at this launch or the next one.
 The Server tab — `bind`, the LAN switch and the token — is for the WebSocket server, which does not
 exist yet: the three values are written to the file and nothing listens on them today.
 
+### The login screen
+
+With `[login]` configured, a client opens on a screen before the HUD: the dashboard shows through
+behind a pixelated veil, and in the middle there is the core, one line and a box. Say who you are, or
+type it, and the door opens on the first entry whose keywords are all in the answer:
+
+```toml
+[login]
+# The screen appears only when this is true *and* an entry below has keywords. A fresh install has
+# neither, so nobody meets a locked door by surprise.
+enabled = true
+# The microphone opens with the screen, and only speech the local detector confirms is transcribed.
+# Typing always works and costs nothing, so `false` is a perfectly good way to keep the ritual.
+voice = true
+
+[[login.allowed]]
+name = "Andrés"                 # what the screen greets you with; may be empty
+keywords = ["andres", "core"]   # all of them must be in the answer
+```
+
+**This is a ritual, not a lock.** Nothing here is authentication and nothing here protects anything:
+no passwords, no accounts, no lockout, no attempt log, and nothing that changes what the server
+accepts. **`server.token` above remains the only real requirement**, and turning this screen on adds
+no security to the application — it protects the joke, and that is the whole of it.
+
+The rules, so that what you write behaves the way you expect. The **first entry in file order** whose
+keywords all appear wins, and its `name` is the greeting; file order is your ranking, so put the most
+specific person first. Every keyword is matched as a **whole word**, case- and accent-insensitively:
+`andres` matches `Andrés` and `ANDRÉS`, and it does not match `andresito`; `core` does not match
+`score`. An entry with several keywords needs all of them, and a multi-word keyword such as
+`"andres del equipo"` has to be said in one run. An entry with no usable keyword is ignored, so
+`enabled = true` with an empty or half-edited allowlist shows no screen at all rather than a door
+nobody can open. The section is hand-edited — there is no Login tab — but saving anything else on the
+configuration screen carries it through untouched.
+
+The screen is one screen: no second one opens while it is up, `Tab` turns the microphone on and off,
+`Enter` sends what you typed — or, with the box empty after a refusal, re-arms the microphone — `Esc`
+quits, and every other key is part of your answer. The microphone opens with the screen when `voice`
+is true, the top border says so in red while it is open, and `Tab` closes it — and while that capture
+runs, the client shows it by setting the same open-microphone state push-to-talk sets. Three refusals
+in a row stop the automatic listening and the bottom border points you at this file; `Tab` starts it
+again.
+
 ## Realtime voice mode
 
 `F10` starts and ends a **live call**: one duplex WebSocket session with OpenAI's Realtime API

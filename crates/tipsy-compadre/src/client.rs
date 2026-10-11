@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use tipsy_protocol::{Capability, Command, Event, Frame, ToClient, ToServer};
-use tipsy_ui::{ClockView, ConfigEffect, Hit, KeyInput, NoticeKind, UiAction, UiState, draw};
+use tipsy_ui::{ClockView, ConfigEffect, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::device::{Mic, Player};
@@ -79,6 +79,10 @@ struct Client {
     /// The live call, when one is running: the microphone feeds it instead of the session and the
     /// audio the device plays arrives from it.
     call: Option<Call>,
+    /// Whether a login capture was *running* at the client's last look at it: the microphone stream
+    /// and its `LoginStart` are opened and closed on the edges of this flag and never on its value,
+    /// which is what keeps a repeated `Welcome` from opening a second stream over the first.
+    login_mic: bool,
     /// Where a call reports: the same channel the session reports on, so the HUD reads one stream.
     /// `None` only before the frame loop has started.
     events: Option<UnboundedSender<ToClient>>,
@@ -103,6 +107,7 @@ impl Client {
             player: None,
             reply: Vec::new(),
             call: None,
+            login_mic: false,
             events: None,
             rate: 24000,
             mic_gain,
@@ -175,6 +180,10 @@ impl Client {
             while let Ok(message) = from_server.try_recv() {
                 self.on_message(message);
             }
+            // The login capture first: it decides whether there is a microphone to open at all, and
+            // it needs no frame in hand to say so — the server starts collecting what it is sent, and
+            // the screen's own state already says the answer is being spoken.
+            self.sync_login_mic(&to_server);
             self.drain_mic(&to_server);
             self.sync_mic();
             self.sync_call();
@@ -227,6 +236,24 @@ impl Client {
                 // that ends a reply arrives while the device is still speaking it, so the only
                 // interruption is one the user asks for, in `on_action`.
                 self.state.apply(&event);
+                // `Welcome.login` is the only authority on whether there is a screen (spec §3), and
+                // the screen is shown **once per run**: a second `Welcome` — the one `SetProfile` and
+                // `SetListeningMode` make the session send — must leave the half-typed answer, the
+                // phase and the refusal streak exactly where the user left them.
+                if let Event::Welcome { login, .. } = &event
+                    && let Some(view) = login
+                    && self.state.login.is_none()
+                {
+                    self.state.show_login(view.voice);
+                    if let Some(login) = self.state.login.as_mut() {
+                        // With the voice on, the capture opens *with* the screen: the reconciliation
+                        // below sees the state on the very first frame and opens the stream then. The
+                        // phase follows it, because the screen's own key table reads the phase to
+                        // decide what `Tab` and `Enter` mean.
+                        login.open = view.voice;
+                        login.phase = if view.voice { LoginPhase::Listening } else { LoginPhase::Waiting };
+                    }
+                }
             }
             ToClient::Audio(Frame::Speech { samples, .. }) => self.on_speech(samples),
             ToClient::Audio(Frame::Mic(_)) => {}
@@ -350,12 +377,17 @@ impl Client {
 
     /// Forwards every captured frame and shows its loudness in the oscilloscope.
     fn drain_mic(&mut self, to_server: &UnboundedSender<ToServer>) {
+        // A login capture is the frame's destination before anything else: it is the only thing on
+        // screen, its answer is spoken rather than typed, and a live call is not what is being
+        // answered. The session's own listening path still never sees them — the server feeds them to
+        // the login's own detector — so the two cannot transcribe the login twice (session §4.1).
+        let login = self.login_capture();
         while let Ok(samples) = self.mic_frames.try_recv() {
             match &self.call {
                 // A call owns the microphone while it is live: the session's own
                 // `ListenStart`/`ListenStop` bookkeeping must not see frames it never asked for.
-                Some(call) => call.push_mic(samples.clone()),
-                None => {
+                Some(call) if !login => call.push_mic(samples.clone()),
+                _ => {
                     let _ = to_server.send(ToServer::Audio(Frame::Mic(samples.clone())));
                 }
             }
@@ -363,9 +395,54 @@ impl Client {
         }
     }
 
-    /// Opens or closes the microphone so it matches what wants it: the microphone key, or a live
-    /// call, which streams until it ends.
-    fn sync_mic(&mut self) {
+    /// True while a login capture should be running: the screen is up, it has a voice switch, and its
+    /// state says the microphone is open. That state is the whole of the authority — it is what the
+    /// third refusal and a failed answer lower — so this is a read and never a decision.
+    fn login_capture(&self) -> bool {
+        self.state.login.as_ref().is_some_and(|login| login.voice && login.open)
+    }
+
+    /// Reconciles the microphone with [`Client::login_capture`]: the stream and the `LoginStart` are
+    /// opened and closed **on the edges** of that state, never on its value, because the two are not
+    /// the same thing any more than a key press is.
+    ///
+    /// The reducer cannot raise an action from `apply` — a refusal that stops listening is expressed
+    /// as `LoginState::open == false` and nothing else — so the client reads that state once a frame
+    /// and does the two things a capture needs: the device, and the server's own `LoginStart` /
+    /// `LoginStop`. It runs before `drain_mic`, so the stream a `LoginStart` opened is the one that
+    /// carries the answer.
+    fn sync_login_mic(&mut self, to_server: &UnboundedSender<ToServer>) {
+        match (self.login_capture(), self.login_mic) {
+            (true, false) => {
+                if to_server.send(ToServer::Command(Command::LoginStart)).is_ok() {
+                    self.login_mic = true;
+                    // What lights `● rec` and pulses the core, exactly as push-to-talk does. It is set
+                    // here rather than by the key because no key opened this capture.
+                    self.state.mic_open = true;
+                }
+            }
+            (false, true) => self.close_login_mic(to_server),
+            _ => {}
+        }
+    }
+
+    /// Ends the login capture: the server is told to stop, the state stops claiming an open
+    /// microphone, and the device is let go on the next `sync_mic`. Calling it with the capture
+    /// already down is harmless, which is what lets `UiAction::LoginDone` and the reconciliation
+    /// both end it.
+    fn close_login_mic(&mut self, to_server: &UnboundedSender<ToServer>) {
+        self.login_mic = false;
+        self.state.mic_open = false;
+        let _ = to_server.send(ToServer::Command(Command::LoginStop));
+    }
+
+    /// Opens or closes the microphone so it matches what wants it: the microphone key, a live call,
+    /// which streams until it ends, or the login capture, which is the screen's own state.
+    ///
+    /// Returns whether a capture is running afterwards. The login path is the reason: a device that
+    /// refuses to open must leave the screen saying so — which is what this return value lets it do —
+    /// rather than claim an open microphone for ever.
+    fn sync_mic(&mut self) -> bool {
         let wanted = mic_wanted(self.state.mic_open, self.call.is_some());
         match (wanted, self.mic.is_some()) {
             (true, false) => {
@@ -376,15 +453,23 @@ impl Client {
                 }) {
                     Ok(mic) => self.mic = Some(mic),
                     Err(e) => {
-                        // Nothing to capture from; leave the HUD saying so.
+                        // Nothing to capture from; leave the HUD saying so. A login capture says it on
+                        // its own line as well, and keeps working by typing (spec §9).
                         self.state.mic_open = false;
-                        self.state.notify(e);
+                        let no_mic = self.state.strings().login_no_mic;
+                        if let Some(login) = self.state.login.as_mut() {
+                            login.line = LoginLine::Failed(no_mic.to_string());
+                            login.open = false;
+                        } else {
+                            self.state.notify(e);
+                        }
                     }
                 }
             }
             (false, true) => self.mic = None,
             _ => {}
         }
+        self.mic.is_some()
     }
 
     /// Applies one action from the HUD. True when the user asked to quit.
@@ -464,12 +549,12 @@ impl Client {
                 }
                 false
             }
-            // Task 4's fallout, and deliberately kept to the smallest thing that compiles: the login
-            // screen's own state is the UI's, and closing the capture it was holding — the `LoginStop`,
-            // the stream, the reconciliation of `LoginState::open` — is Task 6's. Dropping the screen is
-            // this arm's whole job, and it does not change any behaviour that existed before it.
+            // The door opened and the user pressed `Enter`: the screen goes, and so does the capture
+            // it was holding — the microphone returns to what the listening mode wanted, never to
+            // open, and the session is told to stop collecting (spec §6.2).
             UiAction::LoginDone => {
                 self.state.login = None;
+                self.close_login_mic(to_server);
                 false
             }
             UiAction::Quit => true,
@@ -662,7 +747,8 @@ fn call_ended(event: &Event) -> bool {
     matches!(event, Event::Live { active: false })
 }
 
-/// Whether the microphone stream should be open: the user asked for it, or a call is live and
+/// Whether the microphone stream should be open: the user asked for it — with the microphone key, or
+/// because the login capture said so through [`Client::sync_login_mic`] — or a call is live and
 /// streams it for as long as it lasts.
 fn mic_wanted(mic_open: bool, live: bool) -> bool {
     mic_open || live
@@ -796,12 +882,12 @@ fn clock_view() -> ClockView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tipsy_protocol::{AssistantState, ClientKind, ListeningMode};
+    use tipsy_protocol::{AssistantState, ClientKind, ListeningMode, LoginView, ProfileView, UiLanguage};
 
     use crate::config::form::form_of;
     use crate::keys::{KeyResolver, MemoryStore, SecretStore};
     use crate::providers::ProviderSlot;
-    use tipsy_ui::{ConfigAction, NoticeKind};
+    use tipsy_ui::{ConfigAction, LOGIN_AUTO_REARM, NoticeKind};
     /// A resolver that knows one key — `openrouter`, the name the default configuration uses — and
     /// reads no environment.
     fn resolver() -> KeyResolver {
@@ -826,6 +912,195 @@ mod tests {
     fn open_with_edits(client: &mut Client, edited: &Config) {
         client.state.show_config_form(form_of(edited));
         client.state.config_form.as_mut().unwrap().dirty = true;
+    }
+
+    // ---- the login screen (spec 2026-10-11-login-screen-design.md, §3 and §6) ----
+
+    /// A bare client: no terminal, no device, no call. The configuration is the default one, whose
+    /// connectors are never touched by the tests below.
+    fn mock_client() -> Client {
+        let config = Config::default();
+        let keys = resolver();
+        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        Client::new(config, PathBuf::from("config.toml"), keys, providers)
+    }
+
+    fn welcome(login: Option<LoginView>) -> Event {
+        Event::Welcome {
+            session_id: 1,
+            profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+            ui_language: UiLanguage::Es,
+            listening_mode: ListeningMode::Push,
+            web_bundle: false,
+            login,
+        }
+    }
+
+    /// Runs the reconciliation the frame loop runs, and hands back everything it sent the server.
+    fn sync_login(client: &mut Client) -> Vec<Command> {
+        let (to_server, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        client.sync_login_mic(&to_server);
+        let mut sent = Vec::new();
+        while let Ok(message) = commands.try_recv() {
+            if let ToServer::Command(command) = message {
+                sent.push(command);
+            }
+        }
+        sent
+    }
+
+    /// `Welcome.login` is the only authority on whether there is a screen (spec §3): a client that
+    /// reads `[login]` itself could disagree with the server that will judge it, so the client never
+    /// reads it and this is what it does instead.
+    #[test]
+    fn a_login_view_shows_the_screen_and_no_login_view_goes_straight_to_the_hud() {
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(welcome(None)));
+        assert!(client.state.login.is_none(), "no login view is no screen");
+        assert!(sync_login(&mut client).is_empty(), "and nothing to open");
+
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: false }))));
+        let login = client.state.login.as_ref().expect("a login view is the screen");
+        assert!(!login.voice, "and it carries the screen's own switch");
+
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        let login = client.state.login.as_ref().expect("a login view is the screen");
+        assert!(login.voice);
+        assert!(login.open, "the screen opens listening, without a key");
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStart], "and the server is told");
+    }
+
+    /// The switch is the whole difference: with `voice = false` no stream is asked for at all, so
+    /// nothing is recorded and no audio leaves the machine (spec §5, §10).
+    #[test]
+    fn the_voice_switch_off_opens_no_stream_and_sends_nothing() {
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: false }))));
+        assert!(sync_login(&mut client).is_empty(), "there is no capture to start");
+        assert!(!client.state.mic_open, "and no microphone to light the badge");
+        assert!(client.mic.is_none(), "and no device open");
+        // `Tab` has nothing to toggle, either: the screen's own state refuses it for the same reason.
+        assert!(client.state.on_key(KeyInput::Tab).is_empty());
+    }
+
+    /// The capture is a **state the client reconciles** and not an action the reducer sends: a
+    /// refusal that stops listening is expressed as `LoginState::open == false`, and this is where
+    /// that becomes a `LoginStop` and a closed stream (spec §6.2).
+    #[test]
+    fn the_capture_opens_and_closes_with_the_login_state() {
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStart]);
+        // The three refusals in a row shut the capture from the screen's own state, and the client
+        // follows it on the next reconciliation.
+        for _ in 0..LOGIN_AUTO_REARM {
+            client.on_message(ToClient::Event(Event::LoginVerdict { ok: false, name: None }));
+        }
+        let login = client.state.login.as_ref().unwrap();
+        assert!(!login.open, "the third refusal stops the automatic re-arm");
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStop], "and the server is told to stop");
+        assert!(!client.state.mic_open, "and the badge goes out");
+        assert!(client.mic.is_none(), "and the device is let go");
+        // `Tab` is consent: it re-arms and the client follows it back the other way.
+        assert_eq!(client.state.on_key(KeyInput::Tab), vec![UiAction::Send(Command::LoginStart)]);
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStart]);
+    }
+
+    /// `UiAction::LoginDone` is the door: the screen goes, the capture stops, and the microphone
+    /// returns to what the listening mode wanted rather than staying open for the login.
+    #[test]
+    fn the_door_closes_the_screen_and_the_capture() {
+        let mut client = mock_client();
+        client.state.mic_open = true;
+        client.state.show_login(true);
+        client.state.login.as_mut().unwrap().open = true;
+        // The capture as the frame loop would have it: reconciled once, with no second start.
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStart]);
+        assert_eq!(sync_login(&mut client), Vec::<Command>::new(), "and never twice");
+
+        let (to_server, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        client.on_action(UiAction::LoginDone, &to_server, &events);
+        client.sync_login_mic(&to_server);
+
+        assert!(client.state.login.is_none(), "the screen is down");
+        assert!(!client.state.mic_open, "and the login capture does not leave the microphone open");
+        assert!(client.mic.is_none(), "no device");
+        assert_eq!(
+            commands.try_recv().unwrap(),
+            ToServer::Command(Command::LoginStop),
+            "the server must know the capture is over"
+        );
+    }
+
+    /// Every `Welcome` re-announces the session — a save on the configuration screen sends one — and
+    /// the screen is shown **once per run** (spec §3): a second one must leave the answer being
+    /// typed, the phase and the streak exactly where the user left them.
+    #[test]
+    fn a_second_welcome_leaves_the_login_screen_alone() {
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        for c in "andres".chars() {
+            client.state.on_key(KeyInput::Char(c));
+        }
+        for _ in 0..2 {
+            client.on_message(ToClient::Event(Event::LoginVerdict { ok: false, name: None }));
+        }
+        let typed = client.state.login.clone().unwrap();
+        assert_eq!(typed.input, "andres");
+        assert_eq!(typed.refusals, 2);
+
+        // The session re-announces itself, as `SetProfile` and `SetListeningMode` make it do.
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+
+        let after = client.state.login.clone().expect("the screen is still up");
+        assert_eq!(after, typed, "a second Welcome is not a second screen");
+    }
+
+    /// With no screen up, the login's events belong to nothing: they must not touch the HUD, open a
+    /// device or send a command.
+    #[test]
+    fn a_login_verdict_without_a_screen_touches_nothing() {
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(Event::LoginVerdict { ok: true, name: Some("Andrés".into()) }));
+        client.on_message(ToClient::Event(Event::LoginHeard { text: "andres del core".into() }));
+        assert!(client.state.login.is_none());
+        assert!(!client.state.mic_open);
+        assert!(client.mic.is_none());
+        assert!(client.state.log.is_empty(), "and the conversation is untouched");
+        assert!(sync_login(&mut client).is_empty());
+    }
+
+    /// A failed answer closes the capture — the microphone is off rather than repeating a failure —
+    /// and the client follows the state, exactly as it does for the third refusal.
+    #[test]
+    fn a_failed_answer_turns_the_capture_off() {
+        let mut client = mock_client();
+        client.state.mic_open = true;
+        client.state.show_login(true);
+        client.state.login.as_mut().unwrap().open = true;
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStart]);
+
+        client.on_message(ToClient::Event(Event::Error {
+            code: tipsy_protocol::ErrorCode::NoKey,
+            message: "no key named `openrouter`".into(),
+            recoverable: true,
+        }));
+        assert!(!client.state.login.as_ref().unwrap().open);
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStop]);
+        assert!(!client.state.mic_open);
+    }
+
+    /// While the door is shut the keys stop at the screen: `F9` does not open the configuration and
+    /// `Esc` still leaves, which is the client's half of the screen being modal.
+    #[test]
+    fn the_login_screen_swallows_the_huds_keys() {
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: false }))));
+        assert!(client.state.on_key(KeyInput::F(9)).is_empty(), "no second screen while the door is shut");
+        assert!(client.state.config_form.is_none());
+        assert_eq!(client.state.on_key(KeyInput::Esc), vec![UiAction::Quit]);
     }
 
     #[test]

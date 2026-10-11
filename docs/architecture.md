@@ -150,6 +150,12 @@ Wake word detection always runs on the server, which is the user's own machine. 
 to any cloud service until the wake word is detected. Clients must show a clearly visible
 indicator whenever the mic is open.
 
+That promise is `hands_free`'s. The login screen is the other kind of recording: an explicit, visible
+one, opened by the screen itself and announced by the red `● rec` in its own title, which sends only
+the speech the local detector confirms and never the silence or the room before it
+(`docs/superpowers/specs/2026-10-11-login-screen-design.md`, §10). It is a ritual, not a security
+boundary: `server.token` below remains the only real requirement.
+
 ## Security
 
 The server spends the user's API keys and listens to their microphone, so:
