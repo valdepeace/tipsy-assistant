@@ -313,7 +313,7 @@ the refusal while typing the next try is the point.
 | `Enter`, box non-empty | `Command::LoginAnswer { text: trimmed }`, box cleared, phase `Judging` |
 | `Enter`, box empty, phase `Rejected` | re-arm the microphone: `Command::LoginStart`, refusal cleared, phase `Listening` |
 | `Enter`, phase `Passed` | `UiAction::LoginDone` — the client closes the screen and enters the HUD |
-| `Tab` | capture on → `LoginStop` (phase `Idle`); capture off → `LoginStart` (phase `Listening`). With `voice = false` the border shows no `Tab` hint and `Tab` does nothing |
+| `Tab` | capture on → `LoginStop` (phase `Idle`); capture off → `LoginStart` (phase `Listening`). With `voice = false` the border shows no `Tab` hint and `Tab` does nothing: the switch is an explicit choice, and typing always works, so nothing is lost by honouring it |
 | `Esc` | `UiAction::Quit` (on the web client, the same key closes the connection) |
 | mouse, title | as `Tab` |
 | mouse, input row | as `Enter` |
@@ -403,7 +403,7 @@ changing it changes no code path.
 
 | Case | Behaviour |
 |---|---|
-| Mic denied or unavailable when the screen opens | No `LoginStart`, no stream: typing only, the status line says so once, and the border drops the `Tab` hint |
+| Mic denied or unavailable when the screen opens | No `LoginStart`, no stream: typing only, and the status line says `Sin micro: escribe, que también vale` once. The border **keeps** its keys: the copy's `Tab micro` is frozen and the screen does not reword it, so the line is what tells the user the microphone is out |
 | Mic lost mid-capture | The client sends `LoginStop`, closes the stream, and the same line appears; typing carries on |
 | No transcribe key configured, or the provider fails | The `Event::Error` message on the status line and the microphone off; the screen keeps working, and the configuration screen is one `Esc` + `F9` away once the user is in — or one `enabled = false` away right now |
 | Nothing heard (silence, a cough) | `NothingHeard`, the string above, **no attempt counted**, the capture stays open |
@@ -503,3 +503,9 @@ changing it changes no code path.
      never leaves it" no longer true as written. The *judging* stays server-side and the token stays
      the only door, so the decision itself survives; what has to change is the sentence. Amend both
      when Plan 3 lands, and say in Plan 3's own record that it made the section editable.
+- **One manual check before release.** With the system microphone disabled, the screen must open
+  typing-only and say `Sin micro: escribe, que también vale`. The *decision* is tested — a failed
+  `Mic::start` leaves no capture and the line above — but the *device* is not: nothing on this machine
+  can make a device fail to open, and push-to-talk's own refusal has never had a test either. Also
+  worth a human eye, because no test can see it: the veil's look on a real terminal (`Veil::Dim` is the
+  escape hatch if `▒`/`░` land badly), and the core's pulse following the voice while the door is shut.
