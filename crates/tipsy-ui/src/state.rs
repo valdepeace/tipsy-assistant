@@ -564,6 +564,13 @@ impl UiState {
                         login.phase = LoginPhase::Passed;
                         login.line = LoginLine::Passed;
                         login.name = name.clone();
+                        // The door opens on this verdict, so a capture it found open ends here (spec
+                        // §6.2: "if a capture is open the client sends `LoginStop` and closes the
+                        // stream"). The client's reconciliation reads `open` on its edges and sends
+                        // that `LoginStop`; leaving it open would keep frames arriving that the
+                        // session still judges, so a word said after "Pasa, Andrés." could reach the
+                        // refusal streak and shut a door the user had already opened.
+                        login.open = false;
                     } else {
                         login.phase = LoginPhase::Refused;
                         login.line = LoginLine::Refused;
@@ -1357,6 +1364,23 @@ mod tests {
         s.login = None;
         assert!(!s.show_login(true), "a view after the door opened does not reopen it");
         assert!(s.login.is_none(), "the HUD stays in front");
+    }
+
+    /// A pass closes the capture it found open (spec §6.2). Without this the microphone stays open
+    /// after the door opens, the client never sends its `LoginStop`, and the session keeps judging
+    /// frames — so a word said after "Pasa, Andrés." reaches the refusal streak and the door the user
+    /// had just walked through shuts again.
+    #[test]
+    fn a_pass_closes_the_capture_it_found_open() {
+        let mut s = login_state(true);
+        s.login.as_mut().unwrap().open = true;
+
+        s.apply(&Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+
+        let login = s.login.as_ref().expect("the screen stays until Enter");
+        assert_eq!(login.phase, LoginPhase::Passed);
+        assert_eq!(login.name.as_deref(), Some("Andrés"));
+        assert!(!login.open, "the capture is over the moment the door opens");
     }
 
     /// A typed answer is a `LoginAnswer` the server judges; the box empties and the screen says it is
