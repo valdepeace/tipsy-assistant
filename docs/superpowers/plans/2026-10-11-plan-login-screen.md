@@ -2010,16 +2010,22 @@ through the same key path a click already uses."
 
 ## Coordinator notes
 
-**This plan is written in chunks.** Tasks 1–4 are above and complete. Tasks 5–6 are drafted next, and
-appended here before any implementer starts them:
+**The plan's state.** Tasks 1–4 are above and complete, and each carries an "Amendments after execution"
+block recording every place where running it proved the plan wrong. **Tasks 5 and 6 are not in this
+document**: they were briefed in full before they started, with spec §6, §7 and §8 as their contract. An
+earlier draft of these notes said the plan was "written in chunks" and that it was not executable until
+the remaining tasks were appended; that text was left behind by a later edit and is no longer true —
+every task that ran had its brief first, and where the plan and the spec disagreed the spec won and the
+divergence was recorded against the task that caused it.
 
-- **Task 5** — the widget and the veil (`render_login.rs`, `render.rs`, `strings.rs`).
-- **Task 6** — the client wiring and the three documents (`client.rs`, `README.md`, `docs/`).
+**Where it stands** — `coordinator-rulings.md` beside this plan in its SDD workspace is the record,
+because `progress.md` was rewritten by another session and no longer matches the repository:
 
-Nothing in Tasks 1–2 depends on that text beyond the Interfaces block each task already carries, so
-Tasks 1–2 are executable the moment this chunk is approved. The plan is **not** executable as a whole
-until the remaining four tasks are appended: a task's implementer sees only their own task, and the
-Tasks table above is not a substitute for it.
+- `768e35e` — Task 1, since landed on `master` as `a03f3b6`: the 2C commits had captured this change's
+  fallout arms, so master did not compile without its definitions.
+- `03250b9` Task 2 · `eccfa86` Task 3 · `a569cb2` the greeting addendum · `8742367` Task 4 ·
+  `494de78` the spec and this plan.
+- The branch is rebased on `master`, and it was green at **391 tests** when Task 4 landed.
 
 **Standing rulings** (CLAUDE.md, and Plans 1, 2A and 2B both ran this way):
 
@@ -2028,8 +2034,11 @@ Tasks table above is not a substitute for it.
 - A plan's `[tier]` tags are hints about a task's size, not model selections: this harness cannot pick
   a model per subagent.
 - Each task's brief goes in the plan's own SDD workspace at
-  `.superpowers/sdd/2026-10-11-plan-login-screen/`, beside `global-constraints.md` (this plan's
-  section, verbatim) and the `progress.md` ledger, which records every ruling taken while executing.
-- The tests run with `-j 1` and the sandbox target directory named in the Global Constraints. A
+  `.superpowers/sdd/2026-10-11-plan-login-screen/`, beside `global-constraints.md` (this plan's section,
+  verbatim), `coordinator-rulings.md` (the coordinator's own record) and the task reports.
+- The tests run with `-j 1`, the worktree's own target directory and `TEMP` inside the worktree: a
   `cargo test` that dies with `STATUS_STACK_BUFFER_OVERRUN` at default parallelism is the machine, not
-  the code.
+  the code, and a `tempfile` panic naming `G:\dev\tmp` is the shell's broken temporary directory, not a
+  test failure.
+- The lint gate is not `-D warnings`: this baseline carries seven pre-existing clippy findings and is not
+  rustfmt-clean, so `cargo fmt` is never run.
