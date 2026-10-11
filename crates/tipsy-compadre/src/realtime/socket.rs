@@ -196,6 +196,14 @@ impl From<Error> for RealtimeError {
 
 /// One duplex session. It holds no key value at all: the key goes into the handshake and is dropped,
 /// and `reopen` resolves it again, so there is nothing here for a log to leak.
+///
+/// The one thing this type does *not* protect is the wire itself: `tungstenite` logs the request line
+/// — `Authorization: Bearer <key>` included — at `trace!` when it opens the socket. What keeps the key
+/// out of a log today is therefore the *absence* of a logger: this workspace installs no `log` or
+/// `tracing` subscriber, and this plan's one-dependency rule forbids adding one to filter that crate.
+/// Whoever installs one must filter `tungstenite` above `trace!` — never enable `trace` for it —
+/// before this header can be considered log-safe. The same invariant is in the README's release
+/// checklist.
 pub struct RealtimeSocket {
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     options: CallOptions,

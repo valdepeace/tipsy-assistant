@@ -329,5 +329,11 @@ what a test cannot hear.
       places is what to change.
 - [ ] Talk over the call mid-answer: the speech stops at once, the log keeps only what was said
       before the interruption, and the model does not carry on from the cut-off sentence.
+- [ ] **No key reaches a log.** The realtime socket's `Authorization: Bearer <key>` header is
+      protected today only by the absence of a logger: `tungstenite` logs the request line — header
+      included — at `trace!`, and this workspace installs no `log`/`tracing` subscriber. Whoever
+      installs one has to filter that crate above `trace!` (never enable `trace` for it), or the key
+      is written to the log. The same invariant sits beside `RealtimeSocket` in
+      `crates/tipsy-compadre/src/realtime/socket.rs`.
 - [ ] The real microphone and speakers in the browser, and the wake word in Spanish and English,
       once those milestones land.
