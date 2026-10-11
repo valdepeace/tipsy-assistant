@@ -11,15 +11,20 @@ git-ignored SDD workspace under `.superpowers/sdd/<plan-stem>/` holding its task
 constraints and the progress ledger with every ruling taken while executing it. **Resume from the
 ledger**: tasks with a `Task <N>: complete` line are done; start at the first one without it.
 
-**In progress:** Plan 2B (`docs/superpowers/plans/2026-10-10-plan-2b-config-screen-and-auto-mode.md`)
-— the configuration screen (`F9`) and the `auto` listening mode. All ten task bodies are written, and
-its **Tasks 1–7 are implemented** on branch `plan-2b-config-screen-and-auto-mode`: the two new config
-fields with the token generator, the protocol's test pair, the form view model with its strings, the
-four tabs' rendering, opening the screen with `F9` and the header's gear, saving and applying without
-a restart, and the Test button. What remains is Task 8 (the `earshot` detector, which needs its crate
-fetched first), Task 9 (`auto` mode end to end), Task 10 (the README) and then the plan's single
-whole-branch review. **Written and not started:** Plan 2C
-(`docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md`), the OpenAI Realtime voice mode.
+**Integrated on `master` too: Plan 2B**
+(`docs/superpowers/plans/2026-10-10-plan-2b-config-screen-and-auto-mode.md`) — the configuration
+screen (`F9` / the header's gear, four tabs, save-and-apply without a restart, the Test button that
+makes a real call and reports its measured latency) and the `auto` listening mode, with the detector
+in `vad.rs` over `earshot`. All ten tasks, the whole-branch review, one fix wave, one scoped
+re-review and the merge; 275 tests, 0 failures. Its ledger records four Minor findings parked as
+follow-ups and worth doing before the next release: the screen no longer shows the "unsaved" marker
+while it is open (a cost of drawing the header over the full-screen form, and untested), a comment in
+`client.rs` that overclaims where a read error is shown, one mangled test line `cargo fmt` would fix,
+and the help text that lost the true half of the toggle key (`Enter` still toggles a switch row).
+
+**Written and not started:** Plan 2C
+(`docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md`), the OpenAI Realtime voice mode —
+six tasks, a WebSocket call whose transcript lands in the HUD, off by default with its cost documented.
 
 **Not started:** the two throwaway spikes in a scratch directory outside the repo — Ratzilla
 (ratatui `Canvas` with Braille + mouse on wasm32) and Rustpotter (a custom Spanish wake word; the
