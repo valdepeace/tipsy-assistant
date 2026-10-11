@@ -5,4 +5,5 @@
 //! call façade that ties both to the session, the microphone and the `Player` is Task 4 and lands
 //! in this file.
 
+pub mod events;
 pub mod socket;

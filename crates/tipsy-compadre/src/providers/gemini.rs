@@ -326,7 +326,10 @@ fn first_sentence(text: &str) -> &str {
 
 /// Standard base64 (`A–Z a–z 0–9 + /`, `=` padding), written here because this plan adds no
 /// dependency for it. Padding and line breaks are ignored; any other byte is an error.
-fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+///
+/// `pub(crate)` because Plan 2C's realtime audio deltas are base64 too and that plan adds no base64
+/// dependency either: one decoder, one set of tests, two call sites.
+pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     fn sextet(byte: u8) -> Option<u8> {
         match byte {
             b'A'..=b'Z' => Some(byte - b'A'),
