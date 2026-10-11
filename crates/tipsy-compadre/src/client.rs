@@ -1218,6 +1218,24 @@ mod tests {
         assert!(client.state.login_seen, "the run remembers that it was asked");
     }
 
+    /// A pass ends the capture and tells the server so (spec §6.2). The state closes `open` on the
+    /// verdict, and this reconciliation is what turns that falling edge into the `LoginStop`: without
+    /// it the session's own capture stays active (`session.rs:346-349` routes frames to the login
+    /// while it is), so a word said after "Pasa, Andrés." was still judged and could shut the door.
+    #[test]
+    fn a_pass_sends_login_stop_and_ends_the_capture() {
+        let mut client = mock_client();
+        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        assert!(client.login_capture(), "the capture opens with the screen");
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStart], "and the server is told");
+
+        client.on_message(ToClient::Event(Event::LoginVerdict { ok: true, name: Some("Andrés".into()) }));
+
+        assert!(!client.login_capture(), "the pass ends the capture");
+        assert_eq!(sync_login(&mut client), vec![Command::LoginStop], "and the server hears about it");
+        assert!(client.state.login.is_some(), "the screen stays until Enter, as the spec says");
+    }
+
     /// With no screen up, the login's events belong to nothing: they must not touch the HUD, open a
     /// device or send a command.
     #[test]
