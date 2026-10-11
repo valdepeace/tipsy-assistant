@@ -6,8 +6,8 @@
 //! two payloads the research note marks inferred.
 //!
 //! This task also owns the outbound side of the wire, because it is strings rather than sends:
-//! `append_audio_message` and the two base64 helpers the whole module shares. Task 5 adds
-//! `truncate_message` and `cancel_message` beside them.
+//! `append_audio_message` and the two base64 helpers the whole module shares, and — added by Task 5
+//! — the two interruption messages, `truncate_message` and `cancel_message`.
 
 use serde_json::Value;
 use tipsy_protocol::ErrorCode;
@@ -24,8 +24,20 @@ pub enum Action {
     /// `Event::Live { active: false }` when the call ends.
     SessionConfigured { session_id: Option<String> },
     /// `response.output_audio.delta`: PCM16 little-endian mono at 24 kHz (`socket::PCM_RATE`),
-    /// base64-decoded and ready for the `Player`.
-    AudioDelta { pcm: Vec<u8> },
+    /// base64-decoded and ready for the `Player`, carrying the two fields that name *which* item's
+    /// audio this is.
+    ///
+    /// Task 5 needs the name: `conversation.item.truncate` may only cut an assistant message item,
+    /// and the item it must cut is the one the device is playing — never the user's item that
+    /// `input_audio_buffer.speech_started` names (research note, Interruption 3). The name is only
+    /// knowable from the delta itself, because the item-scaffolding events
+    /// (`response.output_item.added`, `conversation.item.added`) are not mapped.
+    ///
+    /// `item_id` is optional because the note marks the *payload fields* of this event as inferred
+    /// rather than verified (its Response-section schemas could not be fetched): a delta without a
+    /// readable name must not end the call, it must simply leave nothing safe to truncate.
+    /// `content_index` is the note's own fixed `0` when the frame does not carry one.
+    AudioDelta { item_id: Option<String>, content_index: u32, pcm: Vec<u8> },
     /// `conversation.item.input_audio_transcription.delta`: what the server heard, as it transcribes
     /// it. `Event::Heard` is one log line, so the deltas are accumulated and the *completed* event is
     /// deliberately not mapped: it would show the same sentence twice.
@@ -92,13 +104,22 @@ pub fn map(frame: &str) -> Result<Action, EventError> {
             session_id: value.pointer("/session/id").and_then(Value::as_str).map(str::to_string),
         }),
 
-        // INFERRED FIELD (`delta`): the note confirms this `type` verbatim but its payload page
-        // truncated, so this arm and its fixture are the single place the guessed shape lives.
+        // INFERRED FIELDS (`delta`, `item_id`, `content_index`): the note confirms this `type`
+        // verbatim but its payload page truncated, so this arm and its fixture are the single place
+        // the guessed shape lives. `delta` is the one the audio cannot be read without; the item's
+        // name is optional on purpose (see `Action::AudioDelta`).
         "response.output_audio.delta" => {
             let delta = field(&value, kind, "delta")?;
             let pcm = decode_base64(delta)
                 .map_err(|detail| EventError::BadAudio { kind: kind.to_string(), detail })?;
-            Ok(Action::AudioDelta { pcm })
+            let item_id = value.get("item_id").and_then(Value::as_str).map(str::to_string);
+            // An index the frame does not carry, or one too large for a `u32`, is the note's own
+            // fixed `0`: the note says `content_index` is `0`, so there is nothing to guess.
+            let content_index = match value.get("content_index").and_then(Value::as_u64) {
+                Some(index) => u32::try_from(index).unwrap_or(0),
+                None => 0,
+            };
+            Ok(Action::AudioDelta { item_id, content_index, pcm })
         }
 
         // INFERRED FIELD (`delta`), exactly as above.
@@ -143,6 +164,32 @@ pub fn append_audio_message(pcm_s16le: &[u8]) -> String {
         "audio": base64_encode(pcm_s16le),
     })
     .to_string()
+}
+
+/// `conversation.item.truncate`: remove the model's unplayed audio and its transcript, so what the
+/// session remembers is what the user actually heard (research note, Interruption 3). `audio_end_ms`
+/// is inclusive milliseconds of audio played and `content_index` is fixed at 0 by the note; only an
+/// assistant message item may be named here, which is why the caller passes the item the *device*
+/// was playing and never the item `input_audio_buffer.speech_started` names.
+///
+/// The string is built by hand rather than with `json!` so the frame is byte for byte the one the
+/// note quotes, field for field in its order: `serde_json`'s `Map` is a `BTreeMap` unless the
+/// `preserve_order` feature is on, so a macro here would emit the same object with its keys
+/// alphabetised and pin a shape in the tests that no reader of the note can recognise.
+pub fn truncate_message(item_id: &str, content_index: u32, audio_end_ms: u64) -> String {
+    // The item id is a string from the server, so it goes through the encoder rather than into the
+    // template raw (`serde_json::to_string` of a `&str` is exactly its JSON string literal).
+    let item_id = serde_json::to_string(item_id).expect("a string is always encodable");
+    format!(
+        r#"{{"type":"conversation.item.truncate","item_id":{item_id},"content_index":{content_index},"audio_end_ms":{audio_end_ms}}}"#
+    )
+}
+
+/// `response.cancel`: stop the response in progress (research note, Interruption 5). No
+/// `response_id` is sent: the client event is `{type, response_id?}` and cancelling nothing is safe —
+/// it errors, and the session survives.
+pub fn cancel_message() -> String {
+    serde_json::json!({ "type": "response.cancel" }).to_string()
 }
 
 /// RFC 4648 standard base64, `+`/`/` with `=` padding — the wire's audio encoding in both
@@ -279,7 +326,18 @@ mod tests {
     fn the_audio_delta_is_decoded_to_pcm() {
         // `AAECAw==` is the four bytes 0,1,2,3: the audio deltas are base64 inside JSON text frames
         // (the note's "Audio" section), PCM16 little-endian mono at 24 kHz (`Task 2`'s `PCM_RATE`).
-        assert_eq!(map(AUDIO_DELTA).unwrap(), Action::AudioDelta { pcm: vec![0, 1, 2, 3] });
+        // The item's name travels with the audio: Task 5's truncate may only cut the item the device
+        // was playing, and this delta is the only place that name is known (see `Action::AudioDelta`).
+        assert_eq!(
+            map(AUDIO_DELTA).unwrap(),
+            Action::AudioDelta { item_id: Some("item_1".into()), content_index: 0, pcm: vec![0, 1, 2, 3] }
+        );
+        // The note marks these payload fields as inferred, so a delta that carries no name is still
+        // a delta: it decodes, and it simply leaves nothing safe to truncate.
+        assert_eq!(
+            map(r#"{"type":"response.output_audio.delta","delta":"AAECAw=="}"#).unwrap(),
+            Action::AudioDelta { item_id: None, content_index: 0, pcm: vec![0, 1, 2, 3] }
+        );
     }
 
     #[test]
@@ -423,8 +481,8 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::BadResponse);
     }
 
-    /// The one outbound message this task owns. Task 4 sends it from `mic_to_api`'s output; Task 5
-    /// owns the two interruption messages.
+    /// The one outbound message this task owns. Task 4 sends it from `mic_to_api`'s output; Task 5's
+    /// two interruption messages are pinned by `realtime::tests`, beside the arithmetic they carry.
     #[test]
     fn the_audio_append_message_carries_the_audio_as_base64() {
         // RFC 4648, pinned against a hand-written vector rather than against this file's own encoder:

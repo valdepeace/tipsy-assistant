@@ -901,3 +901,109 @@ async fn a_call_that_reaches_its_limit_ends_itself() {
     assert!(why.contains("limit"), "the message names the limit: {why}");
     assert!(server.recv_json().await.is_none(), "a call at its limit closes its socket");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Task 5: barge-in.
+//
+// `input_audio_buffer.speech_started` is the server's own report that the user talked over the
+// model: playback stops on the client's next frame and the model is told, in milliseconds it can
+// trust, how much of its own speech was really heard (research note, Interruption 1–4). The number
+// comes from the device's queue, never from the bytes handed over, and a local interrupt cancels
+// the response instead of inventing one (Interruption 5).
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_barge_in_truncates_the_item_at_the_milliseconds_that_were_heard() {
+    let (url, accepting) = call_server().await;
+    let (out, mut from_call) = tokio::sync::mpsc::unbounded_channel();
+    let heard = Heard::new();
+    let _call = Call::open(setup(url), Arc::clone(&heard), out);
+    let mut server = accepting.await.expect("the server task");
+    server.handshake().await;
+
+    server.send(response_created("resp_1")).await;
+    for _ in 0..3 {
+        server.send(delta("item_a", 0, &[7i16; 480])).await;
+    }
+    let _ = collect_until(&mut from_call, |seen| audio_of(seen).len() == 3).await;
+
+    // The client's side of the count, stated by hand: in the running client these three numbers come
+    // from `Player::progress` after each chunk was appended (`client.rs`, `on_speech`). Three 20 ms
+    // chunks are queued, two have finished, and 12 ms of the third have played.
+    heard.begin("item_a", 0);
+    heard.push(960, 3, 0);
+    heard.push(960, 2, 0);
+    heard.push(960, 1, 12);
+
+    // The research note's barge-in event names the *user's* item; the truncate must name the
+    // assistant's, which is the one the device was playing.
+    server
+        .send(r#"{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":3200}"#)
+        .await;
+
+    let truncate = server.recv_json().await.expect("the truncate");
+    assert_eq!(truncate["type"], "conversation.item.truncate");
+    assert_eq!(truncate["item_id"], "item_a", "the assistant's item, never the user's `item_1`");
+    assert_eq!(truncate["content_index"], 0, "the note fixes the content index at 0");
+    // 2 finished chunks of 960 bytes plus 12 ms × 48 bytes: 2496 bytes ÷ 48 = 52 ms.
+    assert_eq!(truncate["audio_end_ms"], 52);
+    // And the device is asked to stop, once.
+    assert!(heard.take_interrupted(), "the client is told to stop the device on its next frame");
+    assert!(!heard.take_interrupted(), "a second frame must not flush again for the same barge-in");
+}
+
+#[tokio::test]
+async fn what_arrives_after_a_barge_in_is_not_played() {
+    let (url, accepting) = call_server().await;
+    let (out, mut from_call) = tokio::sync::mpsc::unbounded_channel();
+    let _call = Call::open(setup(url), Heard::new(), out);
+    let mut server = accepting.await.expect("the server task");
+    server.handshake().await;
+
+    server.send(response_created("resp_1")).await;
+    for _ in 0..3 {
+        server.send(delta("item_a", 0, &[7i16; 480])).await;
+    }
+    let seen = collect_until(&mut from_call, |seen| audio_of(seen).len() == 3).await;
+    assert_eq!(audio_of(&seen).len(), 3);
+
+    server
+        .send(r#"{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":3200}"#)
+        .await;
+    // The tail of the response the user talked over is still in flight, both before and after the
+    // server's own cancellation.
+    server.send(delta("item_a", 0, &[9i16; 480])).await;
+    server.send(response_done("resp_1", "cancelled")).await;
+    server.send(delta("item_a", 0, &[9i16; 480])).await;
+
+    let seen = collect_until(&mut from_call, |seen| {
+        events_of(seen).iter().any(|event| matches!(event, Event::Done { .. }))
+    })
+    .await;
+    assert!(audio_of(&seen).is_empty(), "none of it may reach the device: {:#?}", audio_of(&seen));
+}
+
+#[tokio::test]
+async fn a_local_interrupt_cancels_the_response() {
+    let (url, accepting) = call_server().await;
+    let (out, mut from_call) = tokio::sync::mpsc::unbounded_channel();
+    let heard = Heard::new();
+    let call = Call::open(setup(url), Arc::clone(&heard), out);
+    let mut server = accepting.await.expect("the server task");
+    server.handshake().await;
+
+    server.send(response_created("resp_1")).await;
+    server.send(delta("item_a", 0, &[7i16; 480])).await;
+    let _ = collect_until(&mut from_call, |seen| audio_of(seen).len() == 1).await;
+
+    call.interrupt();
+
+    let cancel = server.recv_json().await.expect("the cancel");
+    assert_eq!(cancel["type"], "response.cancel");
+    assert!(
+        cancel.get("response_id").is_none(),
+        "the research note's client event is `{{type, response_id?}}`: nothing is named, because \
+         cancelling nothing is safe: {cancel:#?}"
+    );
+    assert!(heard.take_interrupted(), "a local interrupt stops the device too");
+}
