@@ -1,5 +1,13 @@
 use tipsy_protocol::*;
 
+// The seven section views, named because this file builds them field by field. `Capability`,
+// `ProfileView`, `ListeningMode` and `UiLanguage` come from the glob above; naming them twice would
+// be an unused import or a duplicate, depending on how rustc resolves the two.
+use tipsy_protocol::{
+    AllowedPersonView, ConfigView, ListeningView, LoginSettingsView, ProfileEntryView, ProviderView, RealtimeView,
+    ServerView,
+};
+
 fn roundtrip_command(c: Command) {
     let json = serde_json::to_string(&c).unwrap();
     let back: Command = serde_json::from_str(&json).unwrap();
@@ -197,4 +205,186 @@ fn a_welcome_without_the_login_field_parses_as_no_login_screen() {
         web_bundle: false,
         login: Some(LoginView { voice: true }),
     });
+}
+
+/// The whole editable configuration as the screen edits it, populated so that nothing round-trips by
+/// accident: three connectors of two kinds, both `Option` shapes, a carried token, both carried
+/// sections and a profile with a voices table.
+fn config_view() -> ConfigView {
+    ConfigView {
+        active_profile: "compae".into(),
+        providers: vec![
+            ProviderView {
+                capability: Capability::Chat,
+                kind: "openai_compat".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model: "google/gemini-2.5-flash".into(),
+                key_name: "openrouter".into(),
+            },
+            ProviderView {
+                capability: Capability::Speech,
+                kind: "elevenlabs".into(),
+                base_url: "https://api.elevenlabs.io".into(),
+                model: "eleven_flash_v2_5".into(),
+                key_name: "elevenlabs".into(),
+            },
+            ProviderView {
+                capability: Capability::Transcribe,
+                kind: "openai_compat".into(),
+                base_url: "http://localhost:11434/v1".into(),
+                model: "openai/whisper-large-v3".into(),
+                key_name: String::new(),
+            },
+        ],
+        listening: ListeningView {
+            mode: ListeningMode::Auto,
+            silence_ms: "1000".into(),
+            mic_gain: "12".into(),
+            mic_device: Some("Rode NT-USB".into()),
+        },
+        realtime: RealtimeView {
+            enabled: true,
+            model: "gpt-realtime-2.1-mini".into(),
+            key_name: "openai-realtime".into(),
+            voice: "cedar".into(),
+            max_minutes: 25,
+        },
+        login: LoginSettingsView {
+            enabled: true,
+            voice: false,
+            allowed: vec![
+                AllowedPersonView { name: "Andrés".into(), keywords: vec!["andres".into(), "core".into()] },
+                AllowedPersonView { name: "María".into(), keywords: vec!["maria".into()] },
+            ],
+        },
+        profiles: vec![ProfileEntryView {
+            id: "compae".into(),
+            name: "El Compae".into(),
+            language: "es-ES".into(),
+            prompt: "Habla como un compae.".into(),
+            voice_instructions: "andaluz, tranquilo".into(),
+            greeting: "¿Qué pasa, quillo?".into(),
+            wake_word: "oye compae".into(),
+            voices: vec![
+                ("elevenlabs".to_string(), "george".to_string()),
+                ("openai_compat".to_string(), "alloy".to_string()),
+            ],
+        }],
+        server: ServerView {
+            bind: "127.0.0.1:7070".into(),
+            lan: false,
+            token: "0123456789abcdef0123456789abcdef".into(),
+        },
+    }
+}
+
+/// The three commands this tier adds, each in both directions, with a fully populated `ConfigView`.
+#[test]
+fn the_configuration_commands_roundtrip() {
+    roundtrip_command(Command::GetConfig);
+    roundtrip_command(Command::UpdateConfig { config: config_view() });
+    roundtrip_command(Command::SetKey { name: "openrouter".into(), value: "sk-or-v1-…a1b2".into() });
+}
+
+/// The three events, each in both directions. `ProfileChanged` carries the same `ProfileView`
+/// `Welcome` carries, which is why it is built from the type that already exists.
+#[test]
+fn the_configuration_events_roundtrip() {
+    roundtrip_event(Event::Config { config: config_view() });
+    roundtrip_event(Event::ProfileChanged {
+        profile: ProfileView { id: "senyor".into(), name: "O Senyor".into(), language: "gl-ES".into() },
+    });
+    roundtrip_event(Event::ConfigChanged);
+}
+
+/// §4.2 and §4.4's JSON exactly: the tag is the variant's snake_case name, `UpdateConfig` nests the
+/// whole view under `config`, and `ConfigChanged` deliberately carries no payload (spec §4.4).
+#[test]
+fn the_configuration_messages_spell_their_tags_as_the_spec_says() {
+    assert_eq!(serde_json::to_string(&Command::GetConfig).unwrap(), r#"{"type":"get_config"}"#);
+    assert_eq!(serde_json::from_str::<Command>(r#"{"type":"get_config"}"#).unwrap(), Command::GetConfig);
+
+    assert_eq!(serde_json::to_string(&Event::ConfigChanged).unwrap(), r#"{"type":"config_changed"}"#);
+    assert_eq!(serde_json::from_str::<Event>(r#"{"type":"config_changed"}"#).unwrap(), Event::ConfigChanged);
+
+    let json = serde_json::to_string(&Command::SetKey { name: "openrouter".into(), value: "v".into() }).unwrap();
+    assert_eq!(json, r#"{"type":"set_key","name":"openrouter","value":"v"}"#);
+
+    let json = serde_json::to_string(&Event::ProfileChanged {
+        profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+    })
+    .unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"profile_changed","profile":{"id":"compae","name":"El Compae","language":"es-ES"}}"#
+    );
+
+    // `UpdateConfig` is the one shape whose whole payload is nested, so it is read apart in full:
+    // the field name is `config`, and the view's own field names are the form's, unchanged.
+    let json = serde_json::to_string(&Command::UpdateConfig { config: config_view() }).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["type"], "update_config");
+    assert_eq!(value["config"]["active_profile"], "compae");
+    assert_eq!(value["config"]["listening"]["mode"], "auto");
+    assert_eq!(value["config"]["providers"][0]["capability"], "chat");
+    assert_eq!(value["config"]["providers"][0]["key_name"], "openrouter");
+    assert_eq!(value["config"]["server"]["bind"], "127.0.0.1:7070");
+    assert_eq!(value["config"]["realtime"]["key_name"], "openai-realtime");
+    assert_eq!(value["config"]["login"]["allowed"][0]["name"], "Andrés");
+    assert_eq!(value["config"]["profiles"][0]["voices"][0][0], "elevenlabs");
+
+    let json = serde_json::to_string(&Event::Config { config: config_view() }).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["type"], "config");
+    assert_eq!(value["config"]["server"]["token"], "0123456789abcdef0123456789abcdef");
+}
+
+/// The five `ErrorCode` variants this tier adds. The spelling is the point and the reason they exist
+/// at all: a client branches on `code`, and v1 spec §4.2 makes `Event::Error.message` human text
+/// localized to the profile's language, so a code parked in the message would be unreadable to it.
+#[test]
+fn the_new_error_codes_spell_their_tags_as_the_spec_says() {
+    for (code, spelling) in [
+        (ErrorCode::ProtocolVersion, "protocol_version"),
+        (ErrorCode::TokenRequired, "token_required"),
+        (ErrorCode::TokenInvalid, "token_invalid"),
+        (ErrorCode::BadMessage, "bad_message"),
+        (ErrorCode::InsecureTransport, "insecure_transport"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), serde_json::json!(spelling));
+        assert_eq!(serde_json::from_value::<ErrorCode>(serde_json::json!(spelling)).unwrap(), code);
+    }
+
+    // The variants are additive: the ten that were there keep their spelling byte for byte.
+    for (code, spelling) in [
+        (ErrorCode::Auth, "auth"),
+        (ErrorCode::RateLimited, "rate_limited"),
+        (ErrorCode::Timeout, "timeout"),
+        (ErrorCode::Network, "network"),
+        (ErrorCode::BadResponse, "bad_response"),
+        (ErrorCode::NoKey, "no_key"),
+        (ErrorCode::Mic, "mic"),
+        (ErrorCode::Config, "config"),
+        (ErrorCode::NothingHeard, "nothing_heard"),
+        (ErrorCode::Internal, "internal"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), serde_json::json!(spelling));
+    }
+
+    // …and they travel inside `Event::Error` unchanged, which is where a client reads them.
+    roundtrip_event(Event::Error {
+        code: ErrorCode::TokenRequired,
+        message: "Este servidor pide un token: pásalo con --token.".into(),
+        recoverable: false,
+    });
+    let json = serde_json::to_string(&Event::Error {
+        code: ErrorCode::InsecureTransport,
+        message: "Esa conexión no va cifrada.".into(),
+        recoverable: true,
+    })
+    .unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"error","code":"insecure_transport","message":"Esa conexión no va cifrada.","recoverable":true}"#
+    );
 }

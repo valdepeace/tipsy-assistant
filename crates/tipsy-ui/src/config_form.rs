@@ -5,7 +5,10 @@
 //! only thing that reads or writes the file; everything on this side is what the screen shows and
 //! what a key or a click does to it.
 
-use tipsy_protocol::{Capability, ListeningMode, UiLanguage};
+use tipsy_protocol::{
+    AllowedPersonView, Capability, ConfigView, ListeningMode, ListeningView, LoginSettingsView, ProfileEntryView,
+    ProviderView, RealtimeView, ServerView, UiLanguage,
+};
 
 use crate::state::KeyInput;
 use crate::strings::{strings, Strings};
@@ -266,6 +269,139 @@ impl Default for ConfigForm {
             dirty: false,
             filled: false,
         }
+    }
+}
+
+/// The form as the wire's own shape. Same fields, so this is a rename and a move of plain values;
+/// the round-trip test in `tipsy-compadre` is what keeps it one shape.
+impl From<&ConfigForm> for ConfigView {
+    fn from(form: &ConfigForm) -> Self {
+        Self {
+            active_profile: form.active_profile.clone(),
+            providers: form
+                .providers
+                .iter()
+                .map(|row| ProviderView {
+                    capability: row.capability,
+                    kind: row.kind.clone(),
+                    base_url: row.base_url.clone(),
+                    model: row.model.clone(),
+                    key_name: row.key_name.clone(),
+                })
+                .collect(),
+            listening: ListeningView {
+                mode: form.listening.mode,
+                silence_ms: form.listening.silence_ms.clone(),
+                mic_gain: form.listening.mic_gain.clone(),
+                mic_device: form.listening.mic_device.clone(),
+            },
+            realtime: RealtimeView {
+                enabled: form.realtime.enabled,
+                model: form.realtime.model.clone(),
+                key_name: form.realtime.key_name.clone(),
+                voice: form.realtime.voice.clone(),
+                max_minutes: form.realtime.max_minutes,
+            },
+            login: LoginSettingsView {
+                enabled: form.login.enabled,
+                voice: form.login.voice,
+                allowed: form
+                    .login
+                    .allowed
+                    .iter()
+                    .map(|entry| AllowedPersonView {
+                        name: entry.name.clone(),
+                        keywords: entry.keywords.clone(),
+                    })
+                    .collect(),
+            },
+            profiles: form
+                .profiles
+                .iter()
+                .map(|profile| ProfileEntryView {
+                    id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    language: profile.language.clone(),
+                    prompt: profile.prompt.clone(),
+                    voice_instructions: profile.voice_instructions.clone(),
+                    greeting: profile.greeting.clone(),
+                    wake_word: profile.wake_word.clone(),
+                    voices: profile.voices.clone(),
+                })
+                .collect(),
+            server: ServerView {
+                bind: form.server.bind.clone(),
+                lan: form.server.lan,
+                token: form.server.token.clone(),
+            },
+        }
+    }
+}
+
+impl From<ConfigView> for ConfigForm {
+    /// A form that is **not** marked filled: `filled` says "the client read a file and this form
+    /// carries it", and a form rebuilt from a message has read nothing yet. Everything else — the tab,
+    /// the focused row, the edit buffer, the notice and the dirty flag — is the screen's own state and
+    /// starts where `ConfigForm::default` starts it.
+    ///
+    /// Written as assignments onto `ConfigForm::default()` rather than as one literal, because
+    /// `filled` is private to this crate and struct-literal syntax for a `ConfigForm` outside it is
+    /// exactly what `form_of`'s comment forbids. The lint that prefers a literal is allowed here for
+    /// that reason and no other.
+    #[allow(clippy::field_reassign_with_default)]
+    fn from(view: ConfigView) -> Self {
+        let mut form = ConfigForm::default();
+        form.active_profile = view.active_profile;
+        form.providers = view
+            .providers
+            .into_iter()
+            .map(|row| ProviderForm {
+                capability: row.capability,
+                kind: row.kind,
+                base_url: row.base_url,
+                model: row.model,
+                key_name: row.key_name,
+            })
+            .collect();
+        form.listening = ListeningForm {
+            mode: view.listening.mode,
+            silence_ms: view.listening.silence_ms,
+            mic_gain: view.listening.mic_gain,
+            mic_device: view.listening.mic_device,
+        };
+        form.realtime = RealtimeForm {
+            enabled: view.realtime.enabled,
+            model: view.realtime.model,
+            key_name: view.realtime.key_name,
+            voice: view.realtime.voice,
+            max_minutes: view.realtime.max_minutes,
+        };
+        form.login = LoginForm {
+            enabled: view.login.enabled,
+            voice: view.login.voice,
+            allowed: view
+                .login
+                .allowed
+                .into_iter()
+                .map(|entry| AllowedPersonForm { name: entry.name, keywords: entry.keywords })
+                .collect(),
+        };
+        form.profiles = view
+            .profiles
+            .into_iter()
+            .map(|profile| ProfileForm {
+                id: profile.id,
+                name: profile.name,
+                language: profile.language,
+                prompt: profile.prompt,
+                voice_instructions: profile.voice_instructions,
+                greeting: profile.greeting,
+                wake_word: profile.wake_word,
+                voices: profile.voices,
+            })
+            .collect();
+        form.server = ServerForm { bind: view.server.bind, lan: view.server.lan, token: view.server.token };
+        form
     }
 }
 

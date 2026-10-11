@@ -607,6 +607,12 @@ impl UiState {
                     }
                 }
             }
+            // The configuration's own three events. Where they are *shown* is a later task's: the
+            // screen is `ConfigForm`'s to draw and the HUD is `UiState`'s, and neither has a home for
+            // them here. They are here to keep the match exhaustive, and this task behaviour-free.
+            Event::Config { .. } => {}
+            Event::ProfileChanged { .. } => {}
+            Event::ConfigChanged => {}
             Event::Error { code, message, .. } => {
                 // While the door is shut, a failure belongs to the screen and not to the log: the
                 // wording of "nothing heard" is the UI's, and any other failure stops the voice.

@@ -1,6 +1,7 @@
 //! Messages exchanged between the tipsy-compadre server and its clients.
 //!
-//! Text messages are JSON (`Command`, `Event`); audio travels as binary `Frame`s.
+//! Text messages are JSON (`Command`, `Event`, and the configuration they carry as `ConfigView`);
+//! audio travels as binary `Frame`s.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,19 @@ pub enum ErrorCode {
     Config,
     NothingHeard,
     Internal,
+    /// The client's `protocol_version` is not this server's (spec §4.1).
+    ProtocolVersion,
+    /// The server is exposed and `Hello` carried no token (spec §4.1).
+    TokenRequired,
+    /// The server is exposed and `Hello` carried a token that is not its own (spec §4.1).
+    TokenInvalid,
+    /// A text frame that is not a well-formed `Command`, or a binary frame that is not an audio
+    /// `Frame`. Recoverable: the connection stays open (spec §10).
+    BadMessage,
+    /// `SetKey` on a connection that is neither loopback nor TLS (spec §9.4). The variant lands here
+    /// because the wire needs the spelling; **Task 1.8 owns the refusal that emits it**, and this
+    /// task emits nothing with it.
+    InsecureTransport,
 }
 
 /// Which connector the configuration screen's "Test" button is asking about (spec §9). Plan 2B
@@ -104,6 +118,116 @@ pub struct LoginView {
     pub voice: bool,
 }
 
+/// `[server]`, as the configuration screen edits it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerView {
+    pub bind: String,
+    pub lan: bool,
+    /// §4.3: the one field of this whole type that may hold something a client is not entitled to
+    /// see. A connection that presented no token receives [`ConfigView::redacted`]'s empty string.
+    pub token: String,
+}
+
+/// One row of the Providers tab.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderView {
+    pub capability: Capability,
+    pub kind: String,
+    pub base_url: String,
+    pub model: String,
+    /// The key's *name*, never the key: the same rule the configuration file follows.
+    pub key_name: String,
+}
+
+/// `[listening]`, as the screen edits it. `None` is the system default device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListeningView {
+    pub mode: ListeningMode,
+    /// The row is a text field, so the value travels as the text it holds and the save parses it.
+    pub silence_ms: String,
+    pub mic_gain: String,
+    pub mic_device: Option<String>,
+}
+
+/// `[realtime]`, carried and never drawn (Plan 2C Task 1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RealtimeView {
+    pub enabled: bool,
+    pub model: String,
+    /// The key's *name*, never the key.
+    pub key_name: String,
+    pub voice: String,
+    pub max_minutes: u32,
+}
+
+/// One `[[login.allowed]]` entry (the login-screen plan's wire).
+///
+/// Deliberately **not** `LoginEntryView`: that name is this tier's section view of the whole
+/// `[login]` table, and one word cannot mean both the table and one of its rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AllowedPersonView {
+    pub name: String,
+    pub keywords: Vec<String>,
+}
+
+/// `[login]`, carried and never drawn.
+///
+/// Deliberately **not** `LoginView`: that type already exists above as what `Welcome` tells a client
+/// about its login *screen* — one flag. This is the whole `[login]` section an editor edits, entries
+/// and all, and it is named for the section rather than for the screen the section configures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginSettingsView {
+    pub enabled: bool,
+    pub voice: bool,
+    pub allowed: Vec<AllowedPersonView>,
+}
+
+/// One `[[profiles]]` entry. Deliberately **not** `ProfileView`: that type is the three fields a
+/// client is *told* about its active profile; this is the whole entry an editor edits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEntryView {
+    pub id: String,
+    pub name: String,
+    pub language: String,
+    pub prompt: String,
+    pub voice_instructions: String,
+    pub greeting: String,
+    pub wake_word: String,
+    /// Sorted by connector name: a map's order is not a screen order, and the row index names back.
+    pub voices: Vec<(String, String)>,
+}
+
+/// The editable configuration, as the configuration screen edits it (spec §4.3).
+///
+/// The fields are `tipsy_ui::ConfigForm`'s, field for field, with each section type renamed
+/// `…Form` → `…View`. The screen's own view state — the focused tab and row, the text being typed,
+/// the notice line, the dirty flag and the "filled" flag — stays on the form and never crosses.
+///
+/// **No field of this type may hold a secret.** Exactly one field may hold something a client is not
+/// entitled to see: `server.token`, which is what [`ServerView`]'s own doc comment says, and
+/// [`ConfigView::redacted`] is the one way to take it away.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigView {
+    pub active_profile: String,
+    pub providers: Vec<ProviderView>,
+    pub listening: ListeningView,
+    pub realtime: RealtimeView,
+    pub login: LoginSettingsView,
+    pub profiles: Vec<ProfileEntryView>,
+    pub server: ServerView,
+}
+
+impl ConfigView {
+    /// The same view with no token in it: what `Event::Config` answers a client that is neither a
+    /// loopback connection nor one that presented the server's token (spec §4.3). It clears the field
+    /// rather than removing it, so the answering side has one code path and the other end has no
+    /// `Option` to interpret.
+    pub fn redacted(mut self) -> Self {
+        self.server.token.clear();
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
@@ -127,6 +251,14 @@ pub enum Command {
     /// A typed answer (`login_answer`). Judged whether or not a capture is active, so a typing-only
     /// client never has to send `LoginStart` at all.
     LoginAnswer { text: String },
+    /// The configuration screen opening: the session answers `Event::Config`.
+    GetConfig,
+    /// The configuration screen saving. The server replaces the editable configuration, persists it,
+    /// re-derives every session's brain and broadcasts `Event::ConfigChanged` (spec §4.2).
+    UpdateConfig { config: ConfigView },
+    /// A new API key for the *server's* credential store. Refused unless the connection is loopback
+    /// or TLS (spec §9.4), and answered with `Event::ConfigChanged` when it is accepted.
+    SetKey { name: String, value: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,6 +301,14 @@ pub enum Event {
     LoginHeard { text: String },
     /// The ruling: whether the door opens, and the matched entry's name when it does.
     LoginVerdict { ok: bool, name: Option<String> },
+    /// The redacted configuration, answering `Command::GetConfig` (spec §4.4).
+    Config { config: ConfigView },
+    /// The active profile changed. Carries the same three fields `Welcome` carries.
+    ProfileChanged { profile: ProfileView },
+    /// The configuration changed. Deliberately no payload: a client that is showing it asks again
+    /// with `GetConfig`, and sending the whole configuration on every save would put the token on the
+    /// wire more often than it needs to be (spec §4.4).
+    ConfigChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
