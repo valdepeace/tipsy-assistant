@@ -15,7 +15,9 @@ use tipsy_compadre::audio::pcm::Pcm;
 use tipsy_compadre::brain::BrainConfig;
 use tipsy_compadre::config::Config;
 use tipsy_compadre::config::store;
+use tipsy_compadre::keys::{KeyResolver, MemoryStore};
 use tipsy_compadre::providers::*;
+use tipsy_compadre::server::Hub;
 use tipsy_compadre::session::{SessionPolicy, spawn_session, spawn_with_events};
 use tipsy_compadre::vad::{Earshot, Scorer, VadEvent, VadState};
 use tipsy_protocol::{
@@ -119,11 +121,36 @@ fn config() -> Config {
     store::load_or_create(&dir.path().join("config.toml")).unwrap().config
 }
 
+/// The resolver every hub in this file is built with: one that holds nothing, because the fakes
+/// above are the whole provider stack and nothing here may reach a real key or a real store.
+fn resolver() -> KeyResolver {
+    KeyResolver::new(Box::new(MemoryStore::default()), Box::new(|_| None))
+}
+
+/// A hub for one session over `providers`, with a configuration file nothing has read yet.
+///
+/// The tempdir is **leaked** on purpose: `Hub::set_profile` and `Hub::set_listening_mode` persist
+/// what they are given (`store::save`), so the path has to stay writable for the life of the test
+/// and a directory that went away with this function would turn every later save into a refusal.
+/// A test process leaks a handful of empty directories, which the OS reclaims with it.
+fn detached_hub(config: Config, providers: ProviderSlot) -> Hub {
+    let dir = tempfile::tempdir().unwrap().keep();
+    Hub::new(config, dir.join("config.toml"), resolver(), providers)
+}
+
+/// The hub the hand-built sessions of this file run on, with no session registered in it: the
+/// harness drives the session's channels directly, and `Hub::spawn` would take them away.
+fn hub_on(config: &Config, providers: ProviderSlot) -> Hub {
+    detached_hub(config.clone(), providers)
+}
+
 /// A session on fake providers with the handshake policy the test needs, handing back its ends, its
 /// session id and the transcribe fake.
 ///
 /// `spawn_with_events` and not `spawn_session`: the tests that follow need the id, and
-/// `spawn_session`'s return is the two channels and nothing else.
+/// `spawn_session`'s return is the two channels and nothing else. It takes `hub_on`'s hub rather than
+/// registering in it, because a test that drives the session's channels itself needs the ends
+/// `Hub::spawn` would swallow.
 fn session_with_policy(
     chat: Arc<FakeChat>,
     speech: Arc<FakeSpeech>,
@@ -136,7 +163,9 @@ fn session_with_policy(
         pcms: Mutex::new(Vec::new()),
     });
     let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
-    let ends = spawn_with_events(config(), providers, BrainConfig::default(), policy.clone());
+    let config = config();
+    let hub = hub_on(&config, providers.clone());
+    let ends = spawn_with_events(config, providers, BrainConfig::default(), policy.clone(), hub);
     let session_id = ends.session_id;
     let (tx, rx) = (ends.to_server, ends.from_server);
     // The handshake here, and not in the test, because it is what an in-process client sends and not
@@ -147,6 +176,26 @@ fn session_with_policy(
             .expect("the session must still be listening");
     }
     (tx, rx, transcribe, session_id)
+}
+
+/// A session registered in a hub of its own, which is how the in-process client runs one: a
+/// `SetProfile` or a `SetListeningMode` a client sends is the hub's to persist and to announce, so a
+/// test that sends one needs the session attached.
+fn session_on_hub(
+    chat: Arc<FakeChat>,
+    speech: Arc<FakeSpeech>,
+    transcript: &'static str,
+) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>) {
+    let transcribe = Arc::new(FakeTranscribe {
+        text: transcript,
+        languages: Mutex::new(Vec::new()),
+        pcms: Mutex::new(Vec::new()),
+    });
+    let providers = ProviderSlot::new(Providers { chat, speech, transcribe });
+    let hub = detached_hub(config(), providers);
+    let ends = hub.spawn(SessionPolicy::local());
+    send(&ends.to_server, hello(None, PROTOCOL_VERSION));
+    (ends.to_server, ends.from_server)
 }
 
 /// The same session over the in-process policy: the handshake path covers both transports, and the
@@ -517,7 +566,10 @@ async fn a_rebuilt_provider_stack_answers_the_next_turn() {
         speech: speech.clone(),
         transcribe: transcribe.clone(),
     });
-    let (tx, mut rx) = spawn_session(config(), slot.clone(), BrainConfig::default(), SessionPolicy::local());
+    let config = config();
+    let hub = hub_on(&config, slot.clone());
+    let (tx, mut rx) =
+        spawn_session(config, slot.clone(), BrainConfig::default(), SessionPolicy::local(), hub);
     send(&tx, hello(None, PROTOCOL_VERSION));
     next_matching(&mut rx, is_done, 500).await; // the greeting
 
@@ -538,19 +590,13 @@ async fn a_rebuilt_provider_stack_answers_the_next_turn() {
 
 /// The mode the screen saves is the mode the HUD shows: `Welcome` is the only event that carries
 /// it, so the session announces the change.
+///
+/// The session is registered in a hub, because a mode a *client* sets is now the hub's to persist and
+/// to re-announce to every session — including this one, which is how the fresh `Welcome` below
+/// reaches the client. The hub's own half is asserted in `server::hub`'s tests.
 #[tokio::test]
 async fn a_new_listening_mode_is_announced_to_the_client() {
-    let slot = ProviderSlot::new(Providers {
-        chat: FakeChat::new(vec![]),
-        speech: FakeSpeech::new(),
-        transcribe: Arc::new(FakeTranscribe {
-            text: "",
-            languages: Mutex::new(Vec::new()),
-            pcms: Mutex::new(Vec::new()),
-        }),
-    });
-    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default(), SessionPolicy::local());
-    send(&tx, hello(None, PROTOCOL_VERSION));
+    let (tx, mut rx) = session_on_hub(FakeChat::new(vec![]), FakeSpeech::new(), "");
     let first = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Welcome { .. })), 500).await;
     assert!(
         matches!(first, ToClient::Event(Event::Welcome { listening_mode: ListeningMode::Push, .. })),
@@ -568,30 +614,25 @@ async fn a_new_listening_mode_is_announced_to_the_client() {
 
 /// The profile half of a save: the switch reaches the running session, so the next turn speaks
 /// the new profile's own prompt and the header and the language follow it.
+///
+/// The switch is announced with `Event::ProfileChanged` and no longer with a fresh `Welcome`: the
+/// profile is global now, so the hub — not this session — is what applies it, and `ProfileChanged`
+/// carries the same three fields `Welcome` does in a type whose whole purpose is that announcement.
 #[tokio::test]
 async fn switching_profile_changes_the_prompt_of_the_next_turn() {
     let chat = FakeChat::new(vec![Ok(vec!["Una respuesta suficientemente larga."])]);
-    let slot = ProviderSlot::new(Providers {
-        chat: chat.clone(),
-        speech: FakeSpeech::new(),
-        transcribe: Arc::new(FakeTranscribe {
-            text: "",
-            languages: Mutex::new(Vec::new()),
-            pcms: Mutex::new(Vec::new()),
-        }),
-    });
-    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default(), SessionPolicy::local());
-    send(&tx, hello(None, PROTOCOL_VERSION));
+    let (tx, mut rx) = session_on_hub(chat.clone(), FakeSpeech::new(), "");
     next_matching(&mut rx, is_done, 500).await; // the greeting
 
     send(&tx, Command::SetProfile { id: "senyor".into() });
-    let welcome = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Welcome { .. })), 500).await;
-    match welcome {
-        ToClient::Event(Event::Welcome { profile, ui_language, .. }) => {
+    let announced =
+        next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::ProfileChanged { .. })), 500).await;
+    match announced {
+        ToClient::Event(Event::ProfileChanged { profile }) => {
             assert_eq!(profile.id, "senyor");
-            assert_eq!(ui_language, UiLanguage::Es);
+            assert_eq!(profile.language, "es-ES");
         }
-        other => panic!("the profile switch must be announced in a fresh Welcome, got {other:?}"),
+        other => panic!("the profile switch must be announced with ProfileChanged, got {other:?}"),
     }
 
     send(&tx, Command::Ask { text: "¿cuánto cuesta?".into() });
@@ -628,7 +669,9 @@ fn auto_session(
         pcms: Mutex::new(Vec::new()),
     });
     let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
-    let (tx, rx) = spawn_session(auto_config(silence_ms), providers, BrainConfig::default(), SessionPolicy::local());
+    let config = auto_config(silence_ms);
+    let hub = hub_on(&config, providers.clone());
+    let (tx, rx) = spawn_session(config, providers, BrainConfig::default(), SessionPolicy::local(), hub);
     send(&tx, hello(None, PROTOCOL_VERSION));
     (tx, rx, transcribe)
 }
@@ -1174,4 +1217,199 @@ async fn reset_inside_the_guard_leaves_auto_mode_listening() {
     let heard = next_matching(&mut rx, is_heard, 2000).await;
     assert_eq!(heard, ToClient::Event(Event::Heard { text: "¿y el ticket?".into() }));
     assert_eq!(transcribe.pcms.lock().unwrap().len(), 1, "the utterance must still be transcribed");
+}
+
+// ---------- the hub, and the sessions on it ----------
+
+/// A hub the tests drive directly: no listener, one configuration file in a tempdir, the server's one
+/// provider stack, and the key store the stack's fakes never consult.
+fn hub_in(config: &Config, path: &std::path::Path, providers: ProviderSlot) -> Hub {
+    Hub::new(config.clone(), path.to_path_buf(), resolver(), providers)
+}
+
+/// A session on the hub, attached exactly as a connection will be: the ends first, then the registry.
+/// The provider stack is the hub's, which is why this takes none.
+fn session_attached(
+    hub: &Hub,
+    policy: SessionPolicy,
+) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>, u64) {
+    let ends = hub.spawn(policy);
+    hub.attach(ends.session_id, ends.to_server.clone(), ends.events.clone());
+    (ends.to_server, ends.from_server, ends.session_id)
+}
+
+/// A loaded configuration in a tempdir, the way every test in this file gets one (`:118-122`).
+fn config_in(dir: &tempfile::TempDir) -> (Config, std::path::PathBuf) {
+    let path = dir.path().join("config.toml");
+    let config = store::load_or_create(&path).unwrap().config;
+    (config, path)
+}
+
+/// A provider stack that answers nothing: these tests are about who is told what.
+fn silent() -> ProviderSlot {
+    ProviderSlot::new(Providers {
+        chat: FakeChat::new(vec![]),
+        speech: FakeSpeech::new(),
+        transcribe: Arc::new(FakeTranscribe {
+            text: "",
+            languages: Mutex::new(Vec::new()),
+            pcms: Mutex::new(Vec::new()),
+        }),
+    })
+}
+
+/// Spec §5.2 and success criterion 3: two clients connected at once have separate ids and separate
+/// histories. The session harness (`:27-105`, `:122-124`) is the precedent.
+#[tokio::test]
+async fn two_sessions_get_distinct_ids_and_separate_histories() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, path) = config_in(&dir);
+    let chat = FakeChat::new(vec![Ok(vec![S1]), Ok(vec![S2])]);
+    // The hub's own stack, so the chat fake's two recorded requests are the two sessions' own — which
+    // is what makes "separate histories" checkable rather than merely plausible.
+    let slot = ProviderSlot::new(Providers {
+        chat: chat.clone(),
+        speech: FakeSpeech::new(),
+        transcribe: Arc::new(FakeTranscribe {
+            text: "",
+            languages: Mutex::new(Vec::new()),
+            pcms: Mutex::new(Vec::new()),
+        }),
+    });
+    let hub = hub_in(&config, &path, slot);
+
+    let (first_tx, mut first_rx, first_id) = session_attached(&hub, SessionPolicy::local());
+    let (second_tx, mut second_rx, second_id) = session_attached(&hub, SessionPolicy::local());
+    assert_ne!(first_id, second_id, "one session per connection means one id per connection");
+    assert_eq!(hub.session_ids(), vec![first_id, second_id]);
+
+    send(&first_tx, hello(None, PROTOCOL_VERSION));
+    send(&second_tx, hello(None, PROTOCOL_VERSION));
+    next_matching(&mut first_rx, is_done, 500).await; // the greeting
+    next_matching(&mut second_rx, is_done, 500).await; // the greeting
+
+    send(&first_tx, Command::Ask { text: "primera pregunta".into() });
+    next_matching(&mut first_rx, is_done, 500).await;
+
+    send(&second_tx, Command::Ask { text: "segunda pregunta".into() });
+    next_matching(&mut second_rx, is_done, 500).await;
+
+    let requests = chat.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "one chat call per session: {requests:#?}");
+    let second = requests[1].messages.clone();
+    assert!(
+        !second.iter().any(|m| m.content.contains("primera pregunta") || m.content == S1),
+        "a session's history is its own: {second:#?}"
+    );
+    assert_eq!(second.last().unwrap(), &ChatMessage::user("segunda pregunta"));
+}
+
+/// A profile change reaches **both** sessions (spec §5.2), as `Event::ProfileChanged` carrying the
+/// same three fields `Welcome` carries — and the ids the sessions report do not change with it.
+#[tokio::test]
+async fn a_profile_change_reaches_both_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, path) = config_in(&dir);
+    let hub = hub_in(&config, &path, silent());
+
+    let (first_tx, mut first_rx, first_id) = session_attached(&hub, SessionPolicy::local());
+    let (second_tx, mut second_rx, second_id) = session_attached(&hub, SessionPolicy::local());
+    send(&first_tx, hello(None, PROTOCOL_VERSION));
+    send(&second_tx, hello(None, PROTOCOL_VERSION));
+    next_matching(&mut first_rx, is_done, 500).await;
+    next_matching(&mut second_rx, is_done, 500).await;
+
+    assert_eq!(hub.set_profile("senyor"), 2, "both sessions take the change");
+
+    for rx in [&mut first_rx, &mut second_rx] {
+        match next_matching(rx, |m| matches!(m, ToClient::Event(Event::ProfileChanged { .. })), 500).await {
+            ToClient::Event(Event::ProfileChanged { profile }) => {
+                assert_eq!(profile.id, "senyor");
+                assert_eq!(profile.language, "es-ES");
+            }
+            other => panic!("a profile change is announced with ProfileChanged, got {other:?}"),
+        }
+    }
+    assert!(first_id < second_id);
+    assert_eq!(store::load_or_create(&path).unwrap().config.active_profile, "senyor");
+}
+
+/// `UpdateConfig` persists and broadcasts (spec §5.2), and the **next** session to start reads what
+/// was written — the `tempfile::tempdir()` pattern of `config/store.rs`'s own tests.
+#[tokio::test]
+async fn an_updated_configuration_is_persisted_broadcast_and_read_by_the_next_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, path) = config_in(&dir);
+    let hub = hub_in(&config, &path, silent());
+
+    let (tx, mut rx, _id) = session_attached(&hub, SessionPolicy::local());
+    send(&tx, hello(None, PROTOCOL_VERSION));
+    next_matching(&mut rx, is_done, 500).await;
+
+    let mut edited = config.clone();
+    edited.listening.mode = ListeningMode::Auto;
+    edited.server.bind = "127.0.0.1:7171".into();
+    assert_eq!(hub.update_config(edited.clone()), 1, "persist, re-derive every session, then signal");
+
+    next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::ConfigChanged)), 500).await;
+
+    // The file, read back the way the next run reads it — a fresh `load_or_create`, not the hub's own
+    // copy, which is what makes this a persistence test rather than an echo.
+    let back = store::load_or_create(&path).unwrap().config;
+    assert_eq!(back.server.bind, "127.0.0.1:7171");
+    assert_eq!(back.listening.mode, ListeningMode::Auto);
+
+    // And a hub built from that file, with a session on it, answers `GetConfig` with what was written.
+    let restarted = hub_in(&back, &path, silent());
+    let (late_tx, mut late_rx, _late_id) = session_attached(&restarted, SessionPolicy::local());
+    send(&late_tx, hello(None, PROTOCOL_VERSION));
+    next_matching(&mut late_rx, is_done, 500).await;
+    send(&late_tx, Command::GetConfig);
+    match next_matching(&mut late_rx, |m| matches!(m, ToClient::Event(Event::Config { .. })), 500).await {
+        ToClient::Event(Event::Config { config }) => {
+            assert_eq!(config.server.bind, "127.0.0.1:7171");
+            assert_eq!(config.listening.mode, ListeningMode::Auto);
+        }
+        other => panic!("GetConfig must be answered with Event::Config, got {other:?}"),
+    }
+}
+
+/// §4.3's token rule, over the one fact only the session has: whether *this client* presented the
+/// token. Both of these are sessions the handshake admitted, so both are served — with the token, or
+/// without it.
+#[tokio::test]
+async fn get_config_answers_the_token_only_to_a_client_entitled_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut config, path) = config_in(&dir);
+    config.server.token = "s3cret".into();
+    store::save(&path, &config).unwrap();
+    let hub = hub_in(&config, &path, silent());
+
+    // The client that presented the token. `SessionPolicy::exposed` never sends the handshake itself,
+    // so this one does, and it does it first: a second `Hello` after an admitted one ends the session.
+    let (tx, mut rx, _) = session_attached(&hub, SessionPolicy::exposed("s3cret"));
+    send(&tx, hello(Some("s3cret"), PROTOCOL_VERSION));
+    next_matching(&mut rx, is_done, 500).await;
+    send(&tx, Command::GetConfig);
+    match next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Config { .. })), 500).await {
+        ToClient::Event(Event::Config { config }) => assert_eq!(config.server.token, "s3cret"),
+        other => panic!("expected Event::Config, got {other:?}"),
+    }
+
+    // A loopback client, which presented nothing because its policy requires nothing — and which is
+    // still entitled to the token, because it is the client's own machine (spec §4.3).
+    let (tx, mut rx, _) = session_attached(&hub, SessionPolicy::local());
+    send(&tx, hello(None, PROTOCOL_VERSION));
+    next_matching(&mut rx, is_done, 500).await;
+    send(&tx, Command::GetConfig);
+    match next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Config { .. })), 500).await {
+        ToClient::Event(Event::Config { config }) => assert_eq!(config.server.token, "s3cret"),
+        other => panic!("expected Event::Config, got {other:?}"),
+    }
+
+    // The third shape is a session that is neither loopback nor token-bearing, which Task 1.2's
+    // handshake refuses outright — it never reaches `GetConfig`. What remains to pin is that the
+    // redacted view is one call away and is what a non-entitled caller would get:
+    assert_eq!(hub.config_view(false).server.token, "");
+    assert_eq!(hub.config_view(false).active_profile, config.active_profile);
 }
