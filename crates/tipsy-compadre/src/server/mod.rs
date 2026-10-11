@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -238,6 +238,10 @@ pub(crate) fn mount(state: ServeState) -> Router {
     Router::new()
         .route("/", get(page_client))
         .route("/terminal", get(page_terminal))
+        // The embedded bundle: the wasm module, its JS glue, xterm.js and its stylesheet
+        // (spec §5.3). Task 1.4 deliberately left this route out — `assets::asset` did not exist
+        // until Task 1.5 — and the handler answers 404 for anything the embed does not hold.
+        .route("/assets/{*path}", get(asset_of))
         .route("/ws", get(ws))
         // `/terminal/ws` belongs to Task 2.2 and is deliberately not registered here: it is a raw
         // PTY byte socket with its own handshake, and it is a 404 until Phase 2 lands.
@@ -266,6 +270,39 @@ async fn page_terminal(State(state): State<ServeState>, query: Query<TokenQuery>
         return refused();
     }
     page_of("/terminal")
+}
+
+/// One file of the embedded bundle (spec §5.3), under the same token rule as the two pages: a
+/// hashed asset name is not a secret, but the route it is reached by is behind the same door, so a
+/// server that requires a token does not hand its bundle to a caller without one.
+///
+/// **A miss is a `404`, not the explanation page**: the page belongs to a navigation, and a browser
+/// that asked for `missing.wasm` wants to know the file is absent rather than to receive HTML it
+/// would try to instantiate. The body names nothing — no path, no token (spec §9.6).
+async fn asset_of(
+    State(state): State<ServeState>,
+    AxumPath(path): AxumPath<String>,
+    query: Query<TokenQuery>,
+) -> Response {
+    if !token_ok(&state, &query) {
+        return refused();
+    }
+    match assets::asset(&path) {
+        Some((content_type, bytes)) => asset_response(content_type, bytes),
+        None => (StatusCode::NOT_FOUND, "no such asset in this build").into_response(),
+    }
+}
+
+/// The one place an asset's headers are set. It differs from [`page_response`] in exactly one thing:
+/// a bundle file may be cached, where a page may not — the token travels as a query parameter and a
+/// cached page is a page one user's token opened for the next (spec §5.3, §9.2). Nothing here is
+/// `no-store`, and nothing here is a page.
+fn asset_response(content_type: &'static str, body: Vec<u8>) -> Response {
+    let mut response = Response::new(Body::from(body));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type.parse().expect("a MIME type is a header value"));
+    response
 }
 
 /// The one place the two page headers are set, so the explanation page carries them too: it is

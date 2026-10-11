@@ -429,7 +429,10 @@ impl Session {
                 profile: self.profile.clone(),
                 ui_language: self.ui_language,
                 listening_mode: self.listening_mode,
-                web_bundle: false,
+                // The truth for the binary that is running, not the constant `false` this used to
+                // be: `cargo xtask dist` embeds the bundle and a plain `cargo build` does not
+                // (spec §5.4; `architecture.md:83-86`).
+                web_bundle: crate::server::assets::web_bundle(),
                 // The one authority on whether a client shows the login screen. A native client never
                 // reads `[login]` itself, so it cannot disagree with the server that will judge it.
                 // Sent on every `Welcome`; the client shows the screen once per run and ignores the

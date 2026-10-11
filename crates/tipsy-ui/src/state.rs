@@ -216,6 +216,9 @@ pub struct UiState {
     /// is the difference between "asked already and let in" and "never asked", and without it a save
     /// from the configuration screen reopens a door the user has already walked through.
     pub login_seen: bool,
+    /// What the running server reported about its own binary (`Welcome.web_bundle`, spec §5.4):
+    /// `false` means the web UI is not available in this build.
+    pub web_bundle: bool,
 }
 
 impl Default for UiState {
@@ -252,6 +255,7 @@ impl UiState {
             config_form: None,
             login: None,
             login_seen: false,
+            web_bundle: false,
         }
     }
 
@@ -465,10 +469,25 @@ impl UiState {
 
     pub fn apply(&mut self, ev: &Event) {
         match ev {
-            Event::Welcome { profile, ui_language, listening_mode, .. } => {
+            // The `..` covers `session_id` and `login`, neither of which this reducer reads: the id is
+            // the bridge's and the login screen is shown by the client from the same event. The
+            // earlier `..` that hid `web_bundle` is gone, because the flag is read now.
+            Event::Welcome { profile, ui_language, listening_mode, web_bundle, .. } => {
                 self.profile = Some(profile.clone());
                 self.lang = *ui_language;
                 self.listening_mode = *listening_mode;
+                self.web_bundle = *web_bundle;
+                // `architecture.md:85-86`: a binary without the bundle "reports that the web UI is
+                // not available". The notice slot holds one message, so this only ever replaces a
+                // notice it left itself — a warning from the session keeps the screen.
+                if !self.web_bundle
+                    && self
+                        .notice
+                        .as_ref()
+                        .is_none_or(|(text, _)| text == self.strings().web_unavailable)
+                {
+                    self.notify(self.strings().web_unavailable);
+                }
                 // The configuration accepts three modes and this plan implements two, so the third
                 // one says so instead of going quiet: the wake word arrives in a later plan, and
                 // until then a `hands_free` session behaves like `push` — the microphone is opened
@@ -479,7 +498,8 @@ impl UiState {
                     // A mode that is implemented has nothing to explain, and it takes a notice the
                     // unimplemented one left behind with it: a stale warning over a working `push`
                     // mode would be its own lie. Any other notice — a failure, a cleared
-                    // conversation — is not this announcement's business and stays.
+                    // conversation, the missing-bundle message — is not this announcement's business
+                    // and stays.
                     ListeningMode::Push | ListeningMode::Auto => {
                         if self.notice.as_ref().is_some_and(|(text, _)| text == unsupported) {
                             self.notice = None;
@@ -796,14 +816,20 @@ mod tests {
     }
 
     /// The same announcement for any mode: the mode is an argument because what the HUD says about
-    /// it is what the tests below are about.
+    /// it is what the tests below are about. The bundle is reported as available here so these tests
+    /// stay about the mode; §5.4's message has its own test below.
     fn welcome_mode(lang: UiLanguage, mode: ListeningMode) -> Event {
+        welcome_bundle(lang, mode, true)
+    }
+
+    /// The same announcement with `Welcome.web_bundle` under the caller's control.
+    fn welcome_bundle(lang: UiLanguage, mode: ListeningMode, web_bundle: bool) -> Event {
         Event::Welcome {
             session_id: 1,
             profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
             ui_language: lang,
             listening_mode: mode,
-            web_bundle: false,
+            web_bundle,
             // No login screen: the HUD tests below are about the HUD.
             login: None,
         }
@@ -850,6 +876,33 @@ mod tests {
             s.apply(&welcome_mode(UiLanguage::En, mode));
             assert!(s.notice.is_none(), "{mode:?} is implemented and must stay quiet");
         }
+    }
+
+    /// `architecture.md:85-86` promises that a binary built without the web bundle "reports that
+    /// the web UI is not available". The flag is the server's truth, so it reaches the state — and
+    /// the HUD says so, in the interface's own language, from the same two static tables every
+    /// other string comes from.
+    #[test]
+    fn a_binary_without_the_bundle_says_so_in_both_languages() {
+        for (lang, word) in [(UiLanguage::Es, "no está disponible"), (UiLanguage::En, "not available")] {
+            let mut s = UiState::new();
+            s.apply(&welcome_bundle(lang, ListeningMode::Push, false));
+            assert!(!s.web_bundle, "the flag reaches the state: {lang:?}");
+            let (notice, left) = s.notice.as_ref().expect("a binary without the bundle must say so");
+            assert!(notice.contains(word), "{lang:?}: {notice}");
+            assert_eq!(notice.as_str(), s.strings().web_unavailable, "{lang:?}");
+            assert!(*left > 0, "and the notice is a live one, not a spent one");
+        }
+    }
+
+    /// A server that *has* the bundle says nothing: a message about a missing page over a server
+    /// that serves it would be its own lie.
+    #[test]
+    fn a_binary_with_the_bundle_stays_quiet() {
+        let mut s = UiState::new();
+        s.apply(&welcome_bundle(UiLanguage::En, ListeningMode::Push, true));
+        assert!(s.web_bundle, "the flag reaches the state");
+        assert!(s.notice.is_none(), "an available bundle has nothing to explain");
     }
 
     /// The notice belongs to the announcement that raised it: a session that re-announces an

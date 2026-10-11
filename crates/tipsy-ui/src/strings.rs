@@ -72,6 +72,10 @@ pub struct Strings {
     /// The HUD's notice for `hands_free`: the third mode the configuration accepts and the one this
     /// plan does not implement. It says what is missing rather than staying quiet.
     pub hands_free_unimplemented: &'static str,
+    /// The HUD's notice for a binary whose embed holds no bundle (spec §5.4). It names the
+    /// user-visible consequence, not the build command: the command belongs on the page the routes
+    /// serve, and it is long.
+    pub web_unavailable: &'static str,
     /// The login widget's one line, when it has nothing else to say (spec §6.1, §8).
     pub login_prompt: &'static str,
     /// What the transcriber heard, with the answer in `{text}`: a misheard accent is visible rather
@@ -172,6 +176,7 @@ pub static ES: Strings = Strings {
     mode_auto: "auto",
     mode_hands_free: "hands free",
     hands_free_unimplemented: "manos libres aún no está: espera a la palabra clave",
+    web_unavailable: "la interfaz web no está disponible en esta compilación",
     login_prompt: "¿Y tú quién eres? Dímelo, que aquí no entra cualquiera.",
     login_heard: "Te he oído: «{text}»",
     login_refusal: "Anda, que te peinen para el lado.",
@@ -252,6 +257,7 @@ pub static EN: Strings = Strings {
     mode_auto: "auto",
     mode_hands_free: "hands free",
     hands_free_unimplemented: "hands free is not implemented yet: it waits for the wake word",
+    web_unavailable: "the web UI is not available in this build",
     login_prompt: "So who are you, then? Tell me — this door isn't for just anyone.",
     login_heard: "I heard: \"{text}\"",
     login_refusal: "Off you go, and get your hair combed somewhere else.",
