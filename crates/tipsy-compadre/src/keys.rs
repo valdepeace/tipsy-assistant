@@ -1,7 +1,7 @@
 //! API keys: environment variables first, then the OS credential store.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub const SERVICE: &str = "tipsy-compadre";
 
@@ -76,14 +76,22 @@ pub enum KeySource {
     Store,
 }
 
+/// Resolves a key *name* to its value, and says where the value came from.
+///
+/// **`Clone`, and the one line that makes it so is the `Arc` on each field.** The resolver is
+/// assembled once and then named by more than one owner — the listener's `Settings`, the `Hub` built
+/// from it, and every call site that builds a provider stack — so a handle that cannot be copied
+/// forces an `Arc<KeyResolver>` into a struct whose other fields are plain values. The two trait
+/// objects are shared, not copied: a clone is the same store reached twice.
+#[derive(Clone)]
 pub struct KeyResolver {
-    store: Box<dyn SecretStore>,
-    env: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    store: Arc<dyn SecretStore>,
+    env: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
 }
 
 impl KeyResolver {
     pub fn new(store: Box<dyn SecretStore>, env: Box<dyn Fn(&str) -> Option<String> + Send + Sync>) -> Self {
-        Self { store, env }
+        Self { store: Arc::from(store), env: Arc::from(env) }
     }
 
     pub fn system() -> Self {
