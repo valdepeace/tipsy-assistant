@@ -783,6 +783,18 @@ async fn a_socket_that_dies_mid_answer_leaves_the_hud_out_of_the_live_state() {
         events_of(&seen).iter().any(|event| matches!(event, Event::ReplyDelta { text } if text == "Aquí anda")),
         "the partial transcript survives the failure: {seen:#?}"
     );
+
+    // And the HUD itself leaves the call: the flag the indicator is drawn from is down, and the
+    // partial reply is still on screen with its spinner stopped (Review Focus 1).
+    let mut hud = tipsy_ui::UiState::new();
+    for message in &seen {
+        if let ToClient::Event(event) = message {
+            hud.apply(event);
+        }
+    }
+    assert!(!hud.live, "the HUD is out of its live state: {:#?}", hud.log);
+    assert!(!hud.busy(), "and nothing is left spinning: {:#?}", hud.log);
+    assert_eq!(hud.log.last().unwrap().text, "Aquí anda", "what was said before the death stays");
 }
 
 #[tokio::test]

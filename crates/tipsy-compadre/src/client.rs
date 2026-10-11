@@ -21,9 +21,9 @@ use crate::brain::BrainConfig;
 use crate::config::form::{config_from, form_of, provider_config};
 use crate::config::store;
 use crate::config::Config;
-use crate::keys::KeyResolver;
+use crate::keys::{env_var_name, KeyResolver};
 use crate::providers::{build_one, build_providers, ProviderSlot};
-use crate::realtime::Call;
+use crate::realtime::{Call, CallSetup, Heard};
 use crate::session::spawn_with_events;
 use crate::sysmon;
 
@@ -66,8 +66,10 @@ struct Client {
     config: Config,
     /// Where the screen writes, and where it reads every time it opens.
     config_path: PathBuf,
-    /// The resolver the connectors are built with: the one the app started with.
-    keys: KeyResolver,
+    /// The resolver the connectors are built with: the one the app started with. Shared rather than
+    /// owned because a live call's socket task resolves the key *name* itself, on every reopen, and
+    /// `KeyResolver` is not `Clone` (`CallSetup::resolver` is an `Arc` of it).
+    keys: Arc<KeyResolver>,
     /// The live provider stack, shared with the session.
     providers: ProviderSlot,
     /// `None` when there is no output device: the HUD still works, silently.
@@ -77,6 +79,9 @@ struct Client {
     /// The live call, when one is running: the microphone feeds it instead of the session and the
     /// audio the device plays arrives from it.
     call: Option<Call>,
+    /// Where a call reports: the same channel the session reports on, so the HUD reads one stream.
+    /// `None` only before the frame loop has started.
+    events: Option<UnboundedSender<ToClient>>,
     /// Sample rate announced by the last `SpeechChunk`.
     rate: u32,
     mic_gain: f32,
@@ -93,11 +98,12 @@ impl Client {
             state: UiState::new(),
             config,
             config_path,
-            keys,
+            keys: Arc::new(keys),
             providers,
             player: None,
             reply: Vec::new(),
             call: None,
+            events: None,
             rate: 24000,
             mic_gain,
             mic: None,
@@ -122,6 +128,9 @@ impl Client {
         // A second sender for the same client channel: the system monitor and the screen's Test
         // results (Task 7) both arrive with the session's own events.
         let events = ends.events.clone();
+        // A live call reports through the session's own channel too; the monitor keeps the other
+        // clone, which is the one `sysmon` takes below.
+        self.events = Some(events.clone());
         sysmon::spawn(ends.events);
 
         let mut drawn = Instant::now();
@@ -250,6 +259,52 @@ impl Client {
         if flush_on_interrupt(true, self.playing()) {
             self.flush_playback();
         }
+    }
+
+    /// Starts a live call, or ends the one that is running.
+    ///
+    /// `self.call` is the client's own handle on the socket, so it — and not the HUD's indicator,
+    /// which only the call task may raise — is what decides which way the key goes.
+    fn toggle_call(&mut self) {
+        if let Some(call) = self.call.take() {
+            call.stop();
+            return;
+        }
+        if let Err(why) = self.start_call() {
+            // The mode is never silently on (Review Focus 3): a refusal is a sentence the user
+            // reads, never a key press that quietly did nothing.
+            self.state.notify(why);
+        }
+    }
+
+    /// Opens the socket, or explains why it will not.
+    ///
+    /// The key is resolved the way every provider's is (`KeyResolver`: the environment first, then
+    /// the credential store), and resolving it *here* is what makes a name nobody holds an answer to
+    /// the key press instead of an asynchronous failure: no socket is touched until it has resolved.
+    /// Only the key *name* reaches `CallSetup` — the value is never logged, never put in an event and
+    /// never in an error message, and the handshake resolves the name again when it opens.
+    fn start_call(&mut self) -> Result<(), String> {
+        let realtime = self.config.realtime.clone();
+        if !realtime.enabled {
+            return Err(self.state.strings().live_off.to_string());
+        }
+        if self.keys.resolve(&realtime.key).map_err(|e| e.to_string())?.is_none() {
+            return Err(format!(
+                "no key named `{}`: set {} or store it",
+                realtime.key,
+                env_var_name(&realtime.key)
+            ));
+        }
+        let events = self.events.clone().ok_or("the client's frame loop is not running")?;
+        // Whatever the session was still saying belongs to the pipeline the call replaces.
+        self.flush_playback();
+        self.call = Some(Call::open(
+            CallSetup::from_config(&self.config, Arc::clone(&self.keys), realtime.key),
+            Heard::new(),
+            events,
+        ));
+        Ok(())
     }
 
     /// Plays one spoken sentence, and shows the envelope of the reply it belongs to.
@@ -410,6 +465,12 @@ impl Client {
                 false
             }
             UiAction::Quit => true,
+            // `F10`: the key asks, the socket answers. The indicator follows the call task's own
+            // `Event::Live`, never this arm.
+            UiAction::ToggleLive => {
+                self.toggle_call();
+                false
+            }
         }
     }
 
@@ -835,6 +896,18 @@ mod tests {
         let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
         client.on_message(ToClient::Event(Event::Live { active: false }));
         assert!(client.call.is_none(), "there was no call, and none is invented");
+    }
+
+    #[test]
+    fn a_call_never_starts_while_the_mode_is_disabled() {
+        let mut config = Config::default();
+        config.realtime.enabled = false;
+        let keys = resolver();
+        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
+        let why = client.start_call().expect_err("a disabled mode starts nothing");
+        assert!(why.contains("enabled"), "the refusal names the setting: {why}");
+        assert!(client.call.is_none(), "Review Focus 3: the mode is never silently on");
     }
 
     #[test]
