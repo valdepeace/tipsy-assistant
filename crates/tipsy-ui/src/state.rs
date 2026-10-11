@@ -164,6 +164,17 @@ impl LoginState {
     pub fn needs_a_key(&self) -> bool {
         self.refusals >= LOGIN_AUTO_REARM
     }
+
+    /// Whether the door has opened. **`Passed` is terminal for the phase** (spec §6.2: the screen stays
+    /// until `Enter`), so every writer of `phase` asks this first. Three of them could otherwise put the
+    /// user back outside a door they are already through, and each is reachable: `Tab` would reopen the
+    /// capture and reset the phase, a refusal arriving late would flip the border back to a refusal, and
+    /// an `Event::Error` — including the `cancelled` that the pass's own `LoginStop` provokes by ending
+    /// a login transcription in flight — would set the phase to `Waiting`, which is what made `Enter`
+    /// stop entering.
+    pub fn passed(&self) -> bool {
+        self.phase == LoginPhase::Passed
+    }
 }
 
 pub struct UiState {
@@ -393,7 +404,10 @@ impl UiState {
                     (true, _) => Vec::new(),
                 }
             }
-            KeyInput::Tab if login.voice => {
+            // `Tab` re-arms a shut capture, and on a passed screen the capture is shut *because the door
+            // opened*: toggling it there would reopen the microphone onto a session that has finished
+            // judging, and would destroy the phase `Enter` needs to let the user in.
+            KeyInput::Tab if login.voice && !login.passed() => {
                 let was_open = login.open;
                 login.open = !was_open;
                 login.phase = if was_open { LoginPhase::Waiting } else { LoginPhase::Listening };
@@ -571,7 +585,10 @@ impl UiState {
                         // session still judges, so a word said after "Pasa, Andrés." could reach the
                         // refusal streak and shut a door the user had already opened.
                         login.open = false;
-                    } else {
+                    } else if !login.passed() {
+                        // A refusal that arrives after the door opened is stale — the pass's own
+                        // `LoginStop` can provoke one — and it must not count against a user who is
+                        // already inside.
                         login.phase = LoginPhase::Refused;
                         login.line = LoginLine::Refused;
                         login.refusals += 1;
@@ -594,6 +611,13 @@ impl UiState {
                 // While the door is shut, a failure belongs to the screen and not to the log: the
                 // wording of "nothing heard" is the UI's, and any other failure stops the voice.
                 if let Some(login) = self.login.as_mut() {
+                    // Once the door is open nothing an error says can matter: the screen is waiting for
+                    // `Enter`, and after it the HUD is in front. This arm used to set the phase back to
+                    // `Waiting`, which the pass's own `LoginStop` can reach by cancelling a login
+                    // transcription in flight — and that erased `Passed`, so `Enter` stopped entering.
+                    if login.passed() {
+                        return;
+                    }
                     if *code == ErrorCode::NothingHeard {
                         login.line = LoginLine::NothingHeard;
                     } else {
@@ -1381,6 +1405,40 @@ mod tests {
         assert_eq!(login.phase, LoginPhase::Passed);
         assert_eq!(login.name.as_deref(), Some("Andrés"));
         assert!(!login.open, "the capture is over the moment the door opens");
+    }
+
+    /// **`Passed` is terminal for the phase** (spec §6.2: the screen stays until `Enter`). Three
+    /// writers could put the user back outside a door they are already through, and every one of them
+    /// is reachable — this is the whole of review finding 2 plus the new trigger the pass's own
+    /// `LoginStop` introduced.
+    #[test]
+    fn a_passed_screen_is_not_put_back_outside() {
+        let mut s = login_state(true);
+        s.login.as_mut().unwrap().open = true;
+        s.apply(&Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+        assert!(s.login.as_ref().unwrap().passed());
+
+        // 1. `Tab` re-armed the capture and reset the phase the border advertises `Enter` for.
+        assert!(s.on_key(KeyInput::Tab).is_empty(), "a passed screen re-arms nothing");
+        let login = s.login.as_ref().unwrap();
+        assert!(login.passed(), "the phase stands");
+        assert!(!login.open, "and the capture stays over");
+
+        // 2. A refusal verdict that arrives after the door opened.
+        s.apply(&Event::LoginVerdict { ok: false, name: None });
+        let login = s.login.as_ref().unwrap();
+        assert!(login.passed(), "a stale refusal is not a refusal");
+        assert_eq!(login.refusals, 0, "and it does not count against the user");
+
+        // 3. The `Event::Error` the pass itself can provoke: `transcribe_once` reports the `cancelled`
+        //    its own `LoginStop` causes as an error, and this arm used to set the phase to `Waiting`.
+        s.apply(&Event::Error { code: ErrorCode::Internal, message: "cancelled".into(), recoverable: true });
+        let login = s.login.as_ref().unwrap();
+        assert!(login.passed(), "an error does not put the user back outside");
+        assert_eq!(login.line, LoginLine::Passed, "and the line still says they are in");
+
+        // And the key the screen has been advertising still works.
+        assert_eq!(s.on_key(KeyInput::Enter), vec![UiAction::LoginDone]);
     }
 
     /// A typed answer is a `LoginAnswer` the server judges; the box empties and the screen says it is
