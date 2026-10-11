@@ -303,19 +303,19 @@ Bodies follow this index in order. Each body carries its own `Files` and `Interf
 **Interfaces:**
 - Consumes: `Capability` (`tipsy-protocol/src/lib.rs:69-75`), `ListeningMode` (`:17-24`), `ProfileView { id, name, language }` (`:92-97`) — all already in the crate this task edits; `roundtrip_command` (`crates/tipsy-protocol/tests/roundtrip.rs:3`) and `roundtrip_event` (`:9`).
 - Produces:
-  - `pub struct ConfigView { pub active_profile: String, pub providers: Vec<ProviderView>, pub listening: ListeningView, pub realtime: RealtimeView, pub login: LoginView, pub profiles: Vec<ProfileEntryView>, pub server: ServerView }`, deriving `Debug, Clone, PartialEq, Serialize, Deserialize`.
+  - `pub struct ConfigView { pub active_profile: String, pub providers: Vec<ProviderView>, pub listening: ListeningView, pub realtime: RealtimeView, pub login: LoginSettingsView, pub profiles: Vec<ProfileEntryView>, pub server: ServerView }`, deriving `Debug, Clone, PartialEq, Serialize, Deserialize`.
   - `pub struct ProviderView { pub capability: Capability, pub kind: String, pub base_url: String, pub model: String, pub key_name: String }`
   - `pub struct ListeningView { pub mode: ListeningMode, pub silence_ms: String, pub mic_gain: String, pub mic_device: Option<String> }`
   - `pub struct ServerView { pub bind: String, pub lan: bool, pub token: String }`
   - `pub struct RealtimeView { pub enabled: bool, pub model: String, pub key_name: String, pub voice: String, pub max_minutes: u32 }`
-  - `pub struct LoginView { pub enabled: bool, pub voice: bool, pub allowed: Vec<AllowedPersonView> }`
+  - `pub struct LoginSettingsView { pub enabled: bool, pub voice: bool, pub allowed: Vec<AllowedPersonView> }` — **not `LoginView`**: see the ruling below.
   - `pub struct AllowedPersonView { pub name: String, pub keywords: Vec<String> }`
   - `pub struct ProfileEntryView { pub id: String, pub name: String, pub language: String, pub prompt: String, pub voice_instructions: String, pub greeting: String, pub wake_word: String, pub voices: Vec<(String, String)> }`
   - `impl ConfigView { pub fn redacted(self) -> Self }` — clears `self.server.token`. Task 1.3's answer to `GetConfig` for a client that may not see the token calls exactly this.
   - `impl From<&ConfigForm> for ConfigView` and `impl From<ConfigView> for ConfigForm`, both in `tipsy-ui`.
   - `ErrorCode::{ProtocolVersion, TokenRequired, TokenInvalid, BadMessage, InsecureTransport}` — five **new** variants on the enum at `tipsy-protocol/src/lib.rs:51-64`, which already carries `#[serde(rename_all = "snake_case")]` (`:52`), so the wire spellings are `protocol_version`, `token_required`, `token_invalid`, `bad_message`, `insecure_transport`. **`ErrorCode` is a third enum this task extends, and it is the one whose match set had to be measured rather than assumed** — see Step 3c-bis and Step 3f. `Event::Error.message` stays human text localized to the profile's language (v1 spec §4.2); the variant is what a client branches on.
-  - `Command::{GetConfig, UpdateConfig { config: ConfigView }, SetKey { name: String, value: String }}`
-  - `Event::{Config { config: ConfigView }, ProfileChanged { profile: ProfileView }, ConfigChanged}`
+  - `Command::{GetConfig, UpdateConfig { config: Box<ConfigView> }, SetKey { name: String, value: String }}` — **boxed, and this is not cosmetic**: `ConfigView` carries seven section views, and unboxed it pushes `Command`, `Event`, `ToServer`, `ToClient` and `tipsy-ui`'s `UiAction` over `clippy::large_enum_variant` — five findings against a lint gate that allows none. Serde sees through a `Box`, so the wire JSON is byte-identical and `roundtrip.rs`'s nested-tag test pins that.
+  - `Event::{Config { config: Box<ConfigView> }, ProfileChanged { profile: ProfileView }, ConfigChanged}` — boxed for the same reason.
 
 **The complete field list, read from the tree.** `ConfigView` is `ConfigForm`'s configuration-bearing fields, moved verbatim, with each section type renamed `…Form` → `…View`. Every line below was read in this checkout:
 
@@ -334,6 +334,8 @@ The six `ConfigForm` fields **left out** are its own view state and none of them
 
 **One name this body rules on, because the front matter says "renamed `…Form` → `…View`" and the crate already has a `ProfileView`.** `ProfileView { id, name, language }` exists at `lib.rs:92-97`; it is `Welcome`'s payload (`lib.rs:137`) and the type spec §4.4 requires `Event::ProfileChanged` to carry. It is not a profile *entry* — it has no prompt, greeting or voices. The form's `ProfileForm` therefore becomes **`ProfileEntryView`**, not `ProfileView`. Keeping one meaning per word matters more here than the mechanical rename: `ProfileView` is what a client is told, `ProfileEntryView` is what an editor edits.
 
+**And a second name, which this body's first implementer found the only way it could be found — by not compiling.** The rename rule also applies to the form's `LoginForm`, and `LoginView` **already exists** (`lib.rs:99-105`, `{ voice: bool }`): it is `Welcome.login`, the login *screen*'s payload, read in twenty-one places across `session.rs`, `client.rs` and `tests/login.rs`, and it is the type Task 3.7's browser engine takes. The `[login]` *section* is a different thing — it is what the configuration screen edits, and it carries `enabled` and `allowed` as well. So the section view is **`LoginSettingsView`**, and no type this plan adds may be called `LoginView`. This paragraph is the only place that ruling is written down; Task 3.7's uses of `LoginView` are the existing type and keep the name.
+
 **The `Config` ⇄ form job stays where it is.** `form_of` (`crates/tipsy-compadre/src/config/form.rs:21-75`) and `config_from` (`:81-130`) keep their signatures and their job; the wire shape hangs off the form beside them. `form_of`'s own comment (`form.rs:22-25`) explains why: `ConfigForm`'s `filled` is private to `tipsy-ui`, so only `tipsy-ui` may build one with literal syntax — which is also why the two `From` impls live there and not in `tipsy-compadre`.
 
 - [ ] **Step 1: Write the failing test**
@@ -342,7 +344,7 @@ Append to `crates/tipsy-protocol/tests/roundtrip.rs`, after `a_welcome_without_t
 
 ```rust
 use tipsy_protocol::{
-    AllowedPersonView, ConfigView, ListeningView, LoginView, ProfileEntryView, ProviderView, RealtimeView,
+    AllowedPersonView, ConfigView, ListeningView, LoginSettingsView, ProfileEntryView, ProviderView, RealtimeView,
     ServerView,
 };
 ```
@@ -390,7 +392,7 @@ fn config_view() -> ConfigView {
             voice: "cedar".into(),
             max_minutes: 25,
         },
-        login: LoginView {
+        login: LoginSettingsView {
             enabled: true,
             voice: false,
             allowed: vec![
@@ -694,9 +696,11 @@ pub struct AllowedPersonView {
     pub keywords: Vec<String>,
 }
 
-/// `[login]`, carried and never drawn.
+/// `[login]`, carried and never drawn. **Named `LoginSettingsView`, not `LoginView`**: that name
+/// belongs to `Welcome`'s login-*screen* payload (`lib.rs:99-105`), which is a different thing — the
+/// ruling above the field list says why.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoginView {
+pub struct LoginSettingsView {
     pub enabled: bool,
     pub voice: bool,
     pub allowed: Vec<AllowedPersonView>,
@@ -732,7 +736,7 @@ pub struct ConfigView {
     pub providers: Vec<ProviderView>,
     pub listening: ListeningView,
     pub realtime: RealtimeView,
-    pub login: LoginView,
+    pub login: LoginSettingsView,
     pub profiles: Vec<ProfileEntryView>,
     pub server: ServerView,
 }
@@ -797,7 +801,7 @@ impl ConfigView {
 
 ```rust
 use tipsy_protocol::{
-    AllowedPersonView, Capability, ConfigView, ListeningMode, ListeningView, LoginView, ProfileEntryView,
+    AllowedPersonView, Capability, ConfigView, ListeningMode, ListeningView, LoginSettingsView, ProfileEntryView,
     ProviderView, RealtimeView, ServerView, UiLanguage,
 };
 ```
@@ -835,7 +839,7 @@ impl From<&ConfigForm> for ConfigView {
                 voice: form.realtime.voice.clone(),
                 max_minutes: form.realtime.max_minutes,
             },
-            login: LoginView {
+            login: LoginSettingsView {
                 enabled: form.login.enabled,
                 voice: form.login.voice,
                 allowed: form
@@ -1043,7 +1047,7 @@ Then the two other crates this task touched, because a stale arm anywhere else i
 $env:TEMP="$PWD\.target-sandbox\tmp"; $env:TMP=$env:TEMP; $env:CARGO_TARGET_DIR="$PWD\.target-sandbox"; cargo test -j 1 -p tipsy-ui
 ```
 
-Expected: PASS — `85` tests (`tipsy-ui` lib `71` + `tests/render.rs` `14`), `0` failed. If the only failure is `error[E0004]: non-exhaustive patterns` naming a file this task's `Files` block does not list, Step 3f's grep was run against a tree that has since moved: find the arm, add the behaviour-free one, and name the file in the commit body.
+Expected: PASS — `123` tests (`tipsy-ui` lib `95` + `tests/render.rs` `28`), `0` failed. **An earlier draft of this line said `85` (`71` + `14`) and that was wrong** — Task 1.1's implementer measured the real split and it is 95 + 28, so any task that "fixes" a count of 123 back to 85 is following a stale document rather than the tree. If the only failure is `error[E0004]: non-exhaustive patterns` naming a file this task's `Files` block does not list, Step 3f's grep was run against a tree that has since moved: find the arm, add the behaviour-free one, and name the file in the commit body.
 
 - [ ] **Step 5: Commit**
 
@@ -14430,13 +14434,13 @@ index that does not name this task is a reader's dead end.
 
 **Interfaces:**
 - Consumes:
-  - `tipsy_protocol::{Command, Event, Frame, LoginView, ToServer}` and `tipsy_protocol::LoginView`'s
-    **final shape**, which is Task 1.1's: `LoginView { pub enabled: bool, pub voice: bool,
-    pub allowed: Vec<AllowedPersonView> }` (the plan's front matter pins the three fields at
-    `docs/superpowers/plans/2026-10-11-plan-3-web-tier.md:300-301`; the tree today still has the
-    one-field version at `crates/tipsy-protocol/src/lib.rs:99-105`, whose `voice` is the field this
-    task reads). **Read the file before writing a literal**: if Task 1.1's fields are not the three
-    above, the fixtures change and nothing else.
+  - `tipsy_protocol::{Command, Event, Frame, LoginView, ToServer}` — and **`LoginView` here is
+    `Welcome`'s login-*screen* payload** (`crates/tipsy-protocol/src/lib.rs:99-105`, `{ voice: bool }`),
+    which is the type this task's engine is handed and the only field it reads. It is **not** the
+    `[login]` configuration section: Task 1.1 added that one as a *separate* type, `LoginSettingsView`,
+    because the name `LoginView` was already taken by the screen payload — an earlier draft of this
+    bullet treated the two as one type and told the implementer to expect the section's three fields
+    here, which would not compile. **Read the file before writing a literal.**
   - `tipsy_protocol::Frame::Mic(Vec<i16>)` — `crates/tipsy-protocol/src/lib.rs:174-177`
   - `Event::Welcome { .., login: Option<LoginView> }` — `lib.rs:135-145`; `Event::LoginVerdict
     { ok, name }` — `:170-171`; `Event::LoginHeard { text }` — `:167-169`
@@ -14656,7 +14660,7 @@ mod tests {
     };
     use tipsy_ui::KeyInput;
 
-    /// The `Welcome` the browser acts on. Task 1.1's `LoginView` has three fields
+    /// The `Welcome` the browser acts on. Task 1.1's `LoginSettingsView` has three fields
     /// (`enabled`, `voice`, `allowed`); `allowed` is carried for the configuration screen's sake and
     /// is never read here — the door is `Some` or `None` (spec §3), which is the point.
     fn welcome(login: Option<LoginView>) -> Event {
@@ -15206,7 +15210,7 @@ exactly as it is (the server still judges, `server.token` is still the only door
   The section is hand-edited in `config.toml`, like `[[profiles]]`, and the configuration screen must
   carry it through untouched (§5)." (`:47-48`). Replace its first sentence with "**Hand-editing
   `config.toml` as the only way to change the section.** Plan 3 added a Login tab: Task 1.1 extended
-  `LoginView` with `enabled` and `allowed`, so the configuration screen shows and edits `[login]`
+  `LoginSettingsView` with `enabled` and `allowed`, so the configuration screen shows and edits `[login]`
   over the wire (§13)." and leave the second sentence's requirement standing — the file round trip of
   §5.3 is still what keeps a hand-written allowlist alive.
 - **§2, the decisions log, the L2 row** (`:62`) — "the allowlist never leaves it" becomes "the
@@ -15214,11 +15218,11 @@ exactly as it is (the server still judges, `server.token` is still the only door
   token (§4.3, Task 1.1's extension)". The *decision* is the row's first half and does not move:
   the **server** judges, and `tipsy-ui` still never matches a keyword.
 - **§5.3, "The section survives a save"** (`:245-249`) — it opens "The configuration screen has no
-  Login tab"; make it "The configuration screen's Login tab is Plan 3's (Task 1.1's `LoginView`
+  Login tab"; make it "The configuration screen's Login tab is Plan 3's (Task 1.1's `LoginSettingsView`
   gained `enabled` and `allowed`), and until a client has that view the section is hand-edited; what
   must not change is the file round trip" and keep the rest of the paragraph verbatim.
 - **§13's closing block, item 2** (`:500-505`) — append the landing record, in the spec's own voice:
-  "**Landed in Plan 3's Task 3.7** (2026-10-11): `LoginView` carries `enabled`, `voice` and
+  "**Landed in Plan 3's Task 1.1** (2026-10-11): `LoginSettingsView` carries `enabled`, `voice` and
   `allowed`, `ConfigView` carries the section, the configuration screen edits it, and `Welcome.login`
   is still the only authority a login screen is shown from — a client that never fetches the
   configuration never sees the allowlist. The judging stays server-side (`login::judge`) and
