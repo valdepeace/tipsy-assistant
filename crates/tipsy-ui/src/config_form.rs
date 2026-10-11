@@ -1734,6 +1734,16 @@ mod tests {
         // The help line promises no toggle this form cannot do: a space is not a key it has.
         assert!(!ES.cfg_help.to_lowercase().contains("espacio"), "{}", ES.cfg_help);
         assert!(!EN.cfg_help.to_lowercase().contains("space"), "{}", EN.cfg_help);
+        // The half that removal took with it is true and belongs there: `Enter` is the toggle key for
+        // the rows that are switches — `the_navigation_keys_mean_the_same_thing_as_the_actions`
+        // asserts that behaviour — beside being the edit key for the rows that are text. Both tables
+        // name it again, and neither may name the space key.
+        assert!(
+            ES.cfg_help.to_lowercase().contains("alternar") && EN.cfg_help.to_lowercase().contains("toggle"),
+            "the help line must name the toggle `Enter` really does: {} / {}",
+            ES.cfg_help,
+            EN.cfg_help
+        );
         // And the two tables that name the discard carry it in both languages.
         assert!(!ES.cfg_cancel.trim().is_empty() && !EN.cfg_cancel.trim().is_empty());
         assert!(ES.cfg_help_editing.contains(ES.cfg_cancel), "{}", ES.cfg_help_editing);

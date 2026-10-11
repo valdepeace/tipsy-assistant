@@ -335,8 +335,10 @@ impl Client {
     ///
     /// The screen is put up filled only when the file was read: a read that fails leaves the
     /// placeholder form on screen, unmarked (finding G), and that form refuses `Ctrl+S` and `F4`
-    /// rather than writing blank base URLs and models over the user's `config.toml`. The notice
-    /// below is what tells the user why the screen is empty.
+    /// rather than writing blank base URLs and models over the user's `config.toml`. The reason goes
+    /// where the user reads it — the screen's own notice line, through [`Client::config_notice`] —
+    /// and not into the header's status span, which the header's own layout is free to cut to zero
+    /// columns while the screen is up.
     fn open_screen(&mut self) {
         match store::load_or_create(&self.config_path) {
             Ok(loaded) => {
@@ -348,7 +350,7 @@ impl Client {
                 }
                 self.state.show_config_form(form);
             }
-            Err(e) => self.state.notify(format!("{}: {e}", self.config_path.display())),
+            Err(e) => self.config_notice(NoticeKind::Error, format!("{}: {e}", self.config_path.display())),
         }
     }
 
@@ -731,6 +733,42 @@ mod tests {
         assert_eq!(second.listening.silence_ms, "4321", "the screen must read the file again");
         assert_eq!(second.server.token, "pasted-by-hand");
         assert_eq!(client.config, config, "opening the screen changes nothing that is running");
+    }
+
+    /// The scoped re-review's finding 2: a file that cannot be read leaves the placeholder screen up
+    /// and empty, and the reason is on the screen's own notice line. The header's status span, the
+    /// only other place it could show, is the one span the header's layout may cut to zero columns.
+    #[test]
+    fn a_file_that_cannot_be_read_says_so_on_the_screen_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        // A parent that is a file rather than a directory: nothing can be created under it, so the
+        // load fails the way it does when the user's configuration directory is not writable.
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, "x").unwrap();
+        let path = blocker.join("config.toml");
+
+        let config = mock_config("http://127.0.0.1:1");
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut client = Client::new(config, path.clone(), keys, slot);
+
+        // The real door: `F9` puts the placeholder form up — that is the state's own toggle — and
+        // asks the client for the file, exactly as the key loop and a click on the gear do.
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        for action in client.state.on_key(KeyInput::F(9)) {
+            client.on_action(action, &to_server, &events);
+        }
+
+        let form = client.state.config_form.as_ref().expect("the screen stays up when the file cannot be read");
+        let (kind, text) = form.notice.clone().expect("the screen itself must say why it is empty");
+        assert_eq!(kind, NoticeKind::Error);
+        assert!(text.contains("config.toml"), "the notice names the file it could not read: {text}");
+        assert!(text.contains("not-a-dir"), "and the path that failed: {text}");
+        assert!(
+            client.state.notice.is_none(),
+            "the HUD's line is not where a screen notice belongs: {path:?} is already named on screen"
+        );
     }
 
     /// Review Focus 1: a write that fails changes nothing at all. The file is byte for byte what it

@@ -946,7 +946,8 @@ mod tests {
     }
 
     #[test]
-    fn a_second_welcome_does_not_reset_the_form_the_user_is_filling_in() {        let mut s = UiState::new();
+    fn a_second_welcome_does_not_reset_the_form_the_user_is_filling_in() {
+        let mut s = UiState::new();
         s.apply(&welcome(UiLanguage::Es));
         // Work already done on the HUD, and work in progress in the screen: the two things a fresh
         // session would drop.
