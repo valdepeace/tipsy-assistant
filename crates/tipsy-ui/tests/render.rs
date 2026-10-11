@@ -5,12 +5,15 @@ use tipsy_ui::*;
 
 fn state(lang: UiLanguage) -> UiState {
     let mut s = UiState::new();
+    // `web_bundle: true` throughout this file: these tests are about the HUD's layout and copy, and a
+    // binary that reports no bundle raises a notice that is one line of it — a subject with its own
+    // test in `state.rs` (`a_binary_without_the_bundle_says_so_in_both_languages`).
     s.apply(&Event::Welcome {
         session_id: 1,
         profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
         ui_language: lang,
         listening_mode: ListeningMode::Push,
-        web_bundle: false,
+        web_bundle: true,
         login: None,
     });
     s
@@ -228,7 +231,7 @@ fn the_header_shows_the_gear_and_the_listening_mode() {
         profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
         ui_language: UiLanguage::Es,
         listening_mode: ListeningMode::Auto,
-        web_bundle: false,
+        web_bundle: true,
         login: None,
     });
     let (_, hits, term) = render(&s);
@@ -239,7 +242,7 @@ fn the_header_shows_the_gear_and_the_listening_mode() {
         profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
         ui_language: UiLanguage::En,
         listening_mode: ListeningMode::HandsFree,
-        web_bundle: false,
+        web_bundle: true,
         login: None,
     });
     let (_, hits, term) = render(&s);
