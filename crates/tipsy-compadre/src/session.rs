@@ -446,6 +446,10 @@ impl Session {
             Command::LoginStart => self.login_start(),
             Command::LoginStop => self.login_stop(),
             Command::LoginAnswer { text } => self.login_answer(text),
+            // Task 1.3 owns these three: the configuration over the wire is answered by a session
+            // only once there is a server to persist through. Accepted and ignored here so the match
+            // stays exhaustive and this task owns no behaviour.
+            Command::GetConfig | Command::UpdateConfig { .. } | Command::SetKey { .. } => {}
         }
     }
 

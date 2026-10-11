@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use tipsy_protocol::Capability;
+use tipsy_protocol::{Capability, ConfigView};
 use tipsy_ui::{
     AllowedPersonForm, ConfigForm, ConfigTab, ListeningForm, LoginForm, ProfileForm, ProviderForm, RealtimeForm,
     ServerForm,
@@ -127,6 +127,20 @@ pub fn config_from(form: &ConfigForm) -> Result<Config, String> {
         },
         profiles,
     })
+}
+
+/// The wire's shape for the configuration a file holds: `form_of` and then the form's own
+/// conversion. One path, so a `GetConfig` answer can never describe a file differently from the
+/// screen that edits it.
+pub fn view_of(config: &Config) -> ConfigView {
+    ConfigView::from(&form_of(config))
+}
+
+/// The configuration a `ConfigView` describes, refusing what `config_from` refuses and by the same
+/// names, so a configuration that arrives over the wire is saved exactly as strictly as one typed
+/// into the screen.
+pub fn config_of(view: ConfigView) -> Result<Config, String> {
+    config_from(&ConfigForm::from(view))
 }
 
 /// One row of the Providers tab as a connector configuration — the same conversion a save makes, so
@@ -402,5 +416,84 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(kind_name(kind)));
             assert_eq!(kind_from(kind_name(kind)).unwrap(), kind);
         }
+    }
+
+    /// §4.3's security rule, as a test over bytes: a `ConfigView` carries the key *names* and nothing
+    /// else. The fixture's key values are the ones a store really would hold, so one leak is visible.
+    #[test]
+    fn a_config_view_carries_no_key_value() {
+        let mut config = config();
+        // Names the screen really shows. The secret values live only here, in this test, and are not
+        // — and must never become — a real key: the rule is that no field may hold one.
+        config.providers.chat.key = "openrouter".into();
+        config.providers.speech.key = "elevenlabs".into();
+        config.realtime.key = "openai-realtime".into();
+
+        let view = view_of(&config);
+        let json = serde_json::to_string(&view).unwrap();
+
+        for secret in ["sk-or-v1-9e2f", "el-secret-value", "rt-secret-value"] {
+            assert!(!json.contains(secret), "no key value may cross: {secret} in {json}");
+        }
+        // …and the names are exactly what did cross, so the loop above cannot pass because the field
+        // is missing altogether.
+        assert!(json.contains(r#""key_name":"openrouter""#), "{json}");
+        assert!(json.contains(r#""key_name":"elevenlabs""#), "{json}");
+        assert!(json.contains(r#""key_name":"openai-realtime""#), "{json}");
+    }
+
+    /// §4.3's second half, and the shape Task 1.3 needs: the token is the one thing the view carries
+    /// that some clients may not see, so it lives in exactly one field and there is exactly one way
+    /// to take it away.
+    #[test]
+    fn the_token_lives_in_one_field_and_redacting_empties_it() {
+        let json = serde_json::to_string(&view_of(&config())).unwrap();
+        assert!(
+            json.contains(r#""token":"0123456789abcdef0123456789abcdef""#),
+            "the token crosses as itself, in `server.token`: {json}"
+        );
+        // One occurrence and one only: a second field carrying the token would be the leak §4.3 rules
+        // out, and this is the assertion that notices it.
+        assert_eq!(json.matches("0123456789abcdef0123456789abcdef").count(), 1, "{json}");
+
+        let redacted = serde_json::to_string(&view_of(&config()).redacted()).unwrap();
+        assert!(!redacted.contains("0123456789abcdef0123456789abcdef"), "{redacted}");
+        assert!(redacted.contains(r#""bind":"0.0.0.0:7070""#), "only the token goes: {redacted}");
+    }
+
+    /// The ruling: one shape, two representations, and the trip through the wire shape is what keeps
+    /// them from drifting. What the screen opens on, carried as a `ConfigView` and brought back, is
+    /// the configuration that produced it — value for value, order for order.
+    #[test]
+    fn a_config_view_round_trips_the_whole_configuration() {
+        for config in [Config::default(), config()] {
+            let form = form_of(&config);
+            let view = ConfigView::from(&form);
+
+            let json = serde_json::to_string(&view).unwrap();
+            let back: ConfigView = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, view, "the wire shape must survive its own JSON: {json}");
+
+            let again = ConfigForm::from(back);
+            assert_eq!(config_from(&again).unwrap(), config, "a view must rebuild the same file");
+            assert_eq!(config_of(view.clone()).unwrap(), config, "and so must the one-step path");
+        }
+    }
+
+    /// `ConfigForm`'s own view state belongs to the screen, not to the wire. A form built from a
+    /// `ConfigView` is **not** marked filled, because a message is not a file that was read: `Ctrl+S`
+    /// on such a form must still refuse (Plan 2B's whole point for the flag).
+    #[test]
+    fn a_form_built_from_a_view_is_not_filled_and_keeps_the_screens_own_state() {
+        let mut opened = form_of(&Config::default());
+        opened.dirty = true;
+
+        let view = ConfigView::from(&opened);
+        let rebuilt = ConfigForm::from(view);
+
+        assert!(!rebuilt.filled(), "only a file the client read may mark a form filled");
+        assert!(!rebuilt.dirty, "the dirty flag is the screen's own, and starts clear");
+        assert_eq!(ConfigTab::Providers, rebuilt.tab, "the screen opens on its first tab");
+        assert_eq!(config_from(&rebuilt).unwrap(), Config::default());
     }
 }

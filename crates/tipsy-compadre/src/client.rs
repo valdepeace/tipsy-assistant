@@ -843,6 +843,10 @@ fn starts_turn(command: &Command) -> bool {
         // The login screen's three commands belong to the login capture, never to the conversation:
         // they start no turn, and Task 6 routes them to the screen rather than through this decision.
         Command::LoginStart | Command::LoginStop | Command::LoginAnswer { .. } => false,
+        // Task 1.1's three: reading, writing and keying the configuration start no turn, speak
+        // nothing and write nothing to the log. Task 1.3 gives them their behaviour; this task only
+        // keeps the decision exhaustive.
+        Command::GetConfig | Command::UpdateConfig { .. } | Command::SetKey { .. } => false,
     }
 }
 
