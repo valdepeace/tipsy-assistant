@@ -273,6 +273,14 @@ base_url = "https://openrouter.ai/api/v1"
 model = "openai/whisper-large-v3"
 key = "openrouter"
 
+[realtime]
+enabled = false          # off by default: a streaming call bills audio while it is open
+model = "gpt-realtime-2.1"
+key = "openai"           # key name, never the key itself
+voice = "marin"
+max_minutes = 10         # a call ends by itself after this long
+# turn detection reuses [listening] silence_ms: there is no silence_ms here on purpose
+
 [[profiles]]
 id = "compae"
 name = "El Compae"

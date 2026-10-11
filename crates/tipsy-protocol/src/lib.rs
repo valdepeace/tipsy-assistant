@@ -136,6 +136,14 @@ pub enum Event {
     /// on failure, a short human summary on success. `ok` is `true` only when a real minimal call
     /// answered — never for an error body.
     TestResult { capability: Capability, ok: bool, latency_ms: u64, message: String },
+    /// The server's answer to "is a realtime call live?": `active: true` when a call opens its
+    /// socket and `false` when that call ends, by any of its endings (Plan 2C). An event rather
+    /// than a new `AssistantState`: the server owns the socket, so the indicator cannot be on
+    /// while no socket is open, "the call ended" is explicit rather than inferred from a status
+    /// transition back to `Idle`, and `AssistantState` keeps meaning exactly one thing — what the
+    /// assistant is doing during a turn. Nothing else about the protocol changes: a call's
+    /// transcripts still arrive as `Heard`, `ReplyDelta` and `Reply`.
+    Live { active: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

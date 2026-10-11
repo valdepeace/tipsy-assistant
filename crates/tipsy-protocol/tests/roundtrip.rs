@@ -45,6 +45,20 @@ fn events_roundtrip() {
     roundtrip_event(Event::Error { code: ErrorCode::RateLimited, message: "slow down".into(), recoverable: true });
 }
 
+/// What the HUD shows for the whole of a realtime call (Plan 2C Task 1): one more `Event`, tagged
+/// with `type` and spelled snake_case like every other variant of the crate's tagged events.
+#[test]
+fn the_live_event_roundtrips() {
+    // The server sends `active: true` when a call opens and `active: false` when it ends; both are
+    // round-tripped, and both are then pinned by the JSON the HUD's own clients will see.
+    for active in [true, false] {
+        roundtrip_event(Event::Live { active });
+    }
+    let json = serde_json::to_string(&Event::Live { active: true }).unwrap();
+    assert_eq!(json, r#"{"type":"live","active":true}"#);
+    assert_eq!(serde_json::from_str::<Event>(r#"{"type":"live","active":false}"#).unwrap(), Event::Live { active: false });
+}
+
 #[test]
 fn json_shape_is_tagged_snake_case() {
     let json = serde_json::to_string(&Command::SetListeningMode { mode: ListeningMode::HandsFree }).unwrap();

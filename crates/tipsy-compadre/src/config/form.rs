@@ -7,9 +7,11 @@
 use std::collections::BTreeMap;
 
 use tipsy_protocol::Capability;
-use tipsy_ui::{ConfigForm, ConfigTab, ListeningForm, ProfileForm, ProviderForm, ServerForm};
+use tipsy_ui::{ConfigForm, ConfigTab, ListeningForm, ProfileForm, ProviderForm, RealtimeForm, ServerForm};
 
-use super::model::{Config, ListeningConfig, Profile, ProviderConfig, ProviderKind, ProvidersConfig, ServerConfig};
+use super::model::{
+    Config, ListeningConfig, Profile, ProviderConfig, ProviderKind, ProvidersConfig, RealtimeConfig, ServerConfig,
+};
 
 /// The form the screen opens on: a plain-value copy of `config`, and nothing else.
 pub fn form_of(config: &Config) -> ConfigForm {
@@ -36,6 +38,16 @@ pub fn form_of(config: &Config) -> ConfigForm {
         mic_device: config.listening.mic_device.clone(),
     };
     form.profiles = config.profiles.iter().map(profile_form).collect();
+    // Carried, not drawn (Plan 2C Task 1): no tab of the screen shows `[realtime]`, but a save
+    // rebuilds the whole configuration from this form, so the section has to survive the trip or a
+    // save would reset it to its defaults.
+    form.realtime = RealtimeForm {
+        enabled: config.realtime.enabled,
+        model: config.realtime.model.clone(),
+        key_name: config.realtime.key.clone(),
+        voice: config.realtime.voice.clone(),
+        max_minutes: config.realtime.max_minutes,
+    };
     form.server = ServerForm {
         bind: config.server.bind.clone(),
         lan: config.server.lan,
@@ -76,6 +88,15 @@ pub fn config_from(form: &ConfigForm) -> Result<Config, String> {
             mic_device: form.listening.mic_device.clone(),
         },
         providers,
+        // The one section the screen does not draw, put back exactly as the form carries it: the
+        // file's `[realtime]` must not change because something else on the screen was saved.
+        realtime: RealtimeConfig {
+            enabled: form.realtime.enabled,
+            model: form.realtime.model.clone(),
+            key: form.realtime.key_name.clone(),
+            voice: form.realtime.voice.clone(),
+            max_minutes: form.realtime.max_minutes,
+        },
         profiles,
     })
 }
@@ -219,6 +240,15 @@ mod tests {
                     key: String::new(),
                 },
             },
+            // Not something the screen can change, but part of the file the form must not lose; the
+            // round trip is what proves it, and the test below names the reason.
+            realtime: RealtimeConfig {
+                enabled: true,
+                model: "gpt-realtime-2.1-mini".into(),
+                key: "openai-realtime".into(),
+                voice: "cedar".into(),
+                max_minutes: 25,
+            },
             profiles,
         }
     }
@@ -231,6 +261,24 @@ mod tests {
             let form = form_of(&config);
             assert_eq!(config_from(&form).unwrap(), config, "a save must write the same file back");
         }
+    }
+
+    /// The screen draws no `[realtime]` row (Plan 2C Task 1: the section is edited in the file), yet
+    /// a save rebuilds the whole configuration from this form. The section therefore has to be
+    /// carried through it: a `config_from` that filled it in from `RealtimeConfig::default()` would
+    /// turn the mode off, and rewrite the model and the voice, the first time the user saved
+    /// anything else on the screen — silently, since no row would show it.
+    #[test]
+    fn a_save_from_the_screen_keeps_the_realtime_section_it_does_not_draw() {
+        let mut config = Config::default();
+        config.realtime.enabled = true;
+        config.realtime.model = "gpt-realtime-2.1-mini".into();
+        config.realtime.key = "openai-realtime".into();
+        config.realtime.voice = "cedar".into();
+        config.realtime.max_minutes = 25;
+
+        let form = form_of(&config);
+        assert_eq!(config_from(&form).unwrap().realtime, config.realtime);
     }
 
     /// The three capabilities are always there, in the protocol's own order, spelled the way the

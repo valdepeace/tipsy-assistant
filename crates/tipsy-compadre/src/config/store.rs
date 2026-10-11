@@ -358,4 +358,70 @@ mic_gain = 9.5
         assert!(loaded.config.server.token.is_empty(), "nothing is generated on load");
         assert!(!loaded.config.server.has_token());
     }
+
+    /// Review Focus 3, the config half: a `config.toml` written before this plan has no `[realtime]`
+    /// section at all, and it is a valid file, not a corrupt one. Every field of the new section
+    /// defaults in and nothing else moves.
+    #[test]
+    fn a_config_written_before_this_plan_gets_the_realtime_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, r#"
+active_profile = "compae"
+
+[providers.chat]
+kind = "openai_compat"
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemini-2.5-flash"
+key = "openrouter"
+
+[listening]
+mode = "auto"
+silence_ms = 1500
+mic_gain = 9.5
+"#).unwrap();
+
+        let out = load_or_create(&path).unwrap();
+        assert!(out.warning.is_none(), "an old file is not a corrupt file: {:?}", out.warning);
+        let realtime = &out.config.realtime;
+        assert!(!realtime.enabled, "the mode must never be silently on");
+        assert_eq!(realtime.model, "gpt-realtime-2.1");
+        assert_eq!(realtime.key, "openai", "a key *name*: the resolver looks the value up");
+        assert_eq!(realtime.voice, "marin");
+        assert_eq!(realtime.max_minutes, 10);
+        // Turn detection is not a `[realtime]` field: it reuses the listening silence, which the old
+        // file already carries and which must not be touched by this task.
+        assert_eq!(out.config.listening.silence_ms, 1500);
+        // Loading is not a migration: the user's file is left exactly as it was.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("[realtime]"), "loading must not rewrite the file, got:\n{text}");
+    }
+
+    /// The section survives a save and a load with every field, and it is written as its own table.
+    #[test]
+    fn the_realtime_section_survives_a_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.realtime.enabled = true;
+        config.realtime.model = "gpt-realtime-2.1-mini".into();
+        config.realtime.key = "openai-realtime".into();
+        config.realtime.voice = "cedar".into();
+        config.realtime.max_minutes = 25;
+        save(&path, &config).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        for line in [
+            "[realtime]",
+            "enabled = true",
+            "model = \"gpt-realtime-2.1-mini\"",
+            "key = \"openai-realtime\"",
+            "voice = \"cedar\"",
+            "max_minutes = 25",
+        ] {
+            assert!(text.contains(line), "the file must contain `{line}`, got:\n{text}");
+        }
+        assert!(!text.contains("silence_ms = 25"), "silence is not a realtime field:\n{text}");
+        assert_eq!(load_or_create(&path).unwrap().config.realtime, config.realtime);
+    }
 }

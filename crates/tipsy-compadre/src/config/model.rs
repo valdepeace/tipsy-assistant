@@ -16,6 +16,9 @@ pub struct Config {
     pub server: ServerConfig,
     pub listening: ListeningConfig,
     pub providers: ProvidersConfig,
+    /// The realtime voice mode (spec §6, plan 2C). A section of its own because a call is a *mode of
+    /// the client*: `Capability` stays chat/speech/transcribe and `build_providers` never sees it.
+    pub realtime: RealtimeConfig,
     /// The user's own profiles first, the built-ins `with_builtin_profiles` appends after them.
     /// `personas` was this field's name until the rename, so the old array key is a serde alias too:
     /// a file written with `[[personas]]` still loads, and is only ever written back as `[[profiles]]`.
@@ -30,6 +33,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             listening: ListeningConfig::default(),
             providers: ProvidersConfig::default(),
+            realtime: RealtimeConfig::default(),
             profiles: builtin_profiles(),
         }
     }
@@ -145,6 +149,43 @@ impl Default for ProvidersConfig {
     }
 }
 
+/// `[realtime]`: one duplex WebSocket session with OpenAI's Realtime API.
+///
+/// There is deliberately no `silence_ms` here. The plan's Decision is that server-side turn
+/// detection is configured with `[listening] silence_ms`, so two numbers never describe one
+/// behaviour; the socket reads that field through `CallSpec`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RealtimeConfig {
+    /// Off unless the user turns it on: a streaming socket bills audio while it is open, so the
+    /// mode is never silently on (plan 2C, Review Focus 3).
+    pub enabled: bool,
+    /// A session-acceptable Realtime model id (the note's table). `gpt-realtime-2.1` is its current
+    /// default choice; `gpt-realtime-2.1-mini` is the cheaper one.
+    pub model: String,
+    /// Name of the key, never the key itself — resolved by `KeyResolver` like every provider key.
+    pub key: String,
+    /// One of the note's session voices (`alloy, ash, ballad, coral, echo, sage, shimmer, verse,
+    /// marin, cedar`). Deliberately *not* the profile's `voices` table: that table maps speech
+    /// connectors, and realtime is not one of them (plan 2C, "Decisions this plan makes").
+    pub voice: String,
+    /// A call ends by itself after this many minutes (plan 2C's cost Decision). The API's own cap is
+    /// 60 minutes; this is the number the user chose.
+    pub max_minutes: u32,
+}
+
+impl Default for RealtimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "gpt-realtime-2.1".into(),
+            key: "openai".into(),
+            voice: "marin".into(),
+            max_minutes: 10,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
@@ -233,5 +274,24 @@ mod tests {
         assert_eq!(eleven.voice_key(), "elevenlabs", "this test must exercise the elevenlabs key");
         let meigo = crate::config::profiles::builtin_profiles().into_iter().find(|p| p.id == "meigo").unwrap();
         assert_eq!(meigo.voice_for(&eleven), None, "no entry means the connector's own default voice");
+    }
+
+    /// The section's defaults, quoted from the plan and the research note: off, the note's current
+    /// model, one key *name*, one of the two voices the note recommends, and the plan's own limit.
+    #[test]
+    fn realtime_defaults_are_off_and_named() {
+        let realtime = RealtimeConfig::default();
+        assert!(!realtime.enabled, "the mode must never be silently on");
+        assert_eq!(realtime.model, "gpt-realtime-2.1", "the note's current default choice");
+        assert_eq!(realtime.key, "openai", "the name `KeyResolver` looks up in TIPSY_KEY_OPENAI");
+        assert_eq!(realtime.voice, "marin", "one of the two voices the note recommends");
+        assert_eq!(realtime.max_minutes, 10, "the plan's default call limit");
+
+        // `[realtime]` has no `silence_ms`: turn detection reuses `[listening] silence_ms` (the
+        // plan's Decisions section), which is why the two are asserted together here and why
+        // `RealtimeConfig` has no such field to drift from it.
+        let config = Config::default();
+        assert_eq!(config.listening.silence_ms, 1000);
+        assert_eq!(config.realtime, realtime, "a default config carries the default section");
     }
 }
