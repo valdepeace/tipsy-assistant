@@ -465,10 +465,12 @@ impl Client {
                         let no_mic = self.state.strings().login_no_mic;
                         if self.state.login.is_some() {
                             // The screen's own line, because the HUD's notice is behind the veil and
-                            // nobody can read it there (spec §9). It stops the capture as well, so the
-                            // stream is not asked for again — and the request that is already in
-                            // flight is retired here rather than answered with a `LoginStop` that
-                            // would wipe the line the user has to read.
+                            // nobody can read it there (spec §9). `open = false` stops the capture and
+                            // the client's own gate stops asking for a stream, so the request is retired
+                            // here rather than with a `LoginStop`: the server's stop sets a flag, clears
+                            // a buffer and cancels a token — it sends no event and touches no screen
+                            // state — so a stop would be a round trip that changes nothing a user can
+                            // see (the scoped re-review caught this comment claiming otherwise).
                             if let Some(login) = self.state.login.as_mut() {
                                 login.line = LoginLine::Failed(no_mic.to_string());
                                 login.open = false;
