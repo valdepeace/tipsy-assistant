@@ -11,6 +11,7 @@ use tipsy_protocol::{
     AssistantState, Command, Event, Frame, ListeningMode, LoginView, ProfileView, ToClient, ToServer, UiLanguage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -69,6 +70,9 @@ pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: 
     let listening_mode = config.listening.mode;
     let listening_silence_ms = config.listening.silence_ms;
     let brain = Arc::new(Brain::new(providers.clone(), turn_profile(&config), brain_config.clone()));
+    // Read before `config` moves into the session: with a login screen up, the greeting is owed rather
+    // than spoken (spec §10).
+    let greeting_withheld = crate::login::applies(&config.login);
 
     let mut session = Session {
         config,
@@ -97,6 +101,8 @@ pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: 
             listening_silence_ms,
         ),
         login_turn: None,
+        greeting_withheld,
+        greeting_signal: Arc::new(Notify::new()),
     };
 
     tokio::spawn(async move {
@@ -171,14 +177,23 @@ struct Session {
     login_vad: VadState<Box<dyn Scorer + Send>>,
     /// The login transcription in flight, if any: a newer utterance replaces it (spec §4.1).
     login_turn: Option<CancellationToken>,
+    /// True while the greeting is still owed: a login screen applies and no verdict has opened yet, so
+    /// nothing may be said behind the widget (spec `2026-10-11-login-screen-design.md` §10).
+    greeting_withheld: bool,
+    /// How the login transcription task asks the session for that greeting: only the session owns the
+    /// turn machinery, and the task that transcribes is not the session.
+    greeting_signal: Arc<Notify>,
 }
 
 impl Session {
     async fn run(&mut self, mut rx: UnboundedReceiver<ToServer>) {
         self.welcome();
-        // The greeting is an ordinary turn: while it plays, `Cancel` still works.
-        let greeting = self.greeting.clone();
-        self.current = Some(self.start_turn(TurnInput::Say(greeting)));
+        // The greeting is an ordinary turn: while it plays, `Cancel` still works. While a login screen
+        // applies it is withheld instead and spoken by the verdict that opens the door (spec §10) — no
+        // speech is spent on a visitor who is refused, and nothing talks over the widget.
+        if !self.greeting_withheld {
+            self.greet();
+        }
 
         loop {
             // The guard's deadline is read once per iteration, so the timer's branch borrows nothing
@@ -221,6 +236,12 @@ impl Session {
                 } => {
                     self.guard_elapsed();
                 }
+                // The login transcription runs in a task of its own, so the greeting its verdict earns
+                // has to wake the session: this is the only branch that can start a turn no client
+                // asked for, and `greet_if_withheld` is what keeps it to one.
+                () = self.greeting_signal.notified() => {
+                    self.greet_if_withheld();
+                }
             }
             // A turn that ended is settled here, where the borrow the select held is over. A turn
             // the command just started has no history yet and is left alone.
@@ -253,6 +274,23 @@ impl Session {
     fn guard_elapsed(&mut self) {
         self.guard = None;
         self.vad.resume();
+    }
+
+    /// Starts the greeting turn: at construction when no login screen applies, and at the verdict that
+    /// opens the door otherwise (spec §10). The flag is cleared *before* the turn starts, which is what
+    /// makes a greeting owed exactly once even if two verdicts open — a typed answer can land while a
+    /// transcription is still in flight.
+    fn greet(&mut self) {
+        self.greeting_withheld = false;
+        let greeting = self.greeting.clone();
+        self.current = Some(self.start_turn(TurnInput::Say(greeting)));
+    }
+
+    /// Speaks the greeting if it is still owed, and does nothing otherwise.
+    fn greet_if_withheld(&mut self) {
+        if self.greeting_withheld {
+            self.greet();
+        }
     }
 
     /// Applies the history of a turn that ended, unless a `Reset` has since cleared the history.
@@ -540,7 +578,13 @@ impl Session {
     /// the ruling opens: there is nothing to check, so nobody is refused.
     fn login_answer(&mut self, text: String) {
         let verdict = crate::login::judge(&self.config.login, &text);
-        send(&self.out, ToClient::Event(Event::LoginVerdict { ok: verdict.ok, name: verdict.name }));
+        let ok = verdict.ok;
+        send(&self.out, ToClient::Event(Event::LoginVerdict { ok, name: verdict.name }));
+        if ok {
+            // The withheld greeting lands as the HUD appears — after the verdict that opened the door
+            // (spec §10).
+            self.greet_if_withheld();
+        }
     }
 
     /// One microphone frame of an open capture: the same detector discipline `auto` mode uses, with
@@ -587,15 +631,24 @@ impl Session {
         let brain = Arc::clone(&self.brain);
         let out = self.out.clone();
         let login = self.config.login.clone();
+        let greeting = Arc::clone(&self.greeting_signal);
         tokio::spawn(async move {
             send(&out, status(AssistantState::Transcribing));
             let pcm = Pcm { samples: i16_to_f32(&samples), sample_rate: MIC_SAMPLE_RATE };
+            let mut opened = false;
             if let Some(text) = brain.transcribe_once(pcm, &out, &cancel).await {
                 send(&out, ToClient::Event(Event::LoginHeard { text: text.clone() }));
                 let verdict = crate::login::judge(&login, &text);
+                opened = verdict.ok;
                 send(&out, ToClient::Event(Event::LoginVerdict { ok: verdict.ok, name: verdict.name }));
             }
             send(&out, status(AssistantState::Idle));
+            if opened {
+                // Only the session owns the turn machinery, so the task that heard the answer wakes it
+                // for the greeting the screen withheld: the verdict and the idle are already on the
+                // wire, so the greeting lands after them (spec §10).
+                greeting.notify_one();
+            }
         });
     }
 
@@ -842,6 +895,7 @@ mod tests {
         let (out, rx) = mpsc::unbounded_channel();
         let silence_ms = config.listening.silence_ms;
         let profile = config.active().clone();
+        let greeting_withheld = crate::login::applies(&config.login);
         let session = Session {
             config,
             brain,
@@ -866,6 +920,8 @@ mod tests {
             login_heard: false,
             login_vad: VadState::with_scorer(Box::new(Scripted::new(scores)) as Box<dyn Scorer + Send>, silence_ms),
             login_turn: None,
+            greeting_withheld,
+            greeting_signal: Arc::new(Notify::new()),
         };
         (session, rx, chat_calls)
     }
