@@ -24,9 +24,16 @@ use crate::config_form::ConfigAction;
 use crate::state::{KeyInput, LogEntry, Tab, UiState, Who};
 use crate::strings::Strings;
 
-const CYAN: Color = Color::Rgb(0, 210, 255);
-const DIM: Color = Color::Rgb(0, 95, 125);
-const GOLD: Color = Color::Rgb(255, 190, 60);
+/// The palette. It is the crate's, not this module's: the login widget draws the core with the HUD's
+/// own colours and the veil (spec §7) is a map over exactly these names.
+pub(crate) const CYAN: Color = Color::Rgb(0, 210, 255);
+pub(crate) const DIM: Color = Color::Rgb(0, 95, 125);
+pub(crate) const GOLD: Color = Color::Rgb(255, 190, 60);
+/// The login widget's own two inks (spec §6): the input row is white like the HUD's question box, and
+/// the caret and the title dot are cyan like the widget's frame. They live here because
+/// `render_login` draws with the same hand, not because the HUD uses them.
+pub(crate) const INK: Color = Color::White;
+pub(crate) const CARET: Color = CYAN;
 const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 /// Milliseconds between two samples of a voice envelope, as `UiState` records them.
 const ENVELOPE_HOP_MS: f64 = 50.0;
@@ -63,7 +70,6 @@ pub struct Hit {
 }
 
 pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) -> Vec<Hit> {
-    let [header, body, input, help] = Layout::vertical([Length(1), Min(10), Length(3), Length(1)]).areas(frame.area());
     // The screen is full screen (spec §9): while it is up the HUD is not drawn at all, and its
     // clickable rows are not reported either — a click on the screen may not clear the conversation.
     // What *is* reported is the header's own two controls, and they are reported first, before the
@@ -85,10 +91,29 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
         // stays the plain screen name — the header uppercases it into the badge — and the marker is
         // drawn beside the badge in the copy's own case.
         let mut hits =
-            draw_header(frame, state, header, state.strings().cfg_title, form.dirty.then_some(state.strings().cfg_dirty));
+            draw_header(frame, state, state.strings().cfg_title, form.dirty.then_some(state.strings().cfg_dirty));
         hits.extend(screen);
         return hits;
     }
+    // The login is not a full-screen form (spec L5, §7): the HUD is drawn whole, so the dashboard is
+    // visibly there behind the widget, and veiled and thrown away from there — the widget is the only
+    // crisp and the only clickable thing while the door is shut.
+    if state.login.is_some() {
+        let _ = draw_hud(frame, state, clock, title);
+        return crate::render_login::draw_login(frame, state, frame.area());
+    }
+    draw_hud(frame, state, clock, title)
+}
+
+/// The HUD as it has always been drawn: header, clock, log, rings, oscilloscope, system, input and
+/// help, with the header's two controls first in the order it reports.
+///
+/// It is one function because two callers need the same dashboard: `draw` when no screen is up, and
+/// `draw` again before the login veil paints over it. The hits are the caller's business — the login
+/// path drops them on purpose, which is what stops a click behind the veil from opening the
+/// configuration screen, clearing the conversation or replaying a reply.
+fn draw_hud(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) -> Vec<Hit> {
+    let [_, body, input, help] = Layout::vertical([Length(1), Min(10), Length(3), Length(1)]).areas(frame.area());
     let [left, center, right] = Layout::horizontal([Percentage(LEFT_PERCENT), Min(30), Percentage(26)]).areas(body);
     let [clock_area, log] = Layout::vertical([Length(5), Min(3)]).areas(left);
     draw_clock(frame, state, clock, clock_area);
@@ -103,7 +128,7 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
     }
     // The header is drawn last because it is read last on the row and is the last thing on screen:
     // its own symbols win the cells they occupy however the panes and the screen have painted them.
-    let mut ordered = draw_header(frame, state, header, title, None);
+    let mut ordered = draw_header(frame, state, title, None);
     ordered.extend(hits);
     ordered
 }
@@ -121,7 +146,11 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
 /// to draw either reports no `Hit` for it rather than a rectangle nobody can see. That is true while
 /// the configuration screen is up as well as when it is down: the screen is drawn beneath the header,
 /// so the gear is on screen and clickable either way.
-fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str, dirty: Option<&str>) -> Vec<Hit> {
+/// The header is the row the frame is split for, so its area is read here rather than handed in: the
+/// login path draws the HUD through a buffer that is already laid out, and only the header's own
+/// [`Hit`]s depend on where that row landed.
+fn draw_header(frame: &mut Frame, state: &UiState, title: &str, dirty: Option<&str>) -> Vec<Hit> {
+    let [area, _, _, _] = Layout::vertical([Length(1), Min(10), Length(3), Length(1)]).areas(frame.area());
     let (line, mode, gear) = header(state, area, title, dirty);
     frame.render_widget(line, area);
     [mode, gear]
@@ -252,7 +281,10 @@ fn drawn_width(span: &Span) -> usize {
 /// `text` cut to `width` columns in the width the row is drawn in, keeping `style`. Cutting by
 /// [`drawn_width`] is what keeps a cut status exactly as wide as the room its own rectangle promised
 /// it.
-fn cut_to(text: &str, style: Style, width: usize) -> Span<'static> {
+///
+/// The crate's, not this module's: the login widget's one status line is cut with the same ruler, so
+/// «Te he oído: …» and the prompt stop at the same column whatever the frame's width is.
+pub(crate) fn cut_to(text: &str, style: Style, width: usize) -> Span<'static> {
     let mut cut = String::new();
     let mut used = 0;
     for c in text.chars() {
@@ -519,17 +551,33 @@ fn ring_bounds(inner: Rect) -> (f64, f64) {
     (yr * w / (2.0 * h), yr)
 }
 
+/// The core, in the HUD's "core" panel.
 fn draw_rings(frame: &mut Frame, state: &UiState, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let block = panel(state.strings().core);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    draw_core(frame, state, inner);
+}
+
+/// The rings themselves — the outer circle, the three arcs and the centre pulse — over exactly the
+/// `area` it is handed: no panel, no border, no title.
+///
+/// It is shared because the login widget draws the same core inside its own border (spec §6: "the
+/// core is the HUD's, not a copy of it"): the widget's rectangle is the core's frame there, and the
+/// pulse is the same `state.voice_level()` — the only feedback the screen needs to say "I am hearing
+/// you".
+pub(crate) fn draw_core(frame: &mut Frame, state: &UiState, area: Rect) {
     if area.is_empty() {
         return;
     }
     let t = state.elapsed_ms as f64 / 1000.0;
     let level = state.voice_level() as f64;
     let speed = if state.busy() { 2.2 } else { 0.5 };
-    let block = panel(state.strings().core);
-    let (xr, yr) = ring_bounds(block.inner(area));
+    let (xr, yr) = ring_bounds(area);
     let canvas = Canvas::default()
-        .block(block)
         .marker(Marker::Braille)
         .x_bounds([-xr, xr])
         .y_bounds([-yr, yr])

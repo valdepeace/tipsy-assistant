@@ -325,3 +325,285 @@ fn the_live_indicator_disappears_when_the_call_ends() {
     assert!(!text.contains("EN VIVO"), "the indicator is not left behind by a call that ended");
     assert!(text.contains("Listo"), "the header is the quiet one again");
 }
+
+// ---- the login screen (spec 2026-10-11-login-screen-design.md, §6–§8) ----
+
+/// The screen up, with the capture in whatever state the test asks for: `open` is the state the
+/// client reconciles the microphone to, and `mic_open` is what `● rec` reads.
+fn login(voice: bool, open: bool, mic_open: bool) -> UiState {
+    let mut s = state(UiLanguage::Es);
+    s.show_login(voice);
+    s.mic_open = mic_open;
+    if open {
+        s.login.as_mut().unwrap().open = true;
+    }
+    s
+}
+
+/// One frame of the login screen, and the text drawn on each of its rows: the widget is centred, so
+/// reading its rows by their content is more honest than guessing its coordinates.
+fn login_frame(s: &UiState, w: u16, h: u16) -> (String, Vec<Hit>, Terminal<TestBackend>) {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let mut hits = Vec::new();
+    term.draw(|f| hits = draw(f, s, &clock(), "Compae · el asistente de garrafón")).unwrap();
+    let text: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+    (text, hits, term)
+}
+
+/// The row of the frame whose text contains `needle`.
+fn row_with(term: &Terminal<TestBackend>, needle: &str) -> String {
+    let buffer = term.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .find(|row| row.contains(needle))
+        .unwrap_or_else(|| panic!("no row holds {needle:?}:\n{}", frame_text(term)))
+}
+
+fn frame_text(term: &Terminal<TestBackend>) -> String {
+    let buffer = term.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The login widget is not a full-screen form (spec L5): the HUD's own panels are drawn and then
+/// veiled, and only the widget's rectangle is crisp — the core, the one status line and the input box,
+/// with the app's own name and the keys on the borders.
+#[test]
+fn the_login_widget_draws_the_core_the_status_line_and_the_input() {
+    let mut s = login(true, true, true);
+    for c in "andres del core".chars() {
+        s.on_key(KeyInput::Char(c));
+    }
+    let (text, _, term) = login_frame(&s, 150, 40);
+
+    // The title on the top border is the *application's* name, never the profile's: the profile speaks
+    // from inside, and its badge is behind the veil.
+    assert!(text.contains("◉ tipsy-compadre"), "the widget's top border:\n{text}");
+    // The widget's border is a rounded block, like every other panel of the HUD.
+    assert!(text.contains("╭") && text.contains("╮") && text.contains("╰") && text.contains("╯"), "a bordered widget");
+    // The core is the HUD's own drawing, without the HUD's panel: `◉` in the middle of the widget and
+    // no "NÚCLEO" title on it.
+    assert!(text.contains('◉') && text.contains("tipsy-compadre"));
+    assert!(!text.contains("NÚCLEO"), "the widget's border is the core's frame:\n{text}");
+    // One status line: the prompt, because nothing has been said yet. It is cut to the widget's own
+    // width, so the assertion reads the head of the sentence rather than the whole of it.
+    assert!(text.contains("¿Y tú quién eres?"), "the status line:\n{text}");
+    assert!(!text.contains("cualquiera"), "the status line is cut to the widget, never wrapped:\n{text}");
+    // And the input row, with what was typed.
+    assert!(text.contains("❯ andres del core"), "the input row:\n{text}");
+    // The keys ride on the bottom border.
+    assert!(text.contains("Tab micro · Enter entrar · esc salir"), "the bottom border:\n{text}");
+    let _ = term;
+}
+
+/// The badge is the only thing that says the microphone is open, and it appears exactly while the
+/// capture runs (spec §6: the v1 visible-indicator rule kept without a header).
+#[test]
+fn the_recording_badge_appears_exactly_while_the_microphone_is_open() {
+    let open = login(true, true, true);
+    let (text, _, _) = login_frame(&open, 150, 40);
+    assert!(text.contains(strings(UiLanguage::Es).login_rec), "an open capture must say so:\n{text}");
+
+    let closed = login(true, false, false);
+    let (text, _, _) = login_frame(&closed, 150, 40);
+    assert!(!text.contains(strings(UiLanguage::Es).login_rec), "a shut door is not recording:\n{text}");
+
+    // And it is red: the colour is the message, not the word.
+    let (_, _, term) = login_frame(&open, 150, 40);
+    let rec = row_with(&term, strings(UiLanguage::Es).login_rec);
+    let buffer = term.backend().buffer();
+    let y = (0..buffer.area.height).find(|&y| row_text(&term, y) == rec).unwrap();
+    let x = (0..buffer.area.width).find(|&x| buffer[(x, y)].symbol() == "●").expect("the recording dot");
+    assert_eq!(buffer[(x, y)].style().fg, Some(ratatui::style::Color::Red), "● rec is red");
+}
+
+fn row_text(term: &Terminal<TestBackend>, y: u16) -> String {
+    let buffer = term.backend().buffer();
+    (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+}
+
+/// `Tab` is consent and the guard only stops *automatic* listening: the third refusal in a row is
+/// where the bottom border swaps to the escape hatch (spec §6, L8).
+#[test]
+fn the_bottom_border_swaps_to_the_escape_hint_after_three_refusals() {
+    let mut s = login(true, true, true);
+    assert_eq!(s.login.as_ref().unwrap().refusals, 0);
+    for _ in 0..2 {
+        s.apply(&Event::LoginVerdict { ok: false, name: None });
+    }
+    let (text, _, _) = login_frame(&s, 150, 40);
+    assert!(text.contains("Tab micro · Enter entrar · esc salir"), "attempts 1 and 2 keep the keys:\n{text}");
+    assert!(!text.contains("config.toml"), "and do not point at the configuration yet");
+
+    s.apply(&Event::LoginVerdict { ok: false, name: None });
+    let (text, _, _) = login_frame(&s, 150, 40);
+    assert!(text.contains("Tab micro · Enter entrar · ¿olvidado? [login]"), "the third says how to get out:\n{text}");
+    assert!(!text.contains("esc salir"), "and the hint replaces the keys rather than joining them");
+}
+
+/// Review Focus 5: the heard line is a person's own text. Cutting it to the widget's width must land
+/// on a character boundary — a naive `&text[..width]` panics on `é`, which is a letter the profiles
+/// this project ships write.
+#[test]
+fn a_two_hundred_character_heard_line_is_cut_on_a_character_boundary() {
+    let mut s = login(true, false, false);
+    let long: String = "é".repeat(LOGIN_INPUT_MAX);
+    assert_eq!(long.chars().count(), LOGIN_INPUT_MAX, "the cap's own worst case");
+    s.apply(&Event::LoginHeard { text: long.clone() });
+    s.apply(&Event::LoginVerdict { ok: false, name: None });
+
+    for (w, h) in [(150, 40), (60, 20), (40, 12), (21, 5), (20, 4)] {
+        // What this pins is that the frame is drawn at all: a cut that landed inside `é` would have
+        // panicked in the buffer write long before the assertion below.
+        let (_, _, _) = login_frame(&s, w, h);
+    }
+    // The heard line is on screen, cut to the widget: the status line of a full frame is the refusal
+    // that replaced it, and the refusal's own head is what the row carries.
+    let (text, _, term) = login_frame(&s, 150, 40);
+    assert!(text.contains("Anda, que te peinen para el lado."), "the status line:\n{text}");
+    // The 150-column frame is wide enough for the heard line to survive the *widget*, and the widget
+    // is 48 wide: the whole of a 200-character answer cannot be on it, so the row stops at its edge.
+    let rows = (0..term.backend().buffer().area.height)
+        .map(|y| row_text(&term, y))
+        .filter(|row| row.contains('é'))
+        .collect::<Vec<_>>();
+    assert!(rows.is_empty(), "the refusal replaced the heard line: {rows:?}");
+
+    // And the heard line itself, with no verdict behind it: its head is drawn, cut and never mangled.
+    let mut heard = login(true, false, false);
+    heard.apply(&Event::LoginHeard { text: long.clone() });
+    let (text, _, term) = login_frame(&heard, 150, 40);
+    assert!(text.contains("Te he oído: «"), "the heard wording is on screen:\n{text}");
+    assert!(text.contains('é'), "and the answer itself:\n{text}");
+    assert!(!text.contains('\u{FFFD}'), "and never a replacement character from a cut inside one");
+    // The widget is 44 columns inside its border, so the answer stops there: the whole of a
+    // 200-character line cannot be on it, and the answer's own `é`s can be counted on the one row.
+    // The count matters less than the two facts around it: every `é` on that row is a whole one (a
+    // cut inside one would have written a replacement character, or panicked), and they are fewer
+    // than the 200 that were heard.
+    let row = row_with(&term, "Te he oído");
+    assert!(row.contains("«"), "the guillemets are the spec's own");
+    let drawn = row.matches('é').count();
+    assert!(drawn > 0 && drawn < LOGIN_INPUT_MAX, "{drawn} of {LOGIN_INPUT_MAX}");
+
+    // The same for a typed answer: the box shows what is in it, cut and never mangled.
+    let mut typed = login(true, false, false);
+    for c in long.chars() {
+        typed.on_key(KeyInput::Char(c));
+    }
+    let (text, _, _) = login_frame(&typed, 60, 20);
+    assert!(text.contains('❯'), "the input row is drawn:\n{text}");
+}
+
+/// Only what is drawn reports a hit (spec §6): the title answers `Tab`, the input row answers `Enter`,
+/// and everything behind the veil reports nothing at all — a click on the dashboard may not open the
+/// configuration screen, clear the conversation or replay a reply while the door is shut.
+#[test]
+fn only_the_title_and_the_input_row_report_a_hit() {
+    let mut s = login(true, false, false);
+    s.log.push(tipsy_ui::LogEntry {
+        who: tipsy_ui::Who::Assistant,
+        text: "una respuesta que estaba detrás".into(),
+        first_audio_ms: Some(1200),
+        error: None,
+        pending: false,
+    });
+    let (text, hits, term) = login_frame(&s, 150, 40);
+    assert_eq!(hits.len(), 2, "the widget has exactly two controls: {hits:?}");
+    assert_eq!(hits[0].key, KeyInput::Tab, "the title is the microphone");
+    assert_eq!(hits[1].key, KeyInput::Enter, "the input row is the door");
+    assert!(hits.iter().all(|h| h.action.is_none()), "a click is the keystroke its control means");
+
+    let title = text_at(&term, hits[0].area);
+    assert!(title.contains("tipsy-compadre"), "the title's area sits on the title: {title:?}");
+    // The input's area is the row *inside* the border — the border is the widget's, and the clickable
+    // row is what the border frames.
+    let input = text_at(&term, hits[1].area);
+    assert!(input.starts_with('❯'), "the input row's area starts at its own caret: {input:?}");
+    assert_eq!(input.chars().count() as u16, hits[1].area.width, "and is exactly as wide as it says");
+    assert_eq!(input.trim_end(), "❯", "nothing was typed in this frame");
+    // The HUD's own three hits — chat, network, clear — are nowhere in the list, and neither is the
+    // header's gear: they were computed behind the veil and thrown away.
+    assert!(!hits.iter().any(|h| h.key == KeyInput::F(9)), "the gear is out of focus while the door is shut");
+    assert!(!text.contains("Borrar"), "the dashboard's own controls are veiled:\n{text}");
+
+    // Pressing `Tab` is exactly what clicking the title does: both go through the same key.
+    assert_eq!(s.on_hit(&hits[0]).len(), 1, "the title's key is the microphone key");
+    assert!(s.login.as_ref().unwrap().open);
+}
+
+/// The cursor belongs to the login's own box, not to the question box behind the veil: it follows
+/// what the screen has received, and it is on the screen at all — the HUD sets one for its own input
+/// row every frame, and a screen that left it there would put the caret on a cell nobody can read.
+#[test]
+fn the_cursor_follows_the_login_box() {
+    let mut s = login(true, false, false);
+    let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
+    term.draw(|f| {
+        draw(f, &s, &clock(), "x");
+    })
+    .unwrap();
+    let input = term.backend().buffer();
+    let row = (0..input.area.height)
+        .find(|&y| (0..input.area.width).any(|x| input[(x, y)].symbol() == "❯"))
+        .expect("the widget draws its input row");
+    let caret = term.get_cursor_position().expect("the frame must place the cursor");
+    assert_eq!(caret.y, row, "the cursor is on the input row");
+    let x0 = caret.x;
+
+    for c in "andres".chars() {
+        s.on_key(KeyInput::Char(c));
+    }
+    term.draw(|f| {
+        draw(f, &s, &clock(), "x");
+    })
+    .unwrap();
+    let moved = term.get_cursor_position().expect("the frame must place the cursor");
+    assert_eq!(moved.y, row);
+    assert_eq!(moved.x, x0 + 6, "the caret follows the characters the box has taken");
+}
+
+/// Spec §6's degradation: a frame too small for a bordered widget gets the bare input row on its last
+/// line, with no hit at all — the login is never the thing that makes a tiny terminal unusable.
+#[test]
+fn a_tiny_frame_draws_the_bare_input_row_and_reports_no_hit() {
+    let mut s = login(true, false, false);
+    for c in "and".chars() {
+        s.on_key(KeyInput::Char(c));
+    }
+    let (text, hits, term) = login_frame(&s, 12, 2);
+    assert!(hits.is_empty(), "nothing is clickable on a frame this small: {hits:?}");
+    assert!(!text.contains('┌') && !text.contains('│'), "no border:\n{text}");
+    let last = row_text(&term, 1);
+    assert!(last.contains("❯ and"), "the bare input row is on the last line: {last:?}");
+}
+
+/// The ten strings of spec §8, reproduced verbatim in both tables, «guillemets» included: the copy is
+/// the record of what the user approved, and a reworded line is a change to the product's voice.
+#[test]
+fn the_login_copy_is_the_specs_own_words_in_both_languages() {
+    let es = strings(UiLanguage::Es);
+    let en = strings(UiLanguage::En);
+    assert_eq!(es.login_prompt, "¿Y tú quién eres? Dímelo, que aquí no entra cualquiera.");
+    assert_eq!(en.login_prompt, "So who are you, then? Tell me — this door isn't for just anyone.");
+    assert_eq!(es.login_heard, "Te he oído: «{text}»");
+    assert_eq!(en.login_heard, "I heard: \"{text}\"");
+    assert_eq!(es.login_refusal, "Anda, que te peinen para el lado.");
+    assert_eq!(en.login_refusal, "Off you go, and get your hair combed somewhere else.");
+    assert_eq!(es.login_pass, "Pasa, {name}.");
+    assert_eq!(en.login_pass, "Come in, {name}.");
+    assert_eq!(es.login_pass_anon, "Pasa.");
+    assert_eq!(en.login_pass_anon, "Come in.");
+    assert_eq!(es.login_nothing_heard, "No te he oído. Repite, si eso.");
+    assert_eq!(en.login_nothing_heard, "I heard nothing. Try again, if you like.");
+    assert_eq!(es.login_no_mic, "Sin micro: escribe, que también vale.");
+    assert_eq!(en.login_no_mic, "No mic: type it, that works too.");
+    assert_eq!(es.login_rec, "● rec");
+    assert_eq!(en.login_rec, "● rec");
+    assert_eq!(es.login_keys, "Tab micro · Enter entrar · esc salir");
+    assert_eq!(en.login_keys, "Tab mic · Enter in · esc quit");
+    assert_eq!(es.login_keys_lost, "Tab micro · Enter entrar · ¿olvidado? [login] en config.toml");
+    assert_eq!(en.login_keys_lost, "Tab mic · Enter in · forgotten it? [login] in config.toml");
+}
