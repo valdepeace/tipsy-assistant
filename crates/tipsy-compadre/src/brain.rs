@@ -124,6 +124,32 @@ impl Brain {
         }
     }
 
+    /// One transcription with the turn pipeline's own timeout and error mapping, and **no turn**:
+    /// nothing is asked of the chat provider, nothing is spoken, and the history is not touched. The
+    /// login screen's voice path is the only caller (spec `2026-10-11-login-screen-design.md`, §4.1).
+    /// Reusing `TurnInput::Utterance` instead would have answered the login out loud and written it
+    /// into the conversation.
+    pub async fn transcribe_once(
+        &self,
+        pcm: Pcm,
+        out: &UnboundedSender<ToClient>,
+        cancel: &CancellationToken,
+    ) -> Option<String> {
+        let providers = self.providers.current();
+        match self.transcribe(&providers, pcm, cancel).await {
+            // Empty text is a failure the user can act on ("nothing was heard"), not an answer.
+            Transcribed::Text(text) if text.trim().is_empty() => {
+                error(out, ErrorCode::NothingHeard, "nothing was heard", true);
+                None
+            }
+            Transcribed::Text(text) => Some(text),
+            Transcribed::Failed(failure) => {
+                report(out, &failure);
+                None
+            }
+        }
+    }
+
     /// `Ask`: stream the reply and speak whole sentences as they arrive, in the order the model
     /// wrote them.
     async fn answer(
