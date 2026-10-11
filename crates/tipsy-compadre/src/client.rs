@@ -11,8 +11,10 @@ use ratatui::crossterm::event::{
     self, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use tipsy_protocol::{Capability, Command, Event, Frame, ToClient, ToServer};
-use tipsy_ui::{ClockView, ConfigEffect, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw};
+use tipsy_protocol::{Capability, Command, ConfigView, Event, Frame, ToClient, ToServer};
+use tipsy_ui::{
+    ClockView, ConfigEffect, ConfigForm, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::device::{Mic, Player};
@@ -24,8 +26,11 @@ use crate::keys::{env_var_name, KeyResolver};
 use crate::providers::{build_one, build_providers, ProviderSlot};
 use crate::realtime::{Call, CallSetup, Heard};
 use crate::server::Hub;
-use crate::session::SessionPolicy;
+use crate::session::{SessionEnds, SessionPolicy};
 use crate::sysmon;
+
+/// The client's own half of the socket bridge: the `--connect` path's three channel ends.
+pub mod bridge;
 
 /// One frame of the HUD.
 const FRAME: Duration = Duration::from_millis(33);
@@ -41,37 +46,80 @@ pub fn run(config_path: PathBuf) -> Result<(), String> {
     let keys = KeyResolver::system();
     // One stack, shared with the session from here on: a save swaps the connectors inside it.
     let providers = ProviderSlot::new(build_providers(&config.providers, &keys).map_err(|e| e.to_string())?);
-
     let mut client = Client::new(config, config_path, keys, providers);
-    // `init` enters the alternate screen, enables raw mode and installs the panic hook that
-    // restores the terminal; `restore` undoes all of it.
-    let mut terminal = ratatui::init();
-    // Mouse capture is not part of a bare terminal: without it the clickable titles do nothing.
-    let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    if let Some(warning) = loaded.warning {
-        client.state.notify(warning);
+    // The in-process client's own hub: no listener, one session, and a save from the screen still
+    // reaches it through the same three commands the server uses. It is built here and held for the
+    // whole of `terminal`, because a hub is its registry of live sessions: the session spawned from
+    // it answers configuration commands *through* this handle, so a handle that went out of scope
+    // before the frame loop would leave that session with no registry to write to.
+    let hub = Hub::new(
+        client.config.clone(),
+        client.config_path.clone(),
+        client.keys.clone().unwrap_or_else(KeyResolver::system),
+        client.providers.clone().expect("`Client::new` is built with a provider stack"),
+    );
+    let ends = hub.spawn(SessionPolicy::local());
+    client.terminal(ends, Some(hub), loaded.warning)
+}
+
+/// The `--connect` run: the same TUI, whose two channels come from a socket instead of this process.
+///
+/// The socket is opened *before* the terminal is entered, so a refusal — no token on an exposed
+/// server, the wrong token, a protocol mismatch — is a line on an ordinary terminal rather than a
+/// half-drawn alternate screen (success criterion 2). Nothing on this path builds a provider or
+/// touches the credential store (spec §7.2): the server owns both.
+pub async fn run_remote(url: String, token: Option<String>) -> Result<(), String> {
+    let path = store::default_path();
+    let loaded = store::load_or_create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let ends = bridge::connect(&url, token.as_deref()).await.map_err(|e| e.to_string())?;
+    // W11: the client keeps its own system monitor in `--connect` mode. The server's bridge does not
+    // spawn one for a remote peer, so this stays the only producer of `Stats` on this channel.
+    sysmon::spawn(ends.events.clone());
+    let mut client = Client::remote(loaded.config, path, url);
+    client.terminal(ends, None, loaded.warning)
+}
+
+/// Which process runs the session this HUD draws: this one, or a server behind a socket.
+#[derive(Clone, PartialEq, Eq)]
+enum Attachment {
+    /// The bare run: a session spawned from this process's own hub, with the connectors built here.
+    InProcess,
+    /// `--connect`: a socket to a server that owns the session, the connectors and the keys. The
+    /// token is deliberately not kept — it went into `Hello`, and nothing else needs it.
+    Remote { url: String },
+}
+
+impl Attachment {
+    fn is_remote(&self) -> bool {
+        matches!(self, Attachment::Remote { .. })
     }
-    client.open_player();
-    let outcome = client.frame_loop(&mut terminal);
-    let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
-    ratatui::restore();
-    outcome
+
+    /// How to name the other end in a notice. Never the token: it is not in this value.
+    fn describe(&self) -> String {
+        match self {
+            Attachment::InProcess => "this process".to_string(),
+            Attachment::Remote { url } => url.clone(),
+        }
+    }
 }
 
 /// Everything the client keeps from one frame to the next.
 struct Client {
     state: UiState,
     /// The configuration the running session was built from: a save that worked replaces it, so the
-    /// client always holds the configuration the file holds.
+    /// client always holds the configuration the file holds. In `--connect` mode it is this
+    /// machine's own `config.toml` — the microphone gain lives there — and the screen's content is
+    /// the server's from the first `Event::Config` on.
     config: Config,
     /// Where the screen writes, and where it reads every time it opens.
     config_path: PathBuf,
-    /// The resolver the connectors are built with: the one the app started with. Shared rather than
-    /// owned because a live call's socket task resolves the key *name* itself, on every reopen, and
-    /// `KeyResolver` is not `Clone` (`CallSetup::resolver` is an `Arc` of it).
-    keys: Arc<KeyResolver>,
-    /// The live provider stack, shared with the session.
-    providers: ProviderSlot,
+    /// The resolver the connectors are built with: `None` for the whole of a `--connect` run, which
+    /// is what makes "this client resolves no key" a fact of the type rather than a promise.
+    keys: Option<KeyResolver>,
+    /// The live provider stack, shared with the session. `None` for the whole of a `--connect` run.
+    providers: Option<ProviderSlot>,
+    /// Which process runs the session, which is what every configuration action branches on.
+    attachment: Attachment,
     /// `None` when there is no output device: the HUD still works, silently.
     player: Option<Player>,
     /// The audio of the reply being spoken, kept for `Replay` until a new turn starts.
@@ -102,8 +150,9 @@ impl Client {
             state: UiState::new(),
             config,
             config_path,
-            keys: Arc::new(keys),
-            providers,
+            keys: Some(keys),
+            providers: Some(providers),
+            attachment: Attachment::InProcess,
             player: None,
             reply: Vec::new(),
             call: None,
@@ -117,6 +166,59 @@ impl Client {
         }
     }
 
+    /// The `--connect` client: no resolver, no provider stack, and no way to reach either, because
+    /// both fields stay `None` for the whole run (Task 1.7's audit test).
+    ///
+    /// `config` is still read from this machine's `config.toml`: it carries what belongs to *this*
+    /// machine — the microphone gain — and the screen's content is the server's from the first
+    /// `Event::Config` on. Nothing here acts on its provider rows.
+    fn remote(config: Config, config_path: PathBuf, url: String) -> Self {
+        let (mic_tx, mic_frames) = std::sync::mpsc::sync_channel(MIC_QUEUE);
+        let mic_gain = config.listening.mic_gain;
+        Self {
+            state: UiState::new(),
+            config,
+            config_path,
+            keys: None,
+            providers: None,
+            attachment: Attachment::Remote { url },
+            player: None,
+            reply: Vec::new(),
+            call: None,
+            login_mic: false,
+            events: None,
+            rate: 24000,
+            mic_gain,
+            mic: None,
+            mic_frames,
+            mic_tx,
+        }
+    }
+
+    /// The terminal half both entry points share: the alternate screen, mouse capture, the warning,
+    /// the output device and the frame loop. Keeping it in one place is what stops the two runs
+    /// drifting apart in how they own the terminal.
+    ///
+    /// `hub` is `Some` for a bare run and `None` for a `--connect` one, and it is only *held* here:
+    /// nothing in the loop reads it, but the in-process session answers its configuration commands
+    /// through it, so it has to outlive the loop.
+    fn terminal(&mut self, ends: SessionEnds, hub: Option<Hub>, warning: Option<String>) -> Result<(), String> {
+        // `init` enters the alternate screen, enables raw mode and installs the panic hook that
+        // restores the terminal; `restore` undoes all of it.
+        let mut terminal = ratatui::init();
+        // Mouse capture is not part of a bare terminal: without it the clickable titles do nothing.
+        let _ = execute!(std::io::stdout(), EnableMouseCapture);
+        if let Some(warning) = warning {
+            self.state.notify(warning);
+        }
+        self.open_player();
+        let outcome = self.frame_loop(&mut terminal, ends);
+        let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
+        ratatui::restore();
+        drop(hub);
+        outcome
+    }
+
     /// Opens the default output device. A machine without one keeps a silent HUD.
     fn open_player(&mut self) {
         match Player::new() {
@@ -126,26 +228,10 @@ impl Client {
     }
 
     /// The frame loop: input, messages from the session, audio and drawing, about 30 times a second.
-    fn frame_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
-        // The in-process client's own hub: no listener, one session, and a save from the screen still
-        // reaches it through the same three commands the server uses. The hub takes the provider
-        // stack, so this is the one slot the client's `Player`, its `Test` probe and the session all
-        // read.
-        //
-        // The resolver is the system one, built here rather than borrowed from `self.keys`:
-        // `KeyResolver` is not `Clone` (two boxed trait objects, `keys.rs:79-82`), and it is the same
-        // resolver `main.rs:75` already builds — environment first, then the OS credential store — so
-        // a key the hub stores for `SetKey` is the key the `Test` probe resolves.
-        let hub = Hub::new(
-            self.config.clone(),
-            self.config_path.clone(),
-            KeyResolver::system(),
-            self.providers.clone(),
-        );
-        let ends = hub.spawn(SessionPolicy::local());
-        // `self.providers` and `hub.providers()` are the same slot; after this line the client reads
-        // the stack through the hub, so a `reconfigure_all` reaches the `Test` probe too.
-        self.providers = hub.providers();
+    ///
+    /// The three ends come from wherever the session lives: `Hub::spawn` in this process for a bare
+    /// run, a socket for a `--connect` one. Nothing below this line can tell the two apart (W6).
+    fn frame_loop(&mut self, terminal: &mut ratatui::DefaultTerminal, ends: SessionEnds) -> Result<(), String> {
         let to_server = ends.to_server;
         let mut from_server = ends.from_server;
         // A second sender for the same client channel: the system monitor and the screen's Test
@@ -196,7 +282,7 @@ impl Client {
             self.state.tick(dt);
 
             while let Ok(message) = from_server.try_recv() {
-                self.on_message(message);
+                self.on_message(&to_server, message);
             }
             // The capture first, then the device, then the frames: the login's state says whether
             // there is a microphone at all, `sync_mic` opens it (or finds out that it cannot), and
@@ -231,11 +317,31 @@ impl Client {
         Ok(())
     }
 
-    fn on_message(&mut self, message: ToClient) {
+    /// `to_server` is what a remote configuration event answers on: `ConfigChanged` carries no
+    /// payload, so the client has to ask with `GetConfig` (spec §4.4).
+    fn on_message(&mut self, to_server: &UnboundedSender<ToServer>, message: ToClient) {
         match message {
             ToClient::Event(event) => {
                 if let Event::SpeechChunk { sample_rate, .. } = &event {
                     self.rate = *sample_rate;
+                }
+                // A remote screen follows the server's configuration: `GetConfig` when it opens, and
+                // again whenever the server says something changed — `Event::ConfigChanged` carries
+                // no payload by design (spec §4.4). The answer arrives as `Event::Config`.
+                if let Event::Config { config } = &event
+                    && self.attachment.is_remote()
+                {
+                    // Two shapes, one conversion in: the screen draws with `tipsy_ui::ConfigForm` and
+                    // the wire carries `tipsy_protocol::ConfigView`, and `From` is the only bridge
+                    // between them (§4.3). Nothing is redacted here: the server decided what this
+                    // client may see before it sent it, with `ConfigView::redacted`.
+                    self.state.show_config_form(ConfigForm::from(config.as_ref().clone()));
+                }
+                if matches!(&event, Event::ConfigChanged)
+                    && self.attachment.is_remote()
+                    && self.state.config_form.is_some()
+                {
+                    let _ = to_server.send(ToServer::Command(Command::GetConfig));
                 }
                 // A Test result belongs to the screen's notice line, not to the HUD's log: the
                 // answer stays beside the rows it is about. `UiState::apply` deliberately has
@@ -336,7 +442,13 @@ impl Client {
         if !realtime.enabled {
             return Err(self.state.strings().live_off.to_string());
         }
-        if self.keys.resolve(&realtime.key).map_err(|e| e.to_string())?.is_none() {
+        // A `--connect` client holds no resolver: the keys are the server's, and a call is opened
+        // here, in this process. Refused as a sentence rather than a panic, because the mode is never
+        // silently on (Review Focus 3).
+        let Some(keys) = &self.keys else {
+            return Err("a remote client holds no keys; live calls run in the client that owns them".to_string());
+        };
+        if keys.resolve(&realtime.key).map_err(|e| e.to_string())?.is_none() {
             return Err(format!(
                 "no key named `{}`: set {} or store it",
                 realtime.key,
@@ -347,7 +459,7 @@ impl Client {
         // Whatever the session was still saying belongs to the pipeline the call replaces.
         self.flush_playback();
         self.call = Some(Call::open(
-            CallSetup::from_config(&self.config, Arc::clone(&self.keys), realtime.key),
+            CallSetup::from_config(&self.config, Arc::new(keys.clone()), realtime.key),
             Heard::new(),
             events,
         ));
@@ -556,9 +668,10 @@ impl Client {
             }
             // The screen asks for a form it cannot build: `tipsy-ui` owns no native type. The file
             // is read here and now, which is what keeps a hand-edited `config.toml` from being
-            // served out of a copy taken at startup.
+            // served out of a copy taken at startup — and over a socket the *server's* configuration
+            // is what the screen shows, which is why this arm branches first.
             UiAction::OpenConfig => {
-                self.open_screen();
+                self.open_screen(to_server);
                 false
             }
             // Every other screen action goes through the form's own reducer, and the effects it asks
@@ -612,7 +725,13 @@ impl Client {
     /// where the user reads it — the screen's own notice line, through [`Client::config_notice`] —
     /// and not into the header's status span, which the header's own layout is free to cut to zero
     /// columns while the screen is up.
-    fn open_screen(&mut self) {
+    ///
+    /// A remote client has no file to read for this: the screen that matters is the server's, so it
+    /// asks for it instead.
+    fn open_screen(&mut self, to_server: &UnboundedSender<ToServer>) {
+        if self.attachment.is_remote() {
+            return self.open_screen_remote(to_server);
+        }
         match store::load_or_create(&self.config_path) {
             Ok(loaded) => {
                 let mut form = form_of(&loaded.config);
@@ -640,9 +759,23 @@ impl Client {
         match effect {
             ConfigEffect::None => {}
             ConfigEffect::Save => self.save(to_server),
-            ConfigEffect::Test(capability) => self.test_provider(capability, events),
+            // The Test needs the sender now: over a socket the probe runs on the server.
+            ConfigEffect::Test(capability) => self.test_provider(capability, to_server, events),
             ConfigEffect::RegenerateToken => self.regenerate_token(),
         }
+    }
+
+    /// The `--connect` open: the server is asked for its configuration, and until the answer arrives
+    /// the screen shows this client's own copy with a notice that says so. Opening on nothing at all
+    /// would make `F9` look broken for a round trip.
+    fn open_screen_remote(&mut self, to_server: &UnboundedSender<ToServer>) {
+        let mut form = form_of(&self.config);
+        form.notice = Some((
+            NoticeKind::Warning,
+            format!("asking {} for its configuration", self.attachment.describe()),
+        ));
+        self.state.show_config_form(form);
+        let _ = to_server.send(ToServer::Command(Command::GetConfig));
     }
 
     /// Runs the screen's Test against the row on screen and reports the answer into the client's own
@@ -652,7 +785,22 @@ impl Client {
     /// answered at once, with no latency and without a single request — which is what makes "no key"
     /// a different answer from "the provider refused". The probe itself runs on a task of its own,
     /// so the HUD never waits for a provider.
-    fn test_provider(&mut self, capability: Capability, events: &UnboundedSender<ToClient>) {
+    fn test_provider(
+        &mut self,
+        capability: Capability,
+        to_server: &UnboundedSender<ToServer>,
+        events: &UnboundedSender<ToClient>,
+    ) {
+        if self.attachment.is_remote() {
+            // The providers and the keys are the server's, so the probe is too (spec §6.2). The
+            // answer comes back as `Event::TestResult` through the socket and lands in the same
+            // notice line as any other result.
+            let _ = to_server.send(ToServer::Command(Command::TestProvider { capability }));
+            return;
+        }
+        // The two fields are `Some` together for the whole of a bare run, and the guard above has
+        // already sent every remote Test to the server, so neither of these can fail here.
+        let Some(keys) = &self.keys else { return };
         // The row the user is looking at, converted the way a save converts it: a Test can never
         // quietly use a connector other than the one on screen.
         let converted = self
@@ -667,7 +815,7 @@ impl Client {
             Some(Err(message)) => return self.config_notice(NoticeKind::Error, message),
             Some(Ok(cfg)) => cfg,
         };
-        let connector = match build_one(&cfg, capability, &self.keys) {
+        let connector = match build_one(&cfg, capability, keys) {
             Ok(connector) => connector,
             Err(e) => {
                 // No request is made, so there is no latency to report; the message is the builder's
@@ -703,7 +851,14 @@ impl Client {
     /// written until every row parses and every key resolves, because a `config.toml` the app cannot
     /// start from is damage rather than a saved edit; and a refused write leaves the file, the
     /// running stack and the session exactly as they were.
+    ///
+    /// Over a socket none of that is this process's to do: the file, the keys and the connectors are
+    /// the server's, so the form goes over the wire and the answer comes back as a fresh
+    /// `Event::Config` (spec §6.2).
     fn save(&mut self, to_server: &UnboundedSender<ToServer>) {
+        if self.attachment.is_remote() {
+            return self.save_remote(to_server);
+        }
         // 1. The form in the file's shape.
         let parsed = self.state.config_form.as_ref().map(config_from);
         let config = match parsed {
@@ -712,7 +867,12 @@ impl Client {
             Some(Ok(config)) => config,
         };
         // 2. The connectors that configuration names.
-        let rebuilt = match build_providers(&config.providers, &self.keys) {
+        let (Some(keys), Some(providers)) = (&self.keys, &self.providers) else {
+            // Unreachable while `Attachment::InProcess` owns the two `Some`s; the guard is what
+            // keeps a remote client from ever reaching a builder.
+            return;
+        };
+        let rebuilt = match build_providers(&config.providers, keys) {
             Ok(providers) => providers,
             Err(e) => return self.config_notice(NoticeKind::Error, e.to_string()),
         };
@@ -722,13 +882,35 @@ impl Client {
         }
         // 4. What is running: the stack in place, then the fields the channel carries.
         self.mic_gain = config.listening.mic_gain;
-        self.providers.replace(rebuilt);
+        providers.replace(rebuilt);
         let _ = to_server.send(ToServer::Command(Command::SetListeningMode { mode: config.listening.mode }));
         let _ = to_server.send(ToServer::Command(Command::SetProfile { id: config.active_profile.clone() }));
         self.config = config;
         if let Some(form) = self.state.config_form.as_mut() {
             form.dirty = false;
             form.notice = None;
+        }
+    }
+
+    /// The `--connect` save: the server owns the file, the keys and the connectors, so this sends the
+    /// form and nothing else (spec §6.2). No local `build_providers` — this client holds no key — and
+    /// no local `store::save`: a second copy of the server's configuration on another machine is a
+    /// second source of truth, and the server answers `ConfigChanged` to everyone when it saves.
+    ///
+    /// The server may refuse the view, and a refused view is **silent** — the hub writes nothing and
+    /// says nothing (spec §4.2) — so this client's own screen keeps the refusal it had and the notice
+    /// below is a statement about what was *sent*, never a claim that it was saved.
+    fn save_remote(&mut self, to_server: &UnboundedSender<ToServer>) {
+        let Some(form) = self.state.config_form.as_ref() else { return };
+        // Two shapes, one conversion out: the screen's form is not the wire's view (§4.3).
+        let config = ConfigView::from(form);
+        let _ = to_server.send(ToServer::Command(Command::UpdateConfig { config: Box::new(config) }));
+        if let Some(form) = self.state.config_form.as_mut() {
+            form.dirty = false;
+            form.notice = Some((
+                NoticeKind::Warning,
+                format!("sent to {}; this client's own config.toml is unchanged", self.attachment.describe()),
+            ));
         }
     }
 
@@ -1035,7 +1217,8 @@ mod tests {
     #[test]
     fn a_login_capture_with_no_stream_forwards_no_audio_at_all() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
         assert!(client.login_capture(), "the screen wants a capture");
         assert!(client.mic.is_none(), "and the device cannot be opened by a test");
         let wanted = mic_wanted(client.state.mic_open, false, client.login_capture());
@@ -1079,14 +1262,14 @@ mod tests {
     fn the_login_screen_leaves_the_huds_microphone_switch_alone() {
         for before in [false, true] {
             let mut client = mock_client();
+            let (to_server, mut commands) = tokio::sync::mpsc::unbounded_channel();
             client.state.mic_open = before;
-            client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+            client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
             assert_eq!(sync_login(&mut client), vec![Command::LoginStart], "before = {before}");
             assert_eq!(client.state.mic_open, before, "the screen does not touch the user's switch");
 
             // The door: the screen goes, the capture goes, and what the microphone returns to is the
             // switch's own value — the "unless the listening mode wants it open" the spec asks for.
-            let (to_server, mut commands) = tokio::sync::mpsc::unbounded_channel();
             let (events, _results) = tokio::sync::mpsc::unbounded_channel();
             client.on_action(UiAction::LoginDone, &to_server, &events);
             client.sync_login_mic(&to_server);
@@ -1109,16 +1292,17 @@ mod tests {
     #[test]
     fn a_login_view_shows_the_screen_and_no_login_view_goes_straight_to_the_hud() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(None)));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(welcome(None)));
         assert!(client.state.login.is_none(), "no login view is no screen");
         assert!(sync_login(&mut client).is_empty(), "and nothing to open");
 
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: false }))));
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: false }))));
         let login = client.state.login.as_ref().expect("a login view is the screen");
         assert!(!login.voice, "and it carries the screen's own switch");
 
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
         let login = client.state.login.as_ref().expect("a login view is the screen");
         assert!(login.voice);
         assert!(login.open, "the screen opens listening, without a key");
@@ -1130,7 +1314,8 @@ mod tests {
     #[test]
     fn the_voice_switch_off_opens_no_stream_and_sends_nothing() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: false }))));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: false }))));
         assert!(sync_login(&mut client).is_empty(), "there is no capture to start");
         assert!(!client.state.mic_open, "and no microphone to light the badge");
         assert!(client.mic.is_none(), "and no device open");
@@ -1144,12 +1329,13 @@ mod tests {
     #[test]
     fn the_capture_opens_and_closes_with_the_login_state() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
         assert_eq!(sync_login(&mut client), vec![Command::LoginStart]);
         // The three refusals in a row shut the capture from the screen's own state, and the client
         // follows it on the next reconciliation.
         for _ in 0..LOGIN_AUTO_REARM {
-            client.on_message(ToClient::Event(Event::LoginVerdict { ok: false, name: None }));
+            client.on_message(&to_server, ToClient::Event(Event::LoginVerdict { ok: false, name: None }));
         }
         let login = client.state.login.as_ref().unwrap();
         assert!(!login.open, "the third refusal stops the automatic re-arm");
@@ -1198,19 +1384,20 @@ mod tests {
     #[test]
     fn a_second_welcome_leaves_the_login_screen_alone() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
         for c in "andres".chars() {
             client.state.on_key(KeyInput::Char(c));
         }
         for _ in 0..2 {
-            client.on_message(ToClient::Event(Event::LoginVerdict { ok: false, name: None }));
+            client.on_message(&to_server, ToClient::Event(Event::LoginVerdict { ok: false, name: None }));
         }
         let typed = client.state.login.clone().unwrap();
         assert_eq!(typed.input, "andres");
         assert_eq!(typed.refusals, 2);
 
         // The session re-announces itself, as `SetProfile` and `SetListeningMode` make it do.
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
 
         let after = client.state.login.clone().expect("the screen is still up");
         assert_eq!(after, typed, "a second Welcome is not a second screen");
@@ -1228,14 +1415,14 @@ mod tests {
         let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
         let (events, _results) = tokio::sync::mpsc::unbounded_channel();
 
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
         assert!(client.state.login.is_some(), "the first Welcome shows the screen");
 
         client.on_action(UiAction::LoginDone, &to_server, &events);
         assert!(client.state.login.is_none(), "the door opens");
 
         // Exactly what `SetProfile` and `SetListeningMode` make the session send.
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
         assert!(client.state.login.is_none(), "and the screen does not come back");
         assert!(client.state.login_seen, "the run remembers that it was asked");
     }
@@ -1247,11 +1434,12 @@ mod tests {
     #[test]
     fn a_pass_sends_login_stop_and_ends_the_capture() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: true }))));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: true }))));
         assert!(client.login_capture(), "the capture opens with the screen");
         assert_eq!(sync_login(&mut client), vec![Command::LoginStart], "and the server is told");
 
-        client.on_message(ToClient::Event(Event::LoginVerdict { ok: true, name: Some("Andrés".into()) }));
+        client.on_message(&to_server, ToClient::Event(Event::LoginVerdict { ok: true, name: Some("Andrés".into()) }));
 
         assert!(!client.login_capture(), "the pass ends the capture");
         assert_eq!(sync_login(&mut client), vec![Command::LoginStop], "and the server hears about it");
@@ -1263,8 +1451,9 @@ mod tests {
     #[test]
     fn a_login_verdict_without_a_screen_touches_nothing() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(Event::LoginVerdict { ok: true, name: Some("Andrés".into()) }));
-        client.on_message(ToClient::Event(Event::LoginHeard { text: "andres del core".into() }));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(Event::LoginVerdict { ok: true, name: Some("Andrés".into()) }));
+        client.on_message(&to_server, ToClient::Event(Event::LoginHeard { text: "andres del core".into() }));
         assert!(client.state.login.is_none());
         assert!(!client.state.mic_open);
         assert!(client.mic.is_none());
@@ -1278,12 +1467,13 @@ mod tests {
     #[test]
     fn a_failed_answer_turns_the_capture_off() {
         let mut client = mock_client();
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
         client.state.mic_open = true;
         client.state.show_login(true);
         client.state.login.as_mut().unwrap().open = true;
         assert_eq!(sync_login(&mut client), vec![Command::LoginStart]);
 
-        client.on_message(ToClient::Event(Event::Error {
+        client.on_message(&to_server, ToClient::Event(Event::Error {
             code: tipsy_protocol::ErrorCode::NoKey,
             message: "no key named `openrouter`".into(),
             recoverable: true,
@@ -1303,7 +1493,8 @@ mod tests {
     #[test]
     fn the_login_screen_swallows_the_huds_keys() {
         let mut client = mock_client();
-        client.on_message(ToClient::Event(welcome(Some(LoginView { voice: false }))));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(welcome(Some(LoginView { voice: false }))));
         assert!(client.state.on_key(KeyInput::F(9)).is_empty(), "no second screen while the door is shut");
         assert!(client.state.config_form.is_none());
         assert_eq!(client.state.on_key(KeyInput::Esc), vec![UiAction::Quit]);
@@ -1370,8 +1561,9 @@ mod tests {
         let keys = resolver();
         let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
         let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
-        client.on_message(ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
-        client.on_message(ToClient::Audio(Frame::Speech { seq: 0, samples: vec![5, 6] }));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
+        client.on_message(&to_server, ToClient::Audio(Frame::Speech { seq: 0, samples: vec![5, 6] }));
         // There is no output device in a test — `Player::new` needs one — so the playback itself is
         // skipped; what is pinned is the rate it would be handed, which is the announced one and
         // never a guess about which mode is running.
@@ -1391,7 +1583,8 @@ mod tests {
         let keys = resolver();
         let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
         let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
-        client.on_message(ToClient::Event(Event::Live { active: false }));
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.on_message(&to_server, ToClient::Event(Event::Live { active: false }));
         assert!(client.call.is_none(), "there was no call, and none is invented");
     }
 
@@ -1407,6 +1600,84 @@ mod tests {
         assert!(client.call.is_none(), "Review Focus 3: the mode is never silently on");
     }
 
+    /// Plan 3 Task 1.7's audited rule: the `--connect` client must not start a server, must not build a
+    /// provider and must not read the credential store (spec §7.2, §6.2).
+    ///
+    /// The instrument is `providers::builds_on_this_thread`, a counter bumped at the top of
+    /// `build_providers` and `build_one`; it is a thread-local because this binary's other tests build
+    /// providers on purpose, on other threads, at the same time. The first half of the test drives the
+    /// in-process path so a counter that never moves cannot make the audit pass by accident — and it is
+    /// an async test because that half's Test runs its probe on a task of its own.
+    #[tokio::test]
+    async fn the_remote_path_builds_no_provider_and_asks_the_server_instead() {
+        let config = mock_config("http://127.0.0.1:9");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // The file this machine owns, written before anything runs: a remote save must leave it byte
+        // for byte as it is, because the server's configuration is not this machine's to keep.
+        store::save(&path, &config).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        // The instrument first: the in-process Test does resolve a key and build a connector.
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let mut local = Client::new(config.clone(), path.clone(), keys, slot);
+        local.state.show_config_form(form_of(&config));
+        local.state.config_form.as_mut().unwrap().field = 0;
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
+        let before_builds = crate::providers::builds_on_this_thread();
+        local.on_action(UiAction::Config(ConfigAction::Test), &to_server, &events);
+        assert!(
+            crate::providers::builds_on_this_thread() > before_builds,
+            "the instrument must see the in-process Test build its connector, or this test proves nothing"
+        );
+
+        // And now the remote path: opening the screen, testing and saving, with no resolver and no stack.
+        let mut remote = Client::remote(config, path.clone(), "ws://127.0.0.1:7070/ws".into());
+        let mut form = form_of(&mock_config("http://127.0.0.1:9"));
+        // `form_of` marks the form filled — the file was read — and Save is refused on a form that is
+        // not, exactly as the screen's own reducer refuses it.
+        assert!(form.filled(), "the screen's save is only reachable from a filled form");
+        form.field = 0;
+        remote.state.show_config_form(form);
+        let (to_server, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
+
+        let before_builds = crate::providers::builds_on_this_thread();
+        remote.open_screen(&to_server);
+        press_test(&mut remote, &to_server, &events);
+        remote.on_action(UiAction::Config(ConfigAction::Save), &to_server, &events);
+        assert_eq!(
+            crate::providers::builds_on_this_thread(),
+            before_builds,
+            "the remote path built a provider stack, which means it read a key it must not read"
+        );
+        assert!(results.try_recv().is_err(), "a remote Test must not answer locally");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a remote save must not write this machine's config.toml: the server owns the file"
+        );
+
+        // The three effects went to the server as the three commands, in order (spec §6.2).
+        let mut sent = Vec::new();
+        while let Ok(ToServer::Command(command)) = commands.try_recv() {
+            sent.push(command);
+        }
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [
+                    Command::GetConfig,
+                    Command::TestProvider { capability: Capability::Chat },
+                    Command::UpdateConfig { .. },
+                ]
+            ),
+            "{sent:?}"
+        );
+    }
+
     #[test]
     fn a_finished_reply_keeps_its_audio_until_a_new_turn_starts() {
         let (to_server, _from_client) = tokio::sync::mpsc::unbounded_channel();
@@ -1415,16 +1686,16 @@ mod tests {
         let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
         let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
 
-        client.on_message(ToClient::Event(Event::Status { state: AssistantState::Speaking, detail: None }));
-        client.on_message(ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
-        client.on_message(ToClient::Audio(Frame::Speech { seq: 0, samples: vec![7, 8, 9] }));
-        client.on_message(ToClient::Event(Event::Reply { text: "Aquí andamos.".into() }));
-        client.on_message(ToClient::Event(Event::Done { first_audio_ms: Some(1), total_ms: 2 }));
+        client.on_message(&to_server, ToClient::Event(Event::Status { state: AssistantState::Speaking, detail: None }));
+        client.on_message(&to_server, ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
+        client.on_message(&to_server, ToClient::Audio(Frame::Speech { seq: 0, samples: vec![7, 8, 9] }));
+        client.on_message(&to_server, ToClient::Event(Event::Reply { text: "Aquí andamos.".into() }));
+        client.on_message(&to_server, ToClient::Event(Event::Done { first_audio_ms: Some(1), total_ms: 2 }));
         assert_eq!(client.reply, vec![7, 8, 9], "`F2` has the reply as soon as it is spoken");
 
         // The idle that ends every normal reply: the device is still speaking, so it must keep both
         // the queue and what `F2` replays.
-        client.on_message(ToClient::Event(Event::Status { state: AssistantState::Idle, detail: None }));
+        client.on_message(&to_server, ToClient::Event(Event::Status { state: AssistantState::Idle, detail: None }));
         assert_eq!(client.reply, vec![7, 8, 9], "a normal `Speaking -> Idle` keeps the last reply");
 
         let (events, _results) = tokio::sync::mpsc::unbounded_channel();
@@ -1466,8 +1737,10 @@ mod tests {
         let keys = resolver();
         let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
         let mut client = Client::new(config.clone(), path.clone(), keys, slot);
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
 
-        client.open_screen();
+        client.open_screen(&to_server);
+
         let first = client.state.config_form.as_ref().unwrap();
         assert_eq!(first.listening.silence_ms, "1000");
         assert!(first.server.token.is_empty());
@@ -1478,7 +1751,7 @@ mod tests {
         edited.server.token = "pasted-by-hand".into();
         store::save(&path, &edited).unwrap();
 
-        client.open_screen();
+        client.open_screen(&to_server);
         let second = client.state.config_form.as_ref().unwrap();
         assert_eq!(second.listening.silence_ms, "4321", "the screen must read the file again");
         assert_eq!(second.server.token, "pasted-by-hand");
@@ -1679,10 +1952,10 @@ mod tests {
         let keys = resolver();
         let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
         let mut client = Client::new(config, path.clone(), keys, slot);
-        client.open_screen();
+        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
+        client.open_screen(&to_server);
         assert!(client.state.config_form.as_ref().unwrap().server.token.is_empty());
 
-        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
         let (events, _results) = tokio::sync::mpsc::unbounded_channel();
         client.on_action(UiAction::Config(ConfigAction::RegenerateToken), &to_server, &events);
 
@@ -1757,7 +2030,7 @@ mod tests {
         assert!(ok, "the provider answered: {text}");
         assert!(latency_ms >= 20, "the latency must be the measured one, got {latency_ms}");
 
-        client.on_message(message);
+        client.on_message(&to_server, message);
         let (kind, notice) = client.state.config_form.as_ref().unwrap().notice.clone().unwrap();
         assert_eq!(kind, NoticeKind::Ok);
         assert!(notice.starts_with("chat: "), "{notice}");
@@ -1799,7 +2072,7 @@ mod tests {
         );
         assert!(server.received_requests().await.unwrap().is_empty(), "no key must not become a request");
 
-        client.on_message(message);
+        client.on_message(&to_server, message);
         let (kind, notice) = client.state.config_form.as_ref().unwrap().notice.clone().unwrap();
         assert_eq!(kind, NoticeKind::Error);
         assert!(notice.contains("not-in-the-store"), "{notice}");
@@ -1916,7 +2189,7 @@ mod tests {
                 "a cancel is not an ending: {message:?}"
             );
             spoke = matches!(message, ToClient::Audio(Frame::Speech { .. }));
-            client.on_message(message);
+            client.on_message(&to_server, message);
         }
         assert!(client.call.is_some(), "the call is still the client's to end");
     }
