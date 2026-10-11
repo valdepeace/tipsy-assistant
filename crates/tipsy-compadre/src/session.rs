@@ -5,6 +5,7 @@
 //! oneshot — so the history has exactly one owner and a cancelled turn can never write into it.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tipsy_protocol::{AssistantState, Command, Event, Frame, ListeningMode, ProfileView, ToClient, ToServer, UiLanguage};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -16,6 +17,7 @@ use crate::audio::pcm::{i16_to_f32, Pcm};
 use crate::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use crate::config::Config;
 use crate::providers::{ChatMessage, ProviderSlot, Role};
+use crate::vad::{VadEvent, VadState};
 
 /// The session id reported to clients. There is one session per process for now.
 const SESSION_ID: u64 = 1;
@@ -24,6 +26,11 @@ const SESSION_ID: u64 = 1;
 /// exchanges: deep enough that a follow-up can still refer to what was said a while ago, shallow
 /// enough that the prompt — and what every turn costs — stops growing with the life of the session.
 const HISTORY_MAX_MESSAGES: usize = 40;
+
+/// The tail the detector stays paused for after the assistant stops speaking: spec §6's 300 ms.
+/// The turn's `Done` arrives while the device is still speaking the last sentence, which is what
+/// this is for.
+const GUARD: Duration = Duration::from_millis(300);
 
 /// Starts a session on its own task and returns the two ends of its channels.
 pub fn spawn_session(
@@ -54,6 +61,7 @@ pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: 
 
     let profile = config.active().clone();
     let listening_mode = config.listening.mode;
+    let listening_silence_ms = config.listening.silence_ms;
     let brain = Arc::new(Brain::new(providers.clone(), turn_profile(&config), brain_config.clone()));
 
     let mut session = Session {
@@ -67,6 +75,10 @@ pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: 
         generation: 0,
         listening: false,
         mic: Vec::new(),
+        vad: VadState::new(listening_silence_ms),
+        heard: false,
+        utterance: Vec::new(),
+        guard: None,
         profile: profile.view(),
         ui_language: UiLanguage::from_bcp47(&profile.language),
         listening_mode,
@@ -118,8 +130,16 @@ struct Session {
     generation: u64,
     /// True between `ListenStart` and `ListenStop`.
     listening: bool,
-    /// Mono 16 kHz samples gathered while listening.
+    /// Mono 16 kHz samples gathered while listening, in `push` mode.
     mic: Vec<i16>,
+    /// The `auto` mode detector, paused while the assistant speaks and for 300 ms after.
+    vad: VadState,
+    /// True from the frame that reports `SpeechStarted` until the one that reports `SpeechEnded`.
+    heard: bool,
+    /// The audio the detector confirmed: what `SpeechEnded` transcribes.
+    utterance: Vec<i16>,
+    /// When the 300 ms guard after the assistant's speech expires, if it is running.
+    guard: Option<Instant>,
     profile: ProfileView,
     ui_language: UiLanguage,
     listening_mode: ListeningMode,
@@ -134,6 +154,10 @@ impl Session {
         self.current = Some(self.start_turn(TurnInput::Say(greeting)));
 
         loop {
+            // The guard's deadline is read once per iteration, so the timer's branch borrows nothing
+            // the turn's branch is already borrowing. A turn that ends below arms the next
+            // iteration's deadline.
+            let guard = self.guard;
             tokio::select! {
                 // The running turn is polled first, so a turn that finished applies its history
                 // before the command that follows it is handled.
@@ -147,7 +171,7 @@ impl Session {
                 } => {
                     let history = result.ok();
                     if let Some(turn) = self.current.take() {
-                        self.finish_turn(turn, history);
+                        self.end_turn(turn, history);
                     }
                 }
                 message = rx.recv() => {
@@ -155,6 +179,18 @@ impl Session {
                         break;
                     };
                     self.handle(message, &mut rx);
+                }
+                // The 300 ms the detector waits out after the assistant stops speaking. A command
+                // arriving at the same moment is handled first, and the deadline has elapsed either
+                // way: this branch wins on the next turn of the loop.
+                () = async {
+                    match guard {
+                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                        // No guard runs: this branch can never win.
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.guard_elapsed();
                 }
             }
             // A turn that ended is settled here, where the borrow the select held is over. A turn
@@ -170,8 +206,24 @@ impl Session {
         if self.current.as_ref().is_some_and(|turn| turn.handle.is_finished()) {
             let mut turn = self.current.take().expect("checked just above");
             let history = (&mut turn.done).await.ok();
-            self.finish_turn(turn, history);
+            self.end_turn(turn, history);
         }
+    }
+
+    /// Ends a turn: records the history it produced, and arms the 300 ms guard the detector stays
+    /// paused for while the speaker drains what the turn has already sent it.
+    ///
+    /// Every path that ends a turn goes through here, because the guard is what lets the microphone
+    /// back in: a turn whose end did not arm it would leave the detector paused for good.
+    fn end_turn(&mut self, turn: Turn, produced: Option<Vec<ChatMessage>>) {
+        self.finish_turn(turn, produced);
+        self.guard = Some(Instant::now() + GUARD);
+    }
+
+    /// The guard elapsed: the speaker is quiet, so the microphone is the user's again.
+    fn guard_elapsed(&mut self) {
+        self.guard = None;
+        self.vad.resume();
     }
 
     /// Applies the history of a turn that ended, unless a `Reset` has since cleared the history.
@@ -216,12 +268,68 @@ impl Session {
             ToServer::Command(command) => self.command(command),
             ToServer::Audio(Frame::Mic(samples)) => {
                 // Frames arriving before `ListenStart` — or after `ListenStop` — belong to no turn.
-                if self.listening {
-                    self.mic.extend_from_slice(&samples);
+                if !self.listening {
+                    return;
+                }
+                match self.listening_mode {
+                    // `auto`: the detector decides what is an utterance (spec §6), and only what it
+                    // confirmed is ever transcribed.
+                    ListeningMode::Auto => self.detect(&samples),
+                    // `push`, and `hands_free` until Plan 4 implements it: the client's frames are
+                    // the utterance, and `ListenStop` transcribes them.
+                    ListeningMode::Push | ListeningMode::HandsFree => self.mic.extend_from_slice(&samples),
                 }
             }
             ToServer::Audio(Frame::Speech { .. }) => {}
         }
+    }
+
+    /// Feeds one microphone frame to the detector and keeps only what it confirms.
+    ///
+    /// This function is Review Focus 2: nothing before `SpeechStarted` is kept, so the silence and
+    /// the room noise before the first syllable can never reach the transcriber; and `SpeechEnded`
+    /// closes the utterance and starts it, so the assistant's own voice — paused away by
+    /// `start_turn` — cannot open one either.
+    ///
+    /// The detector's own carry buffer and [`Session::utterance`] are not the same thing: the first
+    /// holds samples waiting for a 256-sample window, the second holds audio confirmed as the
+    /// user's.
+    fn detect(&mut self, samples: &[i16]) {
+        match self.vad.push(samples) {
+            VadEvent::SpeechStarted => {
+                self.heard = true;
+                // Nothing was kept before this frame: not the room tone and not the silence the
+                // user started speaking through.
+                self.utterance.clear();
+                self.utterance.extend_from_slice(samples);
+            }
+            VadEvent::SpeechEnded => {
+                self.heard = false;
+                // The frame that reports the end is the last of the hangover: it is part of the
+                // utterance, which is why it is pushed before the turn starts.
+                self.utterance.extend_from_slice(samples);
+                self.utterance_ended();
+            }
+            VadEvent::None => {
+                if self.heard {
+                    self.utterance.extend_from_slice(samples);
+                }
+            }
+        }
+    }
+
+    /// The detector says the user stopped talking: the audio it confirmed becomes the next turn.
+    fn utterance_ended(&mut self) {
+        let samples = std::mem::take(&mut self.utterance);
+        if samples.is_empty() {
+            // Nothing confirmed and nothing kept: no turn, and no transcription request for audio
+            // nobody heard.
+            return;
+        }
+        self.start(TurnInput::Utterance(Pcm {
+            samples: i16_to_f32(&samples),
+            sample_rate: MIC_SAMPLE_RATE,
+        }));
     }
 
     fn command(&mut self, command: Command) {
@@ -292,12 +400,35 @@ impl Session {
     fn listen_start(&mut self) {
         self.listening = true;
         self.mic.clear();
+        // A fresh hold-to-talk: whatever the detector had confirmed but not ended is not this
+        // utterance. The 300 ms guard is deliberately left alone — a `Tab` inside it opens the
+        // microphone while the detector stays paused, so the assistant's own tail cannot be heard
+        // as the user's first word.
+        self.utterance.clear();
+        self.heard = false;
         send(&self.out, status(AssistantState::Listening));
     }
 
+    /// `ListenStop`: the only way `push` mode ever ends an utterance, and the way `auto` mode ends
+    /// one of those the detector has not closed by itself.
     fn listen_stop(&mut self) {
         self.listening = false;
-        let samples = std::mem::take(&mut self.mic);
+        // What the detector confirmed and has not ended yet is the utterance the user just closed
+        // by hand. In `push` mode that is every frame the microphone sent since `ListenStart`: the
+        // buffer is taken here, which is also what empties it. Clearing it first — as this did —
+        // is what stopped `push` mode transcribing the audio it had gathered.
+        let samples = if self.listening_mode == ListeningMode::Auto {
+            self.heard = false;
+            std::mem::take(&mut self.utterance)
+        } else {
+            std::mem::take(&mut self.mic)
+        };
+        if samples.is_empty() {
+            // Nothing was heard: no turn, and no transcription request for silence. Pressing `Tab`
+            // twice in `auto` mode is the case this keeps free.
+            self.idle();
+            return;
+        }
         self.start(TurnInput::Utterance(Pcm {
             samples: i16_to_f32(&samples),
             sample_rate: MIC_SAMPLE_RATE,
@@ -306,7 +437,14 @@ impl Session {
 
     /// `Cancel`: stop the running turn without starting another one.
     fn cancel(&mut self) {
+        // The speaker keeps draining what the turn already sent it, so the detector stays paused for
+        // the tail a finished turn would have left, even though no new turn follows this one. Losing
+        // it would leave `auto` mode deaf until some later turn ended.
+        let cancelled = self.current.is_some();
         self.cancel_running();
+        if cancelled {
+            self.guard = Some(Instant::now() + GUARD);
+        }
         self.idle();
     }
 
@@ -315,6 +453,9 @@ impl Session {
         self.cancel_running();
         self.history.clear();
         self.mic.clear();
+        self.utterance.clear();
+        self.heard = false;
+        self.guard = None;
         self.listening = false;
         // A turn that ignored the cancellation must not restore what this just cleared.
         self.generation += 1;
@@ -341,6 +482,11 @@ impl Session {
 
     /// Spawns one turn with a fresh cancellation token and the history as it stands now.
     fn start_turn(&mut self, input: TurnInput) -> Turn {
+        // The assistant is about to speak, and the speaker is what the detector would otherwise
+        // hear. Pausing at the start of the turn also covers synthesis and transcription, which is
+        // stricter than spec §6's "while the session is speaking" and never lets a leak through.
+        self.vad.pause();
+        self.heard = false;
         self.generation += 1;
         let generation = self.generation;
         let cancel = CancellationToken::new();
