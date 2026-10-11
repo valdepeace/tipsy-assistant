@@ -8,12 +8,12 @@ community: a single executable, cloud providers that anyone can use with their o
 profiles that anyone can write for their own region.
 
 **Status: early development — terminal client only.** The workspace, the protocol, the
-configuration and the key handling, the OpenAI-compatible chat, speech and transcription
-providers, the brain and the native terminal client all work. Still to come: the configuration
-screen, the other profiles (`meigo`, `chulapo`, `good_ol_boy`…), the native Gemini and ElevenLabs
-connectors, the `auto` and `hands_free` listening modes, the WebSocket server, the web client and
-the web terminal, plus CI and releases. Today's listening mode is `push`: you open and close the
-microphone by hand.
+configuration and the key handling, the chat, speech and transcription providers (the
+OpenAI-compatible connector plus the native Gemini and ElevenLabs ones), the brain, the native
+terminal client and its configuration screen all work, and nine profiles ship with it. Two of the
+three listening modes work: `push`, where you open and close the microphone by hand, and `auto`,
+where a voice detector decides what is an utterance. Still to come: `hands_free` (it waits for the
+wake word), the WebSocket server, the web client and the web terminal, plus CI and releases.
 
 ## Quick start
 
@@ -32,6 +32,14 @@ cargo run -p tipsy-compadre -- key status openrouter
 # 3. Run it. On the first run it writes a default config.toml and greets you out loud.
 cargo run -p tipsy-compadre
 ```
+
+`F9` — or a click on the gear in the header — opens the configuration screen. It has four tabs
+(Providers, Listening, Profiles and Server) whose rows are edited in place, `Ctrl+S` writes
+`config.toml` and applies the change, and `F9` or `Esc` closes it again. Nothing reaches the file
+before you save, a save that cannot build the connectors it names writes nothing at all, and the
+screen's title says `unsaved` while there is something to save. The [Keys](#keys) section lists the
+screen's own keys, and [Configuration](#configuration) says which changes take effect at once and
+which wait for the next launch.
 
 If you would rather keep the key in the environment, skip step 1 and export it under the name the
 providers expect: `TIPSY_KEY_OPENROUTER`. The environment wins over the credential store, so an
@@ -52,11 +60,28 @@ cargo run -p tipsy-compadre
 | `F2` | Replay the last spoken reply |
 | `F4` | Clear the conversation |
 | `←` / `→` | Switch between the `CHAT` and `NETWORK` views |
-| `Esc` | Quit |
+| `↑` / `↓` | Move the selection through the conversation — `↑` starts at the last line, `↓` at the first — and `F2` replays what is selected |
+| `F9` | Open the configuration screen; press it again to close it without saving |
+| `Esc` | Quit. While the configuration screen is open, `Esc` closes it instead of quitting |
 
-Every action also has a mouse equivalent: the `CHAT`/`NETWORK` titles and the **✗ Clear** button are
-clickable, and clicking a line of the conversation selects it. Keyboard and mouse each need their
-own binding.
+Some actions also have a mouse equivalent: the `CHAT`/`NETWORK` titles and the **✗ Clear** button are
+clickable, and so are the gear and the mode word in the header, which open the configuration screen
+the way `F9` does. Keyboard and mouse each need their own binding.
+
+While the configuration screen is open it has the keyboard, and the screen is driven from there for
+now: `Tab`, `←`/`→`, `Enter`, `Esc` and `F9` change meaning, and the HUD's other keys (`F2`, `F4`)
+do nothing in there. These are the keys the client binds in the screen:
+
+| Key | What it does |
+|---|---|
+| `Tab` / `→` | Move to the next of the four tabs, wrapping at the end |
+| `←` | Move to the previous tab |
+| `↑` / `↓` | Move the focus between the rows of the current tab |
+| `Enter` | Edit the focused row when it holds text, or actuate it when it does not: a toggle, the Test row, or the Server tab's Save row. While a row is being edited, `Enter` applies what was typed |
+| `Backspace` | Delete the last character of the text being edited |
+| `Ctrl+S` | Save: write `config.toml` and apply the parts that apply live |
+| `Ctrl+R` | Mint a fresh server token for the Server tab. Like every other edit it is written only when you save |
+| `F9` / `Esc` | Close the screen. Nothing that was edited is written, and the file is left as it was |
 
 The interface is drawn in Spanish when the active profile's language starts with `es` (`NÚCLEO`,
 `PREGUNTA`, `CHAT`/`RED`, "Listo, quillo"), and in English otherwise.
@@ -86,9 +111,10 @@ active_profile = "compae"
 [server]
 bind = "127.0.0.1:7070"
 lan = false
+token = ""               # the WebSocket server's own bearer token; empty means none generated yet
 
 [listening]
-mode = "push"            # push | auto | hands_free (only push is implemented in this plan)
+mode = "push"            # push | auto | hands_free
 silence_ms = 1000
 mic_gain = 12.0
 
@@ -111,9 +137,12 @@ model = "openai/whisper-large-v3"
 key = "openrouter"
 ```
 
-`kind` is the connector: only `openai_compat` is implemented so far, and it is what Ollama,
-OpenRouter, OpenAI and most local servers speak. `key` is the **name** of a key, not the key; an
-empty `key` means the endpoint wants no key at all, which is how a local server is configured:
+`kind` is the connector: `openai_compat`, which is what Ollama, OpenRouter, OpenAI and most local
+servers speak, or the native `gemini` and `elevenlabs` connectors. Not every connector offers every
+capability — Gemini has no transcription and ElevenLabs has no chat — and a configuration that asks
+for one of those pairs is refused by name rather than quietly falling back to another connector.
+`key` is the **name** of a key, not the key; an empty `key` means the endpoint wants no key at all,
+which is how a local server is configured:
 
 ```toml
 [providers.chat]
@@ -137,8 +166,52 @@ key = ""
 
 As soon as the client starts it speaks the profile's greeting, so the `speech` provider has to work
 before you hear anything: `llama3.1` in the example above is a chat model, and a local server has
-to be reachable for each capability you actually use. The configuration is read at startup, so quit
-and run the client again after editing `config.toml`.
+to be reachable for each capability you actually use. `config.toml` is read when the client starts,
+and again every time the configuration screen opens, so a file you edited by hand is what the screen
+shows.
+
+### Listening modes
+
+`mode` is one of three values, and all three can be set here or on the Listening tab of the
+configuration screen:
+
+- **`push`** (the default): `Tab` opens the microphone and `Tab` again closes it, sending what it
+  heard for transcription. Nothing is transcribed until you close it.
+- **`auto`**: a voice detector decides what is an utterance. Open the microphone once with `Tab` and
+  it keeps listening; an utterance is transcribed when the detector confirms a pause, and nothing
+  before the first word — the room, the silence you started talking through — is ever transcribed.
+  The assistant's own voice does not reopen the microphone while it speaks. `Tab` still closes the
+  microphone by hand, which is how what the detector has confirmed so far is sent mid-utterance.
+- **`hands_free`**: not implemented yet. A wake word is what it waits for, and it arrives in a later
+  plan; until then the mode behaves like `push` — you open the microphone by hand — and the header
+  says so in the interface's language when the session announces the mode, instead of leaving the
+  user to guess why nothing is listening.
+
+### What applies when
+
+A save is not a restart, and it does not pretend to be one. Saving applies:
+
+- **the active profile**: the session switches to it and the next turn answers with its prompt;
+- **the listening mode**, whichever of the three you chose;
+- **the connectors**: the three providers the file names are built and swapped into the running
+  session, and every turn started after the save uses them;
+- **the microphone gain**.
+
+The next launch brings:
+
+- **a profile's edited texts** — its prompt, voice instructions, greeting, wake word, name and
+  language — because the channel between the screen and the session carries a profile *id*, not its
+  text, and the session rebuilds the profile from the configuration it started with. A profile added
+  by hand after the launch is in the file but not in the running session, so it becomes selectable at
+  the next launch;
+- **the silence threshold** (`silence_ms`), since the detector is built with it when the app starts.
+
+The microphone device (`mic_device`) is a third case: the Listening tab saves it and the file
+carries it, but the client opens the system's default input device whatever it says, so naming a
+device does not change what is recorded — at this launch or the next one.
+
+The Server tab — `bind`, the LAN switch and the token — is for the WebSocket server, which does not
+exist yet: the three values are written to the file and nothing listens on them today.
 
 ## Privacy
 

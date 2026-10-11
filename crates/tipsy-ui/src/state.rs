@@ -225,6 +225,23 @@ impl UiState {
                 self.profile = Some(profile.clone());
                 self.lang = *ui_language;
                 self.listening_mode = *listening_mode;
+                // The configuration accepts three modes and this plan implements two, so the third
+                // one says so instead of going quiet: the wake word arrives in a later plan, and
+                // until then a `hands_free` session behaves like `push` — the microphone is opened
+                // by hand, which is why this only speaks and never touches `mic_open`.
+                let unsupported = self.strings().hands_free_unimplemented;
+                match *listening_mode {
+                    ListeningMode::HandsFree => self.notify(unsupported),
+                    // A mode that is implemented has nothing to explain, and it takes a notice the
+                    // unimplemented one left behind with it: a stale warning over a working `push`
+                    // mode would be its own lie. Any other notice — a failure, a cleared
+                    // conversation — is not this announcement's business and stays.
+                    ListeningMode::Push | ListeningMode::Auto => {
+                        if self.notice.as_ref().is_some_and(|(text, _)| text == unsupported) {
+                            self.notice = None;
+                        }
+                    }
+                }
             }
             Event::Status { state, .. } => {
                 self.status = *state;
@@ -434,11 +451,17 @@ mod tests {
     use tipsy_protocol::*;
 
     fn welcome(lang: UiLanguage) -> Event {
+        welcome_mode(lang, ListeningMode::Push)
+    }
+
+    /// The same announcement for any mode: the mode is an argument because what the HUD says about
+    /// it is what the tests below are about.
+    fn welcome_mode(lang: UiLanguage, mode: ListeningMode) -> Event {
         Event::Welcome {
             session_id: 1,
             profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
             ui_language: lang,
-            listening_mode: ListeningMode::Push,
+            listening_mode: mode,
             web_bundle: false,
         }
     }
@@ -457,6 +480,55 @@ mod tests {
         assert_eq!(s.strings().core, "NÚCLEO");
         s.apply(&welcome(UiLanguage::En));
         assert_eq!(s.strings().core, "CORE");
+    }
+
+    /// The configuration accepts three modes and this plan implements two: `hands_free` has no wake
+    /// word yet, so the HUD says so — in the interface's own language, and without pretending the
+    /// microphone is open, because in that mode it is still the user who opens it.
+    #[test]
+    fn hands_free_says_it_is_not_implemented_instead_of_going_quiet() {
+        for (lang, word) in [(UiLanguage::Es, "manos libres"), (UiLanguage::En, "hands free")] {
+            let mut s = UiState::new();
+            s.apply(&welcome_mode(lang, ListeningMode::HandsFree));
+            let (notice, left) = s.notice.as_ref().expect("an unimplemented mode must say so");
+            assert!(notice.contains(word), "{lang:?}: {notice}");
+            // The copy comes from the table, so both tables have to carry it: the same key, read
+            // through the language the announcement brought.
+            assert_eq!(notice.as_str(), s.strings().hands_free_unimplemented, "{lang:?}");
+            assert!(*left > 0, "and the notice is a live one, not a spent one");
+            assert!(!s.mic_open, "and it must not pretend to be listening");
+        }
+    }
+
+    #[test]
+    fn the_other_two_modes_raise_no_notice() {
+        for mode in [ListeningMode::Push, ListeningMode::Auto] {
+            let mut s = UiState::new();
+            s.apply(&welcome_mode(UiLanguage::En, mode));
+            assert!(s.notice.is_none(), "{mode:?} is implemented and must stay quiet");
+        }
+    }
+
+    /// The notice belongs to the announcement that raised it: a session that re-announces an
+    /// implemented mode — what a save does when it switches the mode, Task 6 — must not leave "not
+    /// implemented yet" over a mode that works, and must not sweep away a notice that was never its
+    /// own.
+    #[test]
+    fn a_mode_that_is_implemented_takes_the_unimplemented_notice_away() {
+        let mut s = UiState::new();
+        s.apply(&welcome_mode(UiLanguage::Es, ListeningMode::HandsFree));
+        assert!(s.notice.is_some());
+
+        // A failure, or anything else the HUD is saying, is not the announcement's to drop.
+        s.notify("otra cosa");
+        s.apply(&welcome_mode(UiLanguage::Es, ListeningMode::Auto));
+        assert_eq!(s.notice.as_ref().map(|n| n.0.as_str()), Some("otra cosa"));
+
+        // Its own warning, though, goes with the mode it was about.
+        s.apply(&welcome_mode(UiLanguage::Es, ListeningMode::HandsFree));
+        assert!(s.notice.is_some());
+        s.apply(&welcome_mode(UiLanguage::Es, ListeningMode::Push));
+        assert!(s.notice.is_none(), "`push` works, so the warning has nothing left to say");
     }
 
     #[test]
