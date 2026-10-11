@@ -20,6 +20,7 @@ use ratatui::widgets::{
 };
 use tipsy_protocol::{AssistantState, ListeningMode, UiLanguage};
 
+use crate::config_form::ConfigAction;
 use crate::state::{KeyInput, LogEntry, Tab, UiState, Who};
 use crate::strings::Strings;
 
@@ -49,33 +50,55 @@ pub struct ClockView {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hit {
     pub area: Rect,
+    /// The keystroke this control answers, and the whole of what a click used to report. It stays
+    /// because the HUD's titles are keys before they are anything else, and because a control whose
+    /// click means exactly what its key means is honest about it.
     pub key: KeyInput,
+    /// What the control *is*, for a control whose click is not the keystroke of whatever happens to
+    /// be focused. The configuration screen's tabs, rows and buttons each name their own target
+    /// here, and the client dispatches that action instead of a key — which is what keeps a click on
+    /// "Profiles" from arriving as `F9`, the door key that closes the screen and drops the edits.
+    /// `None` for the HUD's own titles, which are keys in the hand too.
+    pub action: Option<ConfigAction>,
 }
 
 pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) -> Vec<Hit> {
     let [header, body, input, help] = Layout::vertical([Length(1), Min(10), Length(3), Length(1)]).areas(frame.area());
     // The screen is full screen (spec §9): while it is up the HUD is not drawn at all, and its
     // clickable rows are not reported either — a click on the screen may not clear the conversation.
-    let Some(form) = &state.config_form else {
-        let [left, center, right] = Layout::horizontal([Percentage(LEFT_PERCENT), Min(30), Percentage(26)]).areas(body);
-        let mut hits = draw_header(frame, state, header, title);
-        let [clock_area, log] = Layout::vertical([Length(5), Min(3)]).areas(left);
-        draw_clock(frame, state, clock, clock_area);
-        hits.extend(draw_left(frame, state, log));
-        let [rings, voice] = Layout::vertical([Min(8), Length(6)]).areas(center);
-        draw_rings(frame, state, rings);
-        draw_voice(frame, state, voice);
-        draw_system(frame, state, right);
-        draw_input(frame, state, input);
-        if !help.is_empty() {
-            frame.render_widget(Line::from(state.strings().help).fg(DIM), help);
-        }
+    // What *is* reported is the header's own two controls, and they are reported first, before the
+    // screen's tabs and rows, while the screen is up exactly as when it is down. That order is the
+    // frozen HUD specification (the screen is drawn under the header, never over it), and it is also
+    // what keeps a click on the gear reaching the gear: `hits[1]` is the gear either way, and its key
+    // still closes the screen.
+    if let Some(form) = &state.config_form {
+        let _ = clock;
+        let screen = crate::render_config::draw_form(frame, form, state.strings(), state.elapsed_ms);
+        // The header is drawn last so its own cells — the mode indicator and the gear — win whatever
+        // the full-screen form painted under them, and it shows the *screen's* title while the screen
+        // is up: the header's line repaints its whole row, so the profile's title there would be
+        // erased by it and the screen's own title would never be visible on the row it owns.
+        let mut hits = draw_header(frame, state, header, state.strings().cfg_title);
+        hits.extend(screen);
         return hits;
-    };
-    let mut hits = draw_header(frame, state, header, title);
-    let _ = clock;
-    hits.extend(crate::render_config::draw_form(frame, form, state.strings(), state.elapsed_ms));
-    hits
+    }
+    let [left, center, right] = Layout::horizontal([Percentage(LEFT_PERCENT), Min(30), Percentage(26)]).areas(body);
+    let [clock_area, log] = Layout::vertical([Length(5), Min(3)]).areas(left);
+    draw_clock(frame, state, clock, clock_area);
+    let hits = draw_left(frame, state, log);
+    let [rings, voice] = Layout::vertical([Min(8), Length(6)]).areas(center);
+    draw_rings(frame, state, rings);
+    draw_voice(frame, state, voice);
+    draw_system(frame, state, right);
+    draw_input(frame, state, input);
+    if !help.is_empty() {
+        frame.render_widget(Line::from(state.strings().help).fg(DIM), help);
+    }
+    // The header is drawn last because it is read last on the row and is the last thing on screen:
+    // its own symbols win the cells they occupy however the panes and the screen have painted them.
+    let mut ordered = draw_header(frame, state, header, title);
+    ordered.extend(hits);
+    ordered
 }
 
 /// Badge with the profile's title, the listening-mode indicator, whatever the assistant is doing,
@@ -83,7 +106,9 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
 ///
 /// The header's own two controls come first in the order `draw` reports, both answering `F9`: the
 /// mode indicator whose area is the word itself, then the gear at the right edge. A frame too small
-/// to draw either reports no `Hit` for it rather than a rectangle nobody can see.
+/// to draw either reports no `Hit` for it rather than a rectangle nobody can see. That is true while
+/// the configuration screen is up as well as when it is down: the screen is drawn beneath the header,
+/// so the gear is on screen and clickable either way.
 fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str) -> Vec<Hit> {
     let (line, mode, gear) = header(state, area, title);
     frame.render_widget(line, area);
@@ -147,10 +172,12 @@ fn header(state: &UiState, area: Rect, title: &str) -> (Line<'static>, Hit, Hit)
     let mode_hit = Hit {
         area: Rect::new(mode_x, area.y, gear_x.saturating_sub(mode_x).min(max_x.saturating_sub(mode_x)), 1),
         key: KeyInput::F(9),
+        action: Some(ConfigAction::Toggle),
     };
     let gear_hit = Hit {
         area: Rect::new(gear_x, area.y, gear_w.min(max_x.saturating_sub(gear_x) as usize) as u16, 1),
         key: KeyInput::F(9),
+        action: Some(ConfigAction::Toggle),
     };
     // The status keeps whatever is left between the badge and the mode, and never more.
     let used = drawn_width(&badge) + drawn_width(&gap);
@@ -258,9 +285,9 @@ fn draw_left(frame: &mut Frame, state: &UiState, area: Rect) -> Vec<Hit> {
     let net_w = strings.network.chars().count() as u16 + 2;
     let clear_w = clear.chars().count() as u16;
     let hits = vec![
-        Hit { area: row(area.x + 2, chat_w), key: KeyInput::F(7) },
-        Hit { area: row(area.x + 2 + chat_w + 1, net_w), key: KeyInput::F(8) },
-        Hit { area: row(area.right().saturating_sub(1 + clear_w), clear_w), key: KeyInput::F(4) },
+        Hit { area: row(area.x + 2, chat_w), key: KeyInput::F(7), action: None },
+        Hit { area: row(area.x + 2 + chat_w + 1, net_w), key: KeyInput::F(8), action: None },
+        Hit { area: row(area.right().saturating_sub(1 + clear_w), clear_w), key: KeyInput::F(4), action: None },
     ];
 
     let inner = block.inner(area);

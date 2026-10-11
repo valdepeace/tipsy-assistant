@@ -30,9 +30,11 @@ pub const MIC_GAIN_MAX: f32 = 30.0;
 /// `ProfileForm` field. The profile-list rows and the voice entries are counted separately, because
 /// how many of those there are is a property of the form: see [`ConfigForm::profile_row_count`].
 pub const PROFILE_FIELD_COUNT: usize = 7;
-/// The Server tab's rows are `bind`, `lan` and Save, so its action row is the last one. Task 4's
-/// tests name it; a tab's layout is not re-derived per task.
-pub const SERVER_ROW_SAVE: usize = 2;
+/// The Server tab's rows are `bind`, `lan`, `token`, `regenerate` and Save, so its Save row is the
+/// fifth and last one. Task 4's tests name it; a tab's layout is not re-derived per task.
+pub const SERVER_ROW_SAVE: usize = 4;
+/// The Server tab's other action row: the one that mints a fresh token.
+pub const SERVER_ROW_REGENERATE: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigTab {
@@ -125,12 +127,22 @@ pub struct ConfigForm {
     pub server: ServerForm,
     pub notice: Option<(NoticeKind, String)>,
     pub dirty: bool,
+    /// True once [`ConfigForm::mark_filled`] has been called with a form the client converted from
+    /// the file. [`ConfigForm::default`] is the placeholder the screen opens on before the client
+    /// has answered, and a placeholder is never saveable: writing it would replace a working
+    /// `config.toml` with blank base URLs and models.
+    pub(crate) filled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigAction {
     Open,
     Close,
+    /// The screen's door, as a control reports it. The header's mode indicator and gear are the only
+    /// controls that open the screen, and while the screen is up they are *behind* it: a click on
+    /// those columns is a click on whatever the screen draws there. Reporting `Toggle` rather than a
+    /// key is what keeps a click from being read as `F9` by a screen that answers `F9` by closing.
+    Toggle,
     NextTab,
     PrevTab,
     NextField,
@@ -139,8 +151,15 @@ pub enum ConfigAction {
     Push(char),
     Backspace,
     CommitEdit,
-    Toggle,
     SelectProfile(usize),
+    /// A click on a tab label names the tab it landed on, rather than a keystroke the focused row
+    /// might reinterpret. The keyboard reaches the same tabs through [`ConfigAction::NextTab`] and
+    /// [`ConfigAction::PrevTab`], and through the `F` keys `action_for` maps to this action.
+    SelectTab(ConfigTab),
+    /// A click on a row names the row it landed on. `Toggle` and `BeginEdit` act on the *focused*
+    /// row, which is what a keyboard means by them; a click means the row under the pointer, and
+    /// the form is what turns the index into the row's own action.
+    FocusRow(usize),
     Save,
     Test,
     RegenerateToken,
@@ -164,9 +183,8 @@ impl Default for ConfigForm {
             // Base URL, a Model and a Test row the moment the screen opens, before the client has
             // answered. A form whose list is empty draws no rows at all on its own first tab, which
             // is not a screen a user can work in. The native client replaces every field of this
-            // form from the real configuration (Task 6), so what these hold matters only until it
-            // does — and the connector is the one every group needs, because it is the row a reader
-            // knows the group by.
+            // form from the real configuration (Task 6) *and marks it filled*, so what these hold
+            // matters only until it does — and a form that was never filled refuses to save.
             providers: [Capability::Chat, Capability::Speech, Capability::Transcribe]
                 .into_iter()
                 .map(|capability| ProviderForm {
@@ -194,6 +212,7 @@ impl Default for ConfigForm {
             server: ServerForm { bind: "127.0.0.1:7070".into(), lan: false, token: String::new() },
             notice: None,
             dirty: false,
+            filled: false,
         }
     }
 }
@@ -247,6 +266,20 @@ impl ConfigForm {
         self.server.token.trim().is_empty()
     }
 
+    /// True when this form carries what the client read from `config.toml`. The placeholder the
+    /// screen opens on is not filled, and an unfilled form refuses to save: a read that failed
+    /// leaves an empty template on screen, and `Ctrl+S` must not write that over the user's file.
+    pub fn filled(&self) -> bool {
+        self.filled
+    }
+
+    /// Marks the form as carrying a configuration the client actually read. Called by the client
+    /// when it hands the converted form to [`crate::state::UiState::show_config_form`]; a form that
+    /// was never marked this way is the placeholder and cannot be saved.
+    pub fn mark_filled(&mut self) {
+        self.filled = true;
+    }
+
     /// Every screen string the form can show, so a test can prove both tables carry all of them
     /// without a hand-kept checklist. The keys a state happens to keep off screen are included on
     /// purpose: a table that lacks the string the next keystroke needs is the bug this prevents.
@@ -284,6 +317,7 @@ impl ConfigForm {
             es.cfg_dirty,
             es.cfg_unset,
             es.cfg_on,
+            es.cfg_off,
             es.cfg_cancel,
             es.cfg_help,
             es.cfg_help_editing,
@@ -294,6 +328,8 @@ impl ConfigForm {
             es.mode_push,
             es.mode_auto,
             es.mode_hands_free,
+            en.cfg_cancel,
+            en.cfg_off,
             en.cfg_help,
             en.cfg_help_editing,
         ]
@@ -315,7 +351,9 @@ impl ConfigForm {
                     Some(ConfigAction::Push(c))
                 } else {
                     // Typing outside an edit is not a text entry: a printable key is not a shortcut,
-                    // and every shortcut the form has is a control character or a named key.
+                    // and every shortcut the form has is a control character or a named key. The
+                    // space bar is not a second `Enter` either: the help line used to promise one
+                    // and the reducer never had it, so the copy lost the promise instead.
                     None
                 }
             }
@@ -331,6 +369,31 @@ impl ConfigForm {
             }
             KeyInput::Up => self.editing.is_none().then_some(ConfigAction::PrevField),
             KeyInput::Down => self.editing.is_none().then_some(ConfigAction::NextField),
+            // `F2` and `F4` are the two buttons the action line draws, so the keyboard has the same
+            // two actions the mouse reaches. `F4` saves from any tab; `F2` probes the focused
+            // Providers group and is inert elsewhere, because there is nothing else to probe. Neither
+            // reaches into an open buffer, for the same reason no other action does: the buffer is
+            // the only thing on screen that can be changed, and Enter applies it, Esc drops it.
+            //
+            // The screen's tabs answer `F5`, `F6`, `F8` and `F10` — never `F9`, which is the door in
+            // and out of the screen (`UiState::on_key`) and must not also be a tab.
+            KeyInput::F(2) => {
+                (self.editing.is_none() && self.tab == ConfigTab::Providers)
+                    .then_some(ConfigAction::Test)
+            }
+            KeyInput::F(4) => self.editing.is_none().then_some(ConfigAction::Save),
+            KeyInput::F(5) => {
+                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Providers))
+            }
+            KeyInput::F(6) => {
+                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Listening))
+            }
+            KeyInput::F(8) => {
+                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Profiles))
+            }
+            KeyInput::F(10) => {
+                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Server))
+            }
             // Esc names itself in every state: the screen's close, and the buffer's discard. A key
             // a user presses to get out must never be silently inert, and `Close` is what the
             // outcome reports either way; the buffer is gone by the time the caller sees it.
@@ -371,6 +434,11 @@ impl ConfigForm {
                 self.switch_tab(-1);
                 Vec::new()
             }
+            ConfigAction::SelectTab(tab) => {
+                self.tab = tab;
+                self.field = 0;
+                Vec::new()
+            }
             ConfigAction::NextField => {
                 self.next_field();
                 Vec::new()
@@ -379,6 +447,7 @@ impl ConfigForm {
                 self.prev_field();
                 Vec::new()
             }
+            ConfigAction::FocusRow(index) => self.focus_row(index),
             ConfigAction::BeginEdit => {
                 if self.focused_editable() {
                     self.editing = Some(String::new());
@@ -391,6 +460,12 @@ impl ConfigForm {
                 Vec::new()
             }
             ConfigAction::Save => {
+                // An unfilled form is the placeholder the screen opens on, not the user's
+                // configuration: saving it would write blank base URLs and models over a working
+                // file. It refuses, and refuses quietly — there is nothing the user did wrong.
+                if !self.filled {
+                    return Vec::new();
+                }
                 self.dirty = true;
                 vec![ConfigEffect::Save]
             }
@@ -404,14 +479,19 @@ impl ConfigForm {
                 }
             }
             ConfigAction::RegenerateToken => {
+                // Regenerating mints a token into the row and writes nothing; it stays reachable on
+                // an unfilled form because the frozen HUD test pins it that way, and a token that is
+                // only ever saved by an explicit `Save` cannot damage the file. The save itself is
+                // the guard (finding G), and it refuses an unfilled form.
                 self.dirty = true;
                 vec![ConfigEffect::RegenerateToken]
             }
             // The half-typed value is the edit, and it goes with the screen: the buffer is dropped
             // whatever it held, and nothing that was typed was written into any row. `Open` is the
             // client's, not the reducer's — the screen is created with the form, so there is nothing
-            // here for it to change. `Push`, `Backspace` and `CommitEdit` reach the form only while
-            // `editing` is set, in `edit_action` above.
+            // here for it to change, and `Toggle` is the state's for the same reason. `Push`,
+            // `Backspace` and `CommitEdit` reach the form only while `editing` is set, in
+            // `edit_action` above.
             ConfigAction::Open
             | ConfigAction::Close
             | ConfigAction::Push(_)
@@ -441,12 +521,14 @@ impl ConfigForm {
             // closing it is the one way out.
             ConfigAction::Open
             | ConfigAction::Close
+            | ConfigAction::Toggle
             | ConfigAction::NextTab
             | ConfigAction::PrevTab
+            | ConfigAction::SelectTab(_)
             | ConfigAction::NextField
             | ConfigAction::PrevField
+            | ConfigAction::FocusRow(_)
             | ConfigAction::BeginEdit
-            | ConfigAction::Toggle
             | ConfigAction::SelectProfile(_)
             | ConfigAction::Save
             | ConfigAction::Test
@@ -464,7 +546,46 @@ impl ConfigForm {
 
     /// True when the focused row is a row that holds text.
     fn focused_editable(&self) -> bool {
-        self.field_rows().get(self.field).map(|row| row.editable).unwrap_or(false)
+        self.row_editable(self.field)
+    }
+
+    /// True when the row at `index` holds text. A row index the tab no longer has is not editable
+    /// rather than a panic: a click from a frame that no longer matches the form is a no-op.
+    fn row_editable(&self, index: usize) -> bool {
+        self.field_rows().get(index).map(|row| row.editable).unwrap_or(false)
+    }
+
+    /// Moves the keyboard focus to the row a click named, and does what that row's own `Enter`
+    /// would do. A click is a pointer, not a keystroke: it must reach the row under it, never
+    /// whichever row happened to be focused, and a row that is not text opens no buffer.
+    ///
+    /// A profile-list row is the one non-text row that is not a switch: a click on it chooses that
+    /// profile, which is the only way to change the active profile from the screen (`SelectProfile`
+    /// carries the index, and a click names it honestly).
+    ///
+    /// It returns what that row's own action raised, because a button row clicked is the button
+    /// pressed: the Test, Regenerate and Save rows are rows *and* the actions the action line draws,
+    /// so a click that reached them has to raise the same effect `Enter` on them does. Dropping it
+    /// here is what would make a click on the Test row focus a row and probe nothing.
+    fn focus_row(&mut self, index: usize) -> Vec<ConfigEffect> {
+        match self.field_rows().get(index) {
+            // A row the tab no longer has — a click from a frame older than the form — is a no-op.
+            None => Vec::new(),
+            Some(row) if row.editable => {
+                self.field = index;
+                self.editing = Some(String::new());
+                Vec::new()
+            }
+            Some(_) => {
+                self.field = index;
+                if self.tab == ConfigTab::Profiles && index < self.profiles.len() {
+                    self.select_profile(index);
+                    Vec::new()
+                } else {
+                    self.activate()
+                }
+            }
+        }
     }
 
     /// The action a non-editable row takes when it is actuated, whether that came from `Enter` or
@@ -483,7 +604,13 @@ impl ConfigForm {
                     self.dirty = true;
                     Vec::new()
                 }
-                SERVER_ROW_SAVE => {
+                SERVER_ROW_REGENERATE => {
+                    self.dirty = true;
+                    vec![ConfigEffect::RegenerateToken]
+                }
+                // The Save row is the Save button: it refuses an unfilled form for the same reason
+                // the action does, and the two are the only two doors onto a write.
+                SERVER_ROW_SAVE if self.filled => {
                     self.dirty = true;
                     vec![ConfigEffect::Save]
                 }
@@ -536,39 +663,7 @@ impl ConfigForm {
                 }
                 _ => false,
             },
-            ConfigTab::Profiles => {
-                let list_len = self.profiles.len();
-                if self.field < list_len {
-                    // The list rows are not text: a click on one selects it, it does not edit it.
-                    false
-                } else if self.field < list_len + PROFILE_FIELD_COUNT {
-                    match self.field - list_len {
-                        0 => self.write_active_id(buffer),
-                        1 => self.fill(|p| Some(&mut p.name), buffer),
-                        2 => self.fill(|p| Some(&mut p.language), buffer),
-                        3 => self.fill(|p| Some(&mut p.prompt), buffer),
-                        4 => self.fill(|p| Some(&mut p.voice_instructions), buffer),
-                        5 => self.fill(|p| Some(&mut p.greeting), buffer),
-                        6 => self.fill(|p| Some(&mut p.wake_word), buffer),
-                        _ => false,
-                    }
-                } else {
-                    // Two rows per voice entry: the connector (a list, not text) and the name. Only
-                    // the name row commits, so an even offset is the connector and writes nothing.
-                    let offset = self.field - list_len - PROFILE_FIELD_COUNT;
-                    if offset.is_multiple_of(2) {
-                        false
-                    } else {
-                        let active = self.active_profile.clone();
-                        self.profiles
-                            .iter_mut()
-                            .find(|p| p.id == active)
-                            .and_then(|p| p.voices.get_mut(offset / 2))
-                            .map(|voice| voice.1 = buffer)
-                            .is_some()
-                    }
-                }
-            }
+            ConfigTab::Profiles => self.commit_profile(buffer),
             ConfigTab::Server => {
                 if self.field == 0 { self.server.bind = buffer; true } else { false }
             }
@@ -576,6 +671,43 @@ impl ConfigForm {
         if ok {
             self.dirty = true;
         }
+    }
+
+    /// Commits `buffer` into the focused Profiles row. The row indices are exactly the order
+    /// [`ConfigForm::profile_rows`] emits them in: the profile list first, then the active
+    /// profile's scalar fields as name, language, prompt, voice instructions, greeting, wake word
+    /// and last the id, then two rows per voice entry.
+    fn commit_profile(&mut self, buffer: String) -> bool {
+        let list_len = self.profiles.len();
+        if self.field < list_len {
+            // The list rows are not text: a click on one selects it, it does not edit it.
+            return false;
+        }
+        if self.field < list_len + PROFILE_FIELD_COUNT {
+            return match self.field - list_len {
+                0 => self.fill(|p| Some(&mut p.name), buffer),
+                1 => self.fill(|p| Some(&mut p.language), buffer),
+                2 => self.fill(|p| Some(&mut p.prompt), buffer),
+                3 => self.fill(|p| Some(&mut p.voice_instructions), buffer),
+                4 => self.fill(|p| Some(&mut p.greeting), buffer),
+                5 => self.fill(|p| Some(&mut p.wake_word), buffer),
+                6 => self.write_active_id(buffer),
+                _ => false,
+            };
+        }
+        // Two rows per voice entry: the connector (a list, not text) and the name. Only the name
+        // row commits, so an even offset is the connector and writes nothing.
+        let offset = self.field - list_len - PROFILE_FIELD_COUNT;
+        if offset.is_multiple_of(2) {
+            return false;
+        }
+        let active = self.active_profile.clone();
+        self.profiles
+            .iter_mut()
+            .find(|p| p.id == active)
+            .and_then(|p| p.voices.get_mut(offset / 2))
+            .map(|voice| voice.1 = buffer)
+            .is_some()
     }
 
     /// Writes `value` into the focused Providers row: the group is `field / PROVIDER_ROW_COUNT` and
@@ -597,9 +729,8 @@ impl ConfigForm {
         }
     }
 
-    /// Writes `value` into the active profile's field. The row indices are the field order of
-    /// [`ConfigForm::profile_rows`]: name, language, prompt, voice instructions, greeting, wake
-    /// word, then the id.
+    /// Writes `value` into the active profile's **id**: the last of the seven scalar rows, and the
+    /// only one that renames the profile rather than its copy.
     fn write_active_id(&mut self, value: String) -> bool {
         let active = self.active_profile.clone();
         let Some(profile) = self.profiles.iter_mut().find(|p| p.id == active) else { return false };
@@ -682,7 +813,7 @@ impl ConfigForm {
 
     /// Selects a profile. An index the current list no longer holds is a no-op: a stale click is
     /// not a panic, and it is not a silent switch either.
-    fn select_profile(&mut self, index: usize) {
+    pub fn select_profile(&mut self, index: usize) {
         if let Some(profile) = self.profiles.get(index) {
             self.active_profile = profile.id.clone();
             self.dirty = true;
@@ -798,7 +929,9 @@ impl ConfigForm {
                 is_active: active,
             });
         }
-        // The field rows belong to the active profile, in this order (the id last).
+        // The field rows belong to the active profile, in this order (the id last). This order is
+        // what `commit_profile` maps a row back to, and the two live side by side so a reorder of
+        // one is a visible edit of the other.
         if let Some(profile) = self.active() {
             for (label, value) in [
                 (es.cfg_name, &profile.name),
@@ -831,6 +964,9 @@ impl ConfigForm {
         rows
     }
 
+    /// The Server tab: the bind address, the LAN switch, the token, the row that mints a new one,
+    /// and Save. The token is drawn like any other value, so an unset token reads as the unset word
+    /// and a set one shows the token the file would hold; the file changes on Save, never here.
     fn server_rows(&self) -> Vec<FormRow> {
         let es = strings(UiLanguage::Es);
         vec![
@@ -842,7 +978,19 @@ impl ConfigForm {
             },
             FormRow {
                 label: es.cfg_lan,
-                value: if self.server.lan { es.cfg_on } else { es.cfg_unset }.to_owned(),
+                value: if self.server.lan { es.cfg_on } else { es.cfg_off }.to_owned(),
+                editable: false,
+                is_active: false,
+            },
+            FormRow {
+                label: es.cfg_token,
+                value: if self.unset() { es.cfg_unset.to_owned() } else { self.server.token.clone() },
+                editable: false,
+                is_active: false,
+            },
+            FormRow {
+                label: es.cfg_regenerate,
+                value: String::new(),
                 editable: false,
                 is_active: false,
             },
@@ -886,9 +1034,11 @@ mod tests {
     use super::*;
     use crate::strings::{strings, EN, ES};
 
-    /// A form open on Providers: what `ConfigAction::Open` must produce, spelled out.
+    /// A form open on Providers: what `ConfigAction::Open` must produce, spelled out. It is filled,
+    /// because a form that a client converted from a file is the only one that can be saved.
     fn providers() -> ConfigForm {
         let mut f = ConfigForm::default();
+        f.mark_filled();
         f.providers = vec![
             ProviderForm {
                 capability: Capability::Chat,
@@ -970,6 +1120,22 @@ mod tests {
     fn focus(f: &mut ConfigForm, label: &str) {
         let at = f.row_labels().iter().position(|l| *l == label).unwrap_or_else(|| panic!("no {label:?} row"));
         f.field = at;
+    }
+
+    /// The active profile's scalar fields, in the order `profile_rows` emits them: name, language,
+    /// prompt, voice instructions, greeting, wake word, id. Spelled out here as the test's own
+    /// expectation, deliberately not read from the renderer.
+    fn active_fields(f: &ConfigForm) -> [String; PROFILE_FIELD_COUNT] {
+        let p = f.active().expect("an active profile");
+        [
+            p.name.clone(),
+            p.language.clone(),
+            p.prompt.clone(),
+            p.voice_instructions.clone(),
+            p.greeting.clone(),
+            p.wake_word.clone(),
+            p.id.clone(),
+        ]
     }
 
     #[test]
@@ -1098,21 +1264,25 @@ mod tests {
         f.tab = ConfigTab::Server;
         assert!(f.unset(), "an empty token is the unset state");
         let rows = f.rows();
-        assert_eq!(rows.len(), 3, "bind, lan and Save: the token row is where Regenerate acts");
+        assert_eq!(rows.len(), 5, "bind, lan, token, regenerate and Save");
         assert_eq!(rows[0].label, ES.cfg_bind);
         assert_eq!(rows[0].value, "127.0.0.1:7070");
         assert_eq!(rows[1].label, ES.cfg_lan);
         assert!(!rows[1].editable);
-        assert_eq!(rows[1].value, ES.cfg_unset, "a false toggle is shown as the unset word");
-        assert_eq!(rows[2].label, ES.cfg_save, "the Save row is the tab's last row");
-        assert!(!rows[2].is_active, "nothing is toggled on: Save is an action, not a switch");
-        assert!(!rows[2].editable, "and it is not a text row either");
+        assert_eq!(rows[1].value, ES.cfg_off, "a false LAN switch is off, not unset");
+        assert_eq!(rows[2].label, ES.cfg_token);
+        assert_eq!(rows[2].value, ES.cfg_unset, "an empty token is shown as the unset word");
+        assert!(!rows[2].editable, "the token is minted, never typed");
+        assert_eq!(rows[3].label, ES.cfg_regenerate, "and the row that mints it is beside it");
+        assert_eq!(rows[4].label, ES.cfg_save, "the Save row is the tab's last row");
+        assert!(!rows[4].is_active, "nothing is toggled on: Save is an action, not a switch");
+        assert!(!rows[4].editable, "and it is not a text row either");
 
         f.server.lan = true;
         assert_eq!(f.rows()[1].value, ES.cfg_on);
         f.server.token = "0123456789abcdef0123456789abcdef".into();
         assert!(!f.unset());
-        assert_eq!(f.rows()[0].value, "127.0.0.1:7070", "the token has no row of its own");
+        assert_eq!(f.rows()[2].value, "0123456789abcdef0123456789abcdef", "the token is on screen");
     }
 
     #[test]
@@ -1254,6 +1424,124 @@ mod tests {
         assert_eq!(f.active_profile, "compae", "out of range is a no-op");
     }
 
+    /// The point of finding A: every one of the seven scalar profile rows writes *its own* field.
+    /// Each row is focused by its index — the id row and the list rows share a label, so a label
+    /// cannot name them — a distinct value is typed and committed, and the assertion is on which
+    /// field the value landed in and that nothing else moved.
+    #[test]
+    fn each_profile_row_commits_its_own_field() {
+        for (offset, attribute, written) in [
+            (0usize, "name", "written-name"),
+            (1, "language", "en-GB"),
+            (2, "prompt", "written-prompt"),
+            (3, "voice_instructions", "written-voice"),
+            (4, "greeting", "written-greeting"),
+            (5, "wake_word", "written-wake"),
+            (6, "id", "written-id"),
+        ] {
+            let mut f = profiles();
+            // `meigo` is the active profile, so its field rows start just past the two list rows.
+            let row = f.profiles.len() + offset;
+            assert_eq!(
+                f.rows()[row].value,
+                active_fields(&f)[offset],
+                "{attribute}: the row shows its own value"
+            );
+            let before = active_fields(&f);
+
+            f.field = row;
+            f.apply(ConfigAction::BeginEdit);
+            type_text(&mut f, written);
+            f.apply(ConfigAction::CommitEdit);
+
+            let after = active_fields(&f);
+            assert_eq!(
+                after[offset], written,
+                "{attribute}: the value landed in the wrong field: {after:?}"
+            );
+            if offset == 6 {
+                // The id is the one field the active-profile pointer follows, or a rename would
+                // switch the assistant to a profile that no longer exists.
+                assert_eq!(f.active_profile, written, "{attribute}: the renamed profile stays active");
+                continue;
+            }
+            assert_eq!(after[6], before[6], "{attribute}: the id must not move");
+            assert_eq!(
+                f.active_profile, before[6],
+                "{attribute}: no other profile may become active"
+            );
+            for (index, expected) in before.iter().enumerate() {
+                if index == offset {
+                    // The field the value was written into is the one that must have changed; every
+                    // other one must not.
+                    continue;
+                }
+                assert_eq!(&after[index], expected, "{attribute}: field {index} must not change");
+            }
+        }
+    }
+
+    /// The keyboard and the mouse reach the same tabs, and neither of them is `F9`: that key is the
+    /// door in and out of the screen, so no tab may answer it.
+    #[test]
+    fn the_tab_keys_select_tabs_and_never_f9() {
+        let mut f = providers();
+        for (key, tab) in [
+            (5u8, ConfigTab::Providers),
+            (6, ConfigTab::Listening),
+            (8, ConfigTab::Profiles),
+            (10, ConfigTab::Server),
+        ] {
+            f.tab = ConfigTab::Providers;
+            f.field = 3;
+            assert_eq!(f.key(KeyInput::F(key)).action, Some(ConfigAction::SelectTab(tab)));
+            assert_eq!(f.tab, tab, "F{key} selects {tab:?}");
+            assert_eq!(f.field, 0, "and the rows belong to the tab, so the focus starts over");
+        }
+        assert_eq!(f.key(KeyInput::F(9)).action, None, "F9 is the screen's door, not a tab");
+        assert_eq!(f.key(KeyInput::F(2)).action, None, "F2 is only the Providers tab's Test");
+        assert_eq!(f.key(KeyInput::F(4)).action, Some(ConfigAction::Save), "F4 is the Save button");
+    }
+
+    /// The click path: a control names the target it is drawn on, so a click cannot actuate
+    /// whichever row happened to be focused.
+    #[test]
+    fn a_clicked_row_is_focused_and_actuated() {
+        let mut f = providers();
+        f.field = 0;
+        // A text row: the click focuses it and opens its buffer, exactly as `Enter` would.
+        assert!(effects(f.apply(ConfigAction::FocusRow(2))).is_empty());
+        assert_eq!(f.field, 2, "the clicked row is the focused one");
+        assert_eq!(f.editing.as_deref(), Some(""), "and a text row opens its buffer");
+        f.apply(ConfigAction::Close);
+
+        // A button row: the click focuses it and presses it.
+        assert_eq!(
+            effects(f.apply(ConfigAction::FocusRow(4))),
+            vec![ConfigEffect::Test(Capability::Chat)],
+            "a click on the first group's Test row probes that group"
+        );
+        assert_eq!(f.field, 4);
+
+        // A row the tab no longer has is a no-op, not a panic.
+        f.apply(ConfigAction::FocusRow(99));
+        assert_eq!(f.field, 4);
+        assert!(f.editing.is_none());
+    }
+
+    /// A click on a profile-list row chooses that profile; it does not open a buffer and it does
+    /// not run whichever row was focused (the only way to change profile from the screen).
+    #[test]
+    fn a_clicked_profile_row_becomes_the_active_profile() {
+        let mut f = profiles();
+        f.field = 3;
+        assert!(effects(f.apply(ConfigAction::FocusRow(0))).is_empty());
+        assert_eq!(f.active_profile, "compae", "the clicked row is the profile that becomes active");
+        assert_eq!(f.field, 0, "and the focus follows the click");
+        assert!(f.editing.is_none(), "a profile is chosen, not edited");
+        assert!(f.dirty);
+    }
+
     #[test]
     fn save_and_regenerate_are_the_only_effects_the_reducer_raises() {
         let mut f = providers();
@@ -1276,14 +1564,55 @@ mod tests {
         f.field = 14;
         assert_eq!(effects(f.apply(ConfigAction::Toggle)), vec![ConfigEffect::Test(Capability::Transcribe)]);
 
-        // On the Server tab the token is regenerated and the form is left untouched: the client
-        // mints the value (Task 6) and writes it into this row.
+        // On the Server tab the token is regenerated from its own row and the form is left
+        // untouched: the client mints the value (Task 6) and writes it into this row.
         f.tab = ConfigTab::Server;
-        f.field = 2;
+        f.field = SERVER_ROW_REGENERATE;
         assert_eq!(effects(f.apply(ConfigAction::RegenerateToken)), vec![ConfigEffect::RegenerateToken]);
         assert!(f.dirty);
+        assert_eq!(
+            effects(f.apply(ConfigAction::FocusRow(SERVER_ROW_REGENERATE))),
+            vec![ConfigEffect::RegenerateToken],
+            "and the row the screen draws raises it too"
+        );
         // And the row is an action rather than a switch: activating it twice does not flip anything.
         assert!(!f.server.lan);
+    }
+
+    /// The placeholder the screen opens on is not the user's configuration, so it is not saveable:
+    /// a `config.toml` read that failed must not be overwritten by blank base URLs and models.
+    #[test]
+    fn an_unfilled_form_refuses_to_save_and_a_filled_one_saves() {
+        let mut placeholder = ConfigForm::default();
+        assert!(!placeholder.filled(), "a placeholder is not filled");
+        assert!(effects(placeholder.apply(ConfigAction::Save)).is_empty(), "and it refuses to save");
+        assert!(!placeholder.dirty, "a refused save is not an unsaved change");
+        assert_eq!(
+            placeholder.key(KeyInput::Char(SAVE_KEY)).effects,
+            Vec::new(),
+            "Ctrl+S is refused the same way"
+        );
+
+        placeholder.mark_filled();
+        assert!(placeholder.filled());
+        assert_eq!(effects(placeholder.apply(ConfigAction::Save)), vec![ConfigEffect::Save]);
+        assert!(placeholder.dirty);
+    }
+
+    /// The Server tab draws its own Save row, and that row is a second door onto a write: it has to
+    /// refuse an unfilled form exactly as the action does, or a click would bypass the guard.
+    #[test]
+    fn the_server_tab_cannot_save_an_unfilled_form() {
+        // Built in one expression rather than assigned into a `ConfigForm::default()`: the branch's
+        // clippy run flags `field_reassign_with_default` on the two-line shape.
+        let mut f = ConfigForm { tab: ConfigTab::Server, ..ConfigForm::default() };
+        assert!(!f.filled(), "the placeholder is not filled");
+        assert!(f.apply(ConfigAction::FocusRow(SERVER_ROW_SAVE)).is_empty());
+        assert!(!f.dirty, "and the Save row refuses it too");
+
+        f.mark_filled();
+        assert_eq!(f.apply(ConfigAction::FocusRow(SERVER_ROW_SAVE)), vec![ConfigEffect::Save]);
+        assert!(f.dirty);
     }
 
     #[test]
@@ -1327,9 +1656,12 @@ mod tests {
         assert_eq!(f.key(KeyInput::Char('\u{13}')).effects, vec![ConfigEffect::Save]);
         assert_eq!(f.key(KeyInput::Char('\u{12}')).effects, vec![ConfigEffect::RegenerateToken]);
         // A printable key outside an edit is not a text entry: it types nothing into the void, and
-        // the typing case is the next test's, where a buffer is open.
+        // the typing case is the next test's, where a buffer is open. A space is not a second
+        // `Enter` either — the copy no longer promises one.
         assert_eq!(f.key(KeyInput::Char('x')).action, None);
         assert_eq!(f.key(KeyInput::Char('x')).effects, Vec::new());
+        assert_eq!(f.key(KeyInput::Char(' ')).action, None);
+        assert_eq!(f.key(KeyInput::Char(' ')).effects, Vec::new());
 
         f.field = 0;
         assert_eq!(f.key(KeyInput::Enter).action, Some(ConfigAction::Toggle), "a toggle row has no text to edit");
@@ -1354,6 +1686,12 @@ mod tests {
             "Down is neither text nor a way out: it must not move the focus mid-edit"
         );
         assert_eq!(f.key(KeyInput::Tab).action, None, "nor may Tab jump to the next tab");
+        // A click while the buffer is open is not a way out of it either: the row under the pointer
+        // does not move the focus and does not press anything behind the edit.
+        assert_eq!(f.key(KeyInput::F(2)).action, None, "not even the Test key");
+        assert!(effects(f.apply(ConfigAction::FocusRow(0))).is_empty());
+        assert_eq!(f.field, 2, "the focus stayed where the buffer is: the model row of the first group");
+        assert_eq!(f.editing.as_deref(), Some(""), "and the buffer is still open");
         assert_eq!(f.key(KeyInput::Enter).action, Some(ConfigAction::CommitEdit));
         assert_eq!(f.key(KeyInput::Esc).action, Some(ConfigAction::Close), "Esc is the screen's, not the buffer's");
     }
@@ -1392,6 +1730,14 @@ mod tests {
         // The two tables are different tables, not one table read twice.
         assert_ne!(ES.cfg_providers, EN.cfg_providers);
         assert_ne!(ES.cfg_save, EN.cfg_save);
+        assert_ne!(ES.cfg_off, EN.cfg_off);
+        // The help line promises no toggle this form cannot do: a space is not a key it has.
+        assert!(!ES.cfg_help.to_lowercase().contains("espacio"), "{}", ES.cfg_help);
+        assert!(!EN.cfg_help.to_lowercase().contains("space"), "{}", EN.cfg_help);
+        // And the two tables that name the discard carry it in both languages.
+        assert!(!ES.cfg_cancel.trim().is_empty() && !EN.cfg_cancel.trim().is_empty());
+        assert!(ES.cfg_help_editing.contains(ES.cfg_cancel), "{}", ES.cfg_help_editing);
+        assert!(EN.cfg_help_editing.contains(EN.cfg_cancel), "{}", EN.cfg_help_editing);
 
         // And the labels the rows hand out are exactly the table's.
         f.tab = ConfigTab::Providers;

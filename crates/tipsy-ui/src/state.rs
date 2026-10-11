@@ -5,12 +5,28 @@ use std::collections::VecDeque;
 use tipsy_protocol::{AssistantState, Command, Event, ListeningMode, ProfileView, UiLanguage};
 
 use crate::config_form::{ConfigAction, ConfigEffect, ConfigForm};
+use crate::render::Hit;
 use crate::strings::{strings, Strings};
 
 const NOTICE_MS: u64 = 3000;
 const HISTORY_LEN: usize = 120;
 const MIC_LEVELS_MAX: usize = 400;
 const ENVELOPE_HOP_MS: u64 = 50;
+
+/// The three effects with a native side, as the actions the client has to perform. The file write,
+/// the connector probe and the token generator all live on the native side, which is the only thing
+/// that may touch any of them; [`ConfigEffect::None`] is a no-op and reports nothing.
+fn effects_to_actions(effects: Vec<ConfigEffect>) -> Vec<UiAction> {
+    effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            ConfigEffect::None => None,
+            ConfigEffect::Save => Some(UiAction::Config(ConfigAction::Save)),
+            ConfigEffect::Test(_) => Some(UiAction::Config(ConfigAction::Test)),
+            ConfigEffect::RegenerateToken => Some(UiAction::Config(ConfigAction::RegenerateToken)),
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Who {
@@ -165,8 +181,56 @@ impl UiState {
     }
 
     /// Puts the loaded configuration on screen: the client's answer to [`UiAction::OpenConfig`].
+    /// The form arrives from the client's own conversion of the file, so it is the one form that
+    /// carries the user's configuration — and marking it filled is what lets it be saved. The
+    /// placeholder the screen opens on before this call is not filled, and cannot be.
     pub fn show_config_form(&mut self, form: ConfigForm) {
+        let mut form = form;
+        form.mark_filled();
         self.config_form = Some(form);
+    }
+
+    /// A click, dispatched the way the control that reported it meant it.
+    ///
+    /// The screen's controls name their own target in `hit.action` — a tab, a row, a button — so a
+    /// click is *not* turned into the keystroke of whatever happens to be focused. A tab or a row is
+    /// handed to the form as the action it is; the two buttons and the token generator are the same
+    /// actions their keys are, so they take the key path and the two cannot drift apart. `hit.key`
+    /// is the fallback for the controls that are keys in the hand — the header's two, the HUD's own
+    /// three — and it is read through [`UiState::on_key`], so the door into the screen answers a
+    /// click exactly as it answers `F9`.
+    pub fn on_hit(&mut self, hit: &Hit) -> Vec<UiAction> {
+        let Some(action) = hit.action else {
+            return self.on_key(hit.key);
+        };
+        if self.config_form.is_none() {
+            // The HUD's own controls: a click is the keystroke they already answer.
+            return self.on_key(hit.key);
+        }
+        match action {
+            // The two buttons and the generator are the actions their keys raise; going through the
+            // key keeps one translation for both paths.
+            ConfigAction::Save => self.config_key(KeyInput::F(4)),
+            ConfigAction::Test => self.config_key(KeyInput::F(2)),
+            ConfigAction::RegenerateToken => {
+                self.config_key(KeyInput::Char(crate::config_form::REGENERATE_KEY))
+            }
+            // The header's two controls, and the screen's door: a click on either toggles the screen
+            // the way `F9` does. The door is the state's, not the form's — `Toggle` names it here so
+            // that a click on the gear cannot be read as the keystroke of a screen control.
+            ConfigAction::Open | ConfigAction::Close | ConfigAction::Toggle => {
+                self.toggle_config_form()
+            }
+            // Everything else the screen draws names a row or a tab, and the form decides what that
+            // row's own action is: a buffer, a switch, a Test, a profile.
+            _ => {
+                let effects = match self.config_form.as_mut() {
+                    Some(form) => form.apply(action),
+                    None => Vec::new(),
+                };
+                effects_to_actions(effects)
+            }
+        }
     }
 
     /// The screen's own keys: the form translates and reduces them — the buffer, the focus and the
@@ -179,19 +243,7 @@ impl UiState {
         let Some(form) = self.config_form.as_mut() else {
             return Vec::new();
         };
-        let outcome = form.key(key);
-        let mut actions = Vec::new();
-        for effect in outcome.effects {
-            match effect {
-                ConfigEffect::None => {}
-                ConfigEffect::Save => actions.push(UiAction::Config(ConfigAction::Save)),
-                ConfigEffect::Test(_) => actions.push(UiAction::Config(ConfigAction::Test)),
-                ConfigEffect::RegenerateToken => {
-                    actions.push(UiAction::Config(ConfigAction::RegenerateToken))
-                }
-            }
-        }
-        actions
+        effects_to_actions(form.key(key).effects)
     }
 
     /// The assistant entry the next reply belongs to: the last one that has not been said yet.
@@ -448,6 +500,10 @@ impl UiState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The lib code never names a tab — the form's own actions carry it — so the tab enum is a test
+    // import only, and the click test below is what needs it.
+    use crate::config_form::ConfigTab;
+    use ratatui::layout::Rect;
     use tipsy_protocol::*;
 
     fn welcome(lang: UiLanguage) -> Event {
@@ -801,6 +857,10 @@ mod tests {
         let mut s = UiState::new();
         s.apply(&welcome(UiLanguage::En));
         s.on_key(KeyInput::F(9));
+        // The form this test is about is the one the client answered with, not the placeholder the
+        // screen opens on: a placeholder refuses to save (finding G), and refusing is a different
+        // test's subject. Marking it filled here is what a client's `form_of` does in the app.
+        s.config_form.as_mut().unwrap().mark_filled();
         // Ctrl+S reaches the form as the control character no text row wants. The client owns the
         // file, so the key is reported as the action to perform rather than left as a notice the
         // user can do nothing about.
@@ -826,9 +886,67 @@ mod tests {
         assert_eq!(s.config_form.as_ref().unwrap().editing.as_deref(), Some("x"));
     }
 
+    /// The click path: a control's hit carries the action it means, and `on_hit` dispatches that
+    /// action rather than the keystroke of whatever happens to be focused. This is the test that
+    /// would have caught a click on the Profiles tab arriving as `F9` and closing the screen.
     #[test]
-    fn a_second_welcome_does_not_reset_the_form_the_user_is_filling_in() {
+    fn a_click_dispatches_the_action_the_control_names() {
         let mut s = UiState::new();
+        s.apply(&welcome(UiLanguage::Es));
+        s.on_key(KeyInput::F(9));
+        let mut form = ConfigForm {
+            active_profile: "compae".into(),
+            profiles: vec![
+                crate::config_form::ProfileForm {
+                    id: "compae".into(),
+                    name: "El Compae".into(),
+                    language: "es-ES".into(),
+                    ..Default::default()
+                },
+                crate::config_form::ProfileForm {
+                    id: "meigo".into(),
+                    name: "O Meigo".into(),
+                    language: "es-ES".into(),
+                    ..Default::default()
+                },
+            ],
+            ..ConfigForm::default()
+        };
+        form.tab = ConfigTab::Profiles;
+        s.show_config_form(form);
+        assert!(s.config_form.as_ref().is_some_and(|f| f.filled()), "a client's form can be saved");
+
+        // A click on the Profiles tab shows the tab: it does not close the screen.
+        let tab = Hit {
+            area: Rect::new(1, 1, 8, 1),
+            key: KeyInput::F(8),
+            action: Some(ConfigAction::SelectTab(ConfigTab::Profiles)),
+        };
+        assert_eq!(s.on_hit(&tab), Vec::new(), "showing a tab asks the client for nothing");
+        assert_eq!(s.config_form.as_ref().unwrap().tab, ConfigTab::Profiles);
+        assert!(s.config_form.is_some(), "the screen is still open");
+
+        // A click on the second profile row makes it the active one, which no key could do before.
+        let row = Hit {
+            area: Rect::new(4, 4, 20, 1),
+            key: KeyInput::Enter,
+            action: Some(ConfigAction::FocusRow(1)),
+        };
+        assert_eq!(s.on_hit(&row), Vec::new());
+        assert_eq!(s.config_form.as_ref().unwrap().active_profile, "meigo");
+
+        // And the Save button means what Save means: the effect comes back as an action for the
+        // client, exactly as it does from `Ctrl+S`.
+        let save = Hit {
+            area: Rect::new(1, 20, 4, 1),
+            key: KeyInput::F(4),
+            action: Some(ConfigAction::Save),
+        };
+        assert_eq!(s.on_hit(&save), vec![UiAction::Config(ConfigAction::Save)]);
+    }
+
+    #[test]
+    fn a_second_welcome_does_not_reset_the_form_the_user_is_filling_in() {        let mut s = UiState::new();
         s.apply(&welcome(UiLanguage::Es));
         // Work already done on the HUD, and work in progress in the screen: the two things a fresh
         // session would drop.
