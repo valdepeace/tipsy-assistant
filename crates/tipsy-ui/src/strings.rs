@@ -62,6 +62,9 @@ pub struct Strings {
     pub mode_push: &'static str,
     pub mode_auto: &'static str,
     pub mode_hands_free: &'static str,
+    /// The HUD's notice for `hands_free`: the third mode the configuration accepts and the one this
+    /// plan does not implement. It says what is missing rather than staying quiet.
+    pub hands_free_unimplemented: &'static str,
 }
 
 pub static ES: Strings = Strings {
@@ -124,6 +127,7 @@ pub static ES: Strings = Strings {
     mode_push: "push",
     mode_auto: "auto",
     mode_hands_free: "hands free",
+    hands_free_unimplemented: "manos libres aún no está: espera a la palabra clave",
 };
 
 pub static EN: Strings = Strings {
@@ -186,6 +190,7 @@ pub static EN: Strings = Strings {
     mode_push: "push",
     mode_auto: "auto",
     mode_hands_free: "hands free",
+    hands_free_unimplemented: "hands free is not implemented yet: it waits for the wake word",
 };
 
 pub fn strings(lang: UiLanguage) -> &'static Strings {
