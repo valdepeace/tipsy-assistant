@@ -22,20 +22,40 @@ while it is open (a cost of drawing the header over the full-screen form, and un
 `client.rs` that overclaims where a read error is shown, one mangled test line `cargo fmt` would fix,
 and the help text that lost the true half of the toggle key (`Enter` still toggles a switch row).
 
-**Complete as a branch, merge gated:** Plan 2C
+**Integrated on `master` too: Plan 2C**
 (`docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md`) — the OpenAI Realtime voice mode:
 `[realtime]` in the config, the socket over `tokio-tungstenite`, the pure wire-event mapping, the turn
 plumbing with one exit for every way a socket dies, honest barge-in truncation, and the live indicator
 with `F10`. All six tasks, the whole-branch review, one fix wave and one scoped re-review ("all
-findings addressed, no open findings") on branch `plan-2c-openai-realtime`; **362 tests green**. Its
-merge waits on the login branch: another agent's `Login*` arms sit inside 2C's commits and their
-protocol change is still uncommitted, so 2C does not compile without their work. Four residual Minors
-are parked in its ledger, and the release checklist still owes one live-key spoken exchange.
+findings addressed, no open findings"); **362 tests green** on its own branch, and it is on master
+because the login screen's protocol definitions are what made its `Login*` arms compile — the debt that
+used to leave master unable to build is paid. Four residual Minors are parked in its ledger, and the
+release checklist still owes one live-key spoken exchange.
 
-**Not started:** the two throwaway spikes in a scratch directory outside the repo — Ratzilla
-(ratatui `Canvas` with Braille + mouse on wasm32) and Rustpotter (a custom Spanish wake word; the
-shipped one is "oye compae"). They feed the web-client plan and the `hands_free` plan, and every
-profile's wake word stays provisional until Rustpotter verifies it.
+**Integrated on `master`: the login screen**
+(`docs/superpowers/plans/2026-10-11-plan-login-screen.md`, spec
+`docs/superpowers/specs/2026-10-11-login-screen-design.md`) — the ritual door: a widget with the core in
+the middle over a veiled, unreadable HUD; an allowlist of names and keywords in `[login]` in
+`config.toml`, judged on the server so it never travels to a client; typing and voice, with only the
+speech the local detector confirms ever uploaded; the profile's greeting withheld until the door opens.
+Five tasks, one whole-branch review, one fix wave and one scoped re-review that closed every finding —
+the worst of them being that the client could forward login audio before the microphone device had been
+opened. The merge was a fast-forward, and **master is at 420 tests, 0 failures**. It is a **ritual, not
+authentication**: `server.token` is still the only door, and nothing in its code, docs or comments
+claims otherwise. Its record is `.superpowers/sdd/2026-10-11-plan-login-screen/` — read
+`coordinator-rulings.md` there, not `progress.md`, which another session overwrote.
+
+**Written, not started: Plan 3, the web tier**
+(`docs/superpowers/plans/2026-10-11-plan-3-web-tier.md`, spec
+`docs/superpowers/specs/2026-10-11-web-tier-design.md`) — 19 tasks in three phases: the server web tier,
+the web terminal, and the web client, whose Ratzilla spike is already marked PASS inside the plan. Start
+from `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`: it names which of its tasks can begin
+without touching a file another plan owns, and the two obligations Plan 3 owes the login screen.
+
+**Not started: Rustpotter** — the custom Spanish wake word (the shipped one is "oye compae"), which
+every profile's wake word stays provisional until it verifies. The Ratzilla spike, the other throwaway,
+is **done and PASS** (Plan 3's Task 3.1 records it), so the web client's gate is cleared. Both live in a
+scratch directory outside the repo.
 
 ## Budget rules (user is on a tight budget)
 
