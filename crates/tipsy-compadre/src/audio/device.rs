@@ -5,6 +5,7 @@
 //! shape the protocol promises.
 
 use std::sync::mpsc::{SyncSender, TrySendError};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SizedSample};
@@ -72,6 +73,21 @@ impl Player {
     /// so this is exactly "clearing now would drop audio the user has not heard yet".
     pub fn playing(&self) -> bool {
         !self.player.empty()
+    }
+
+    /// How much of what was queued has actually been heard: the number of sources still queued or
+    /// playing, and the position inside the one that is playing now.
+    ///
+    /// This is rodio's own account of the device (`Player::len`, `player.rs:325-330`, and
+    /// `Player::get_pos`, `:332-342`) and not a count of what was appended, because a stream is
+    /// generated faster than it is played: bytes handed over would overstate what the user heard.
+    /// The two halves are kept apart — the caller knows the size of the chunks it appended, and only
+    /// it can say which of them `remaining` refers to.
+    ///
+    /// Task 5 is the caller: `played_bytes` in the realtime module turns this into the milliseconds
+    /// a `conversation.item.truncate` may claim, and every way of being unsure rounds it down.
+    pub fn progress(&self) -> (usize, Duration) {
+        (self.player.len(), self.player.get_pos())
     }
 
     /// The configuration the output device actually opened with, for the log.
