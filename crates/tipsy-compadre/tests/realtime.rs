@@ -538,6 +538,20 @@ fn delta(item_id: &str, content_index: u32, samples: &[i16]) -> String {
     )
 }
 
+/// The same frame with **no** `item_id` at all. The note marks the event's payload fields inferred,
+/// so a delta whose name is absent is a shape a real server may send; the mapping accepts it and the
+/// call must still play it.
+fn delta_without_a_name(content_index: u32, samples: &[i16]) -> String {
+    let mut pcm = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        pcm.extend_from_slice(&sample.to_le_bytes());
+    }
+    let audio = events::base64_encode(&pcm);
+    format!(
+        r#"{{"type":"response.output_audio.delta","response_id":"resp_1","output_index":0,"content_index":{content_index},"delta":"{audio}"}}"#
+    )
+}
+
 /// One `response.output_audio_transcript.delta` — the same inferred payload shape, pinned the same
 /// way.
 fn transcript_delta(text: &str) -> String {
@@ -680,6 +694,36 @@ async fn a_delta_for_another_item_is_not_played() {
     // counted either: they would be added to the item a later truncate names.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(from_call.try_recv().is_err(), "nothing of `item_b` may reach the device");
+}
+
+#[tokio::test]
+async fn a_delta_without_an_item_id_plays_and_does_not_gate_the_rest_of_the_response() {
+    // The final review's critical finding. The item gate may fire on a *known* mismatch only: an
+    // unnamed delta names no item, so it is not known to disagree with anything. The old gate stored
+    // `""` as the item being played and compared every later delta against it, so the named delta
+    // below compared unequal and was dropped — nothing reached the device, `finish` early-returned
+    // and the HUD got neither a reply nor a `Done` (the note's rule is that a delta without a
+    // readable name leaves nothing safe to truncate, never that it silences the call).
+    let (url, accepting) = call_server().await;
+    let (out, mut from_call) = tokio::sync::mpsc::unbounded_channel();
+    let heard = Heard::new();
+    let _call = Call::open(setup(url), Arc::clone(&heard), out);
+    let mut server = accepting.await.expect("the server task");
+    server.handshake().await;
+
+    server.send(response_created("resp_1")).await;
+    server.send(delta_without_a_name(0, &[3i16; 480])).await;
+    server.send(delta("item_a", 0, &[7i16; 480])).await;
+
+    let seen = collect_until(&mut from_call, |seen| audio_of(seen).len() == 2).await;
+    assert_eq!(
+        audio_of(&seen),
+        vec![(0, vec![3i16; 480]), (1, vec![7i16; 480])],
+        "the unnamed delta plays, and the named one is not gated out by the name's absence"
+    );
+    // And the name that did arrive is what a later truncate would use: the unnamed delta left the
+    // bookkeeping untouched rather than storing a sentinel that no item could match.
+    assert_eq!(heard.item(), Some(("item_a".to_string(), 0)));
 }
 
 #[tokio::test]

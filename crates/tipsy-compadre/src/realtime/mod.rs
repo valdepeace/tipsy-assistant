@@ -331,8 +331,10 @@ struct Turn {
     /// True once any of this response's audio reached the device.
     spoke: bool,
     /// The item this response is playing, and its content index — the pair a truncate names. It is
-    /// fixed by the response's first audio delta and never replaced, so a later delta of another
-    /// item is not this response's audio.
+    /// fixed by the response's first *named* audio delta and never replaced, so a later delta of
+    /// another item is not this response's audio. A delta that carries no name leaves this `None`:
+    /// there is nothing safe to truncate yet, and a sentinel no later delta could match would gate
+    /// the rest of the response's audio away.
     item: Option<(String, u32)>,
     /// True once the HUD was told the assistant is speaking.
     speaking: bool,
@@ -571,23 +573,27 @@ fn on_event(
             if samples.is_empty() {
                 return (Step::Continue, None);
             }
-            // The first delta of the response names the item the device is playing, and `Heard`
-            // starts its count there. The count is per item and is fed one chunk per delta, so it is
-            // that first delta and no later one that calls `begin`: calling it again would throw the
-            // chunks already counted away and understate the audio the user has heard.
-            if turn.item.is_none() {
-                turn.item = Some((item_id.clone().unwrap_or_default(), content_index));
-                // A delta whose frame carries no name (the note marks that field inferred) is still
-                // played — it is the model's audio — but it leaves nothing safe to truncate later
-                // rather than naming whatever arrived last.
-                if let Some(item_id) = &item_id {
-                    heard.begin(item_id, content_index);
-                }
+            // The first *named* delta of the response names the item the device is playing, and
+            // `Heard` starts its count there. The count is per item and is fed one chunk per delta, so
+            // it is that first delta and no later one that calls `begin`: calling it again would throw
+            // the chunks already counted away and understate the audio the user has heard.
+            //
+            // A delta whose frame carries no name (the note marks that field inferred) is still played
+            // — it is the model's audio — but it leaves nothing safe to truncate later: it names no
+            // item, so the bookkeeping keeps waiting for a name instead of storing a sentinel that no
+            // later delta could ever match.
+            if turn.item.is_none() && let Some(named) = &item_id {
+                turn.item = Some((named.clone(), content_index));
+                heard.begin(named, content_index);
             }
             // A delta of an item this response is not playing is not heard at all. It is what a
             // cancelled response still arriving looks like, and its bytes must reach neither the
             // device nor the count a later truncate is derived from.
-            if turn.item.as_ref().is_some_and(|(playing, _)| Some(playing.as_str()) != item_id.as_deref()) {
+            //
+            // The gate fires on a *known* mismatch, never on a missing name: an unnamed delta is not
+            // known to disagree with anything, and reading its absence as one would drop every later
+            // delta of the response — named ones included — before any of them reached the device.
+            if let (Some((playing, _)), Some(named)) = (&turn.item, &item_id) && playing != named {
                 return (Step::Continue, None);
             }
             turn.spoke = true;
