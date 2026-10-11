@@ -107,12 +107,14 @@ pub fn map(frame: &str) -> Result<Action, EventError> {
         // INFERRED FIELDS (`delta`, `item_id`, `content_index`): the note confirms this `type`
         // verbatim but its payload page truncated, so this arm and its fixture are the single place
         // the guessed shape lives. `delta` is the one the audio cannot be read without; the item's
-        // name is optional on purpose (see `Action::AudioDelta`).
+        // name is optional on purpose (see `Action::AudioDelta`), read through the same `field`
+        // family as the rest — `optional_field` — so an absent name is `None` and a name of the
+        // wrong type is the typed error every other read raises.
         "response.output_audio.delta" => {
             let delta = field(&value, kind, "delta")?;
             let pcm = decode_base64(delta)
                 .map_err(|detail| EventError::BadAudio { kind: kind.to_string(), detail })?;
-            let item_id = value.get("item_id").and_then(Value::as_str).map(str::to_string);
+            let item_id = optional_field(&value, kind, "item_id")?.map(str::to_string);
             // An index the frame does not carry, or one too large for a `u32`, is the note's own
             // fixed `0`: the note says `content_index` is `0`, so there is nothing to guess.
             let content_index = match value.get("content_index").and_then(Value::as_u64) {
@@ -239,6 +241,21 @@ fn field<'a>(value: &'a Value, kind: &str, name: &'static str) -> Result<&'a str
             name,
             found: json_kind(found),
         }),
+    }
+}
+
+/// A flat string field of a known event that may legitimately be absent: `None` when the frame does
+/// not carry it, and the same typed error as [`field`] when it carries it as something other than a
+/// string. `response.output_audio.delta`'s `item_id` is the one field this reads: the note marks that
+/// payload inferred, so its absence is a shape a real server may send, while a name of the wrong type
+/// is not a shape the mapping can pretend it did not see.
+fn optional_field<'a>(value: &'a Value, kind: &str, name: &'static str) -> Result<Option<&'a str>, EventError> {
+    match value.get(name) {
+        None => Ok(None),
+        Some(found) => found
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| EventError::NotAString { kind: kind.to_string(), name, found: json_kind(found) }),
     }
 }
 
@@ -429,6 +446,21 @@ mod tests {
                 .to_string()
                 .starts_with("response.output_audio.delta carried audio that is not base64: invalid base64 byte"),
             "{error}"
+        );
+        assert_eq!(error.code(), ErrorCode::BadResponse);
+    }
+
+    #[test]
+    fn an_item_id_of_the_wrong_type_is_a_typed_error() {
+        // `item_id` may be absent — the note marks this payload inferred, so an unnamed delta is a
+        // shape a real server may send — but a name that is present and not a string is the same
+        // malformed payload as `delta`: the read goes through the `field` family (`optional_field`),
+        // so it is a readable error rather than an absence the mapping invented.
+        let error = map(r#"{"type":"response.output_audio.delta","item_id":7,"delta":"AAECAw=="}"#)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "response.output_audio.delta carried `item_id` as a number, not a string"
         );
         assert_eq!(error.code(), ErrorCode::BadResponse);
     }
