@@ -95,6 +95,17 @@ pub struct Strings {
     /// The same border from the third refusal in a row: the escape hatch that keeps a locked-out owner
     /// from being stuck (spec §6, L8).
     pub login_keys_lost: &'static str,
+    /// `ErrorCode::ProtocolVersion`: the handshake refused because the two ends do not speak the same
+    /// protocol. The number itself is deliberately not spelled here — the tables hold `&'static str`,
+    /// so a `{PROTOCOL_VERSION}` could not be interpolated, and the version belongs in a log line.
+    pub err_protocol_version: &'static str,
+    /// `ErrorCode::TokenRequired`: the server is exposed and the client presented no token.
+    pub err_token_required: &'static str,
+    /// `ErrorCode::TokenInvalid`: the token presented is not this server's. The refused token is never
+    /// echoed back.
+    pub err_token_invalid: &'static str,
+    /// The handshake's fallback sentence, for an ending that is not one of the three above.
+    pub err_handshake: &'static str,
 }
 
 pub static ES: Strings = Strings {
@@ -171,6 +182,10 @@ pub static ES: Strings = Strings {
     login_rec: "● rec",
     login_keys: "Tab micro · Enter entrar · esc salir",
     login_keys_lost: "Tab micro · Enter entrar · ¿olvidado? [login] en config.toml",
+    err_protocol_version: "Esta versión del cliente no habla el protocolo de este servidor.",
+    err_token_required: "Este servidor está expuesto y pide un token: pásalo con --token.",
+    err_token_invalid: "Ese no es el token de este servidor.",
+    err_handshake: "No se pudo completar el saludo con el servidor.",
 };
 
 pub static EN: Strings = Strings {
@@ -247,6 +262,10 @@ pub static EN: Strings = Strings {
     login_rec: "● rec",
     login_keys: "Tab mic · Enter in · esc quit",
     login_keys_lost: "Tab mic · Enter in · forgotten it? [login] in config.toml",
+    err_protocol_version: "This client's version does not speak this server's protocol.",
+    err_token_required: "This server is exposed and asks for a token: pass it with --token.",
+    err_token_invalid: "That is not this server's token.",
+    err_handshake: "The handshake with the server could not be completed.",
 };
 
 pub fn strings(lang: UiLanguage) -> &'static Strings {

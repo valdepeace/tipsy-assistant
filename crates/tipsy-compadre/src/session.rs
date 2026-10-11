@@ -4,15 +4,17 @@
 //! fresh [`CancellationToken`], and hands the history it produced back to the session through a
 //! oneshot — so the history has exactly one owner and a cancelled turn can never write into it.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tipsy_protocol::{
-    AssistantState, Command, Event, Frame, ListeningMode, LoginView, ProfileView, ToClient, ToServer, UiLanguage,
+    AssistantState, Command, ErrorCode, Event, Frame, ListeningMode, LoginView, PROTOCOL_VERSION, ProfileView,
+    ToClient, ToServer, UiLanguage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audio::device::MIC_SAMPLE_RATE;
@@ -22,8 +24,74 @@ use crate::config::Config;
 use crate::providers::{ChatMessage, ProviderSlot, Role};
 use crate::vad::{Scorer, VadEvent, VadState};
 
-/// The session id reported to clients. There is one session per process for now.
-const SESSION_ID: u64 = 1;
+/// The session ids this process has handed out. One session per connection means the id can no
+/// longer be a constant (spec §5.2): two clients connected at once have to be told apart, and
+/// `Welcome.session_id` is what tells them apart. The first session is `1`, so a single-client run
+/// reports what it always did.
+static SESSION_IDS: AtomicU64 = AtomicU64::new(0);
+
+/// The next session id: unique within the process, and never reused.
+fn next_session_id() -> u64 {
+    SESSION_IDS.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// What this session requires of a client before it serves one (spec §4.1).
+///
+/// **The server's exposure is not read from the configuration.** `config.server.lan` is the user's
+/// intent, and the only thing that knows whether that intent survived the bind is the listener:
+/// `bind = "0.0.0.0:7070"` with `lan = false` is exposed all the same. The listener therefore says
+/// so explicitly — `SessionPolicy::local()` for the in-process client, `SessionPolicy::exposed(token)`
+/// for anything that is not loopback — and this type carries the answer rather than re-deriving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPolicy {
+    /// True when the server is reachable from somewhere other than this machine's loopback.
+    pub require_token: bool,
+    /// The token a client must present. Empty when none has been generated; a server that requires a
+    /// token and has none refuses every client rather than accepting every one.
+    pub token: String,
+    /// True when the connection reaches this server only over loopback. `GetConfig`'s token rule
+    /// (spec §4.3, Task 1.3) and `SetKey`'s refusal (spec §9.4, Task 1.8) are both decided from it.
+    pub loopback: bool,
+}
+
+impl SessionPolicy {
+    /// A session reached over the in-process channel: no token, none asked for, and the token still
+    /// crosses to it, because it is the client's own machine (spec §4.3).
+    pub fn local() -> Self {
+        Self { require_token: false, token: String::new(), loopback: true }
+    }
+
+    /// A session behind a listener that is not loopback.
+    pub fn exposed(token: impl Into<String>) -> Self {
+        Self { require_token: true, token: token.into(), loopback: false }
+    }
+
+    /// The one place "may this client be served?" is decided, so the version check, the missing token
+    /// and the wrong token cannot drift apart. `Err` names the refusal with the `ErrorCode` that
+    /// branches it on the wire (Task 1.1's three variants); the sentence a client shows is the
+    /// session's own, because this type is not where an interface string belongs.
+    ///
+    /// A `Command` that does not parse is `ProtocolVersion` and not `BadMessage`: `Hello` is the only
+    /// message allowed to be first, and a first message that is not `Hello` means the client is not
+    /// speaking this protocol. `BadMessage` is for a later malformed frame on an open connection
+    /// (spec §10), which is Task 1.6's path, not this one.
+    fn admits(&self, hello: &Command) -> Result<(), ErrorCode> {
+        let Command::Hello { token, protocol_version, .. } = hello else {
+            return Err(ErrorCode::ProtocolVersion);
+        };
+        if *protocol_version != PROTOCOL_VERSION {
+            return Err(ErrorCode::ProtocolVersion);
+        }
+        if !self.require_token {
+            return Ok(());
+        }
+        match token.as_deref() {
+            None => Err(ErrorCode::TokenRequired),
+            Some(presented) if presented == self.token => Ok(()),
+            Some(_) => Err(ErrorCode::TokenInvalid),
+        }
+    }
+}
 
 /// How much conversation the session keeps. An exchange is a question and its reply, so this is 20
 /// exchanges: deep enough that a follow-up can still refer to what was said a while ago, shallow
@@ -44,23 +112,32 @@ pub fn spawn_session(
     config: Config,
     providers: ProviderSlot,
     brain_config: BrainConfig,
+    policy: SessionPolicy,
 ) -> (UnboundedSender<ToServer>, UnboundedReceiver<ToClient>) {
-    let session = spawn_with_events(config, providers, brain_config);
+    let session = spawn_with_events(config, providers, brain_config, policy);
     (session.to_server, session.from_server)
 }
 
-/// The three ends the client keeps, exactly as a session hands them over.
+/// The four ends the client keeps, exactly as a session hands them over.
 pub struct SessionEnds {
+    /// The id this session reports in `Welcome.session_id`: unique per session in this process.
+    pub session_id: u64,
     pub to_server: UnboundedSender<ToServer>,
     pub from_server: UnboundedReceiver<ToClient>,
-    /// A second sender for the same client channel, for producers that live beside the session,
-    /// such as the system monitor.
+    /// A second sender for the same client channel, for producers that live beside the session, such
+    /// as the system monitor.
     pub events: UnboundedSender<ToClient>,
 }
 
-/// Like [`spawn_session`], but also hands back the sender the session reports to, so a caller can
-/// put other producers of [`ToClient`] on the same channel.
-pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: BrainConfig) -> SessionEnds {
+/// Like [`spawn_session`], but also hands back the sender the session reports to, so a caller can put
+/// other producers of [`ToClient`] on the same channel, and the session's own id.
+pub fn spawn_with_events(
+    config: Config,
+    providers: ProviderSlot,
+    brain_config: BrainConfig,
+    policy: SessionPolicy,
+) -> SessionEnds {
+    let session_id = next_session_id();
     let (to_server_tx, to_server_rx) = mpsc::unbounded_channel();
     let (to_client_tx, to_client_rx) = mpsc::unbounded_channel();
     // Held so the client end only closes once the session task itself has ended.
@@ -75,6 +152,9 @@ pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: 
     let greeting_withheld = crate::login::applies(&config.login);
 
     let mut session = Session {
+        session_id,
+        policy,
+        token_presented: false,
         config,
         brain,
         brain_config,
@@ -111,7 +191,7 @@ pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: 
         drop(keep_alive);
     });
 
-    SessionEnds { to_server: to_server_tx, from_server: to_client_rx, events: to_client_tx }
+    SessionEnds { session_id, to_server: to_server_tx, from_server: to_client_rx, events: to_client_tx }
 }
 
 /// What the brain needs from the configuration: the active profile's texts and the voice the speech
@@ -129,14 +209,23 @@ fn turn_profile(config: &Config) -> TurnProfile {
 /// A turn that is running right now, and the only handle the session may cancel.
 struct Turn {
     cancel: CancellationToken,
-    /// Where the turn's task leaves the history it produced.
+    /// Where the turn's task leaves the history it produced. The loop's first branch awaits this
+    /// rather than asking a task handle whether it finished: the channel is what says both that the
+    /// turn is over and what it produced, so there is nothing else to keep.
     done: tokio::sync::oneshot::Receiver<Vec<ChatMessage>>,
-    handle: JoinHandle<()>,
     /// Bumped by `Reset`, so a turn that outlives one cannot restore the history it cleared.
     generation: u64,
 }
 
 struct Session {
+    /// What `Welcome` reports, and what Task 1.3's `Hub` keys this session by.
+    session_id: u64,
+    /// The handshake this session insists on before it serves anything.
+    policy: SessionPolicy,
+    /// Whether this client is entitled to the server's token in a `GetConfig` answer (spec §4.3):
+    /// true for a loopback connection, and for one that presented the token. Recorded once, where the
+    /// handshake is judged, because it is a fact about the handshake and not about the request.
+    token_presented: bool,
     /// The configuration the session was built from. A `SetProfile` re-derives the brain from it, so
     /// a switch takes effect on the next turn.
     config: Config,
@@ -187,6 +276,33 @@ struct Session {
 
 impl Session {
     async fn run(&mut self, mut rx: UnboundedReceiver<ToServer>) {
+        // The handshake is judged before the first byte the session says. `Hello` is sent by every
+        // client as its first message (spec §4.1), so "refused, then closed" is exactly this: no
+        // `Welcome`, one `Error`, and a channel that closes when this function returns. Judging it
+        // here rather than in `command` is what removes the race between a refusal and the greeting
+        // turn — a `Welcome` already sent could not be taken back, and the three refusals would be
+        // indistinguishable from a session that was served and then died.
+        //
+        // `admits` is asked of *any* first message, not only of a `Hello`: `Hello` is the only
+        // message allowed to be first, so a first message that is something else is exactly the
+        // client `admits` answers `ProtocolVersion` to. Asking it only when the message already
+        // parsed as `Hello` would serve an exposed session an `Ask` that never presented a token.
+        let first = match rx.recv().await {
+            Some(message) => message,
+            // The client vanished before saying anything: nothing to serve and nobody to tell.
+            None => return,
+        };
+        let admitted = match &first {
+            ToServer::Command(hello) => self.policy.admits(hello),
+            // Not a command at all, so it is not the `Hello` that has to come first.
+            ToServer::Audio(_) => Err(ErrorCode::ProtocolVersion),
+        };
+        self.token_presented = self.policy.loopback || admitted.is_ok();
+        if let Err(code) = admitted {
+            self.refuse(code);
+            return;
+        }
+
         self.welcome();
         // The greeting is an ordinary turn: while it plays, `Cancel` still works. While a login screen
         // applies it is withheld instead and spoken by the verdict that opens the door (spec §10) — no
@@ -222,7 +338,11 @@ impl Session {
                     let Some(message) = message else {
                         break;
                     };
-                    self.handle(message, &mut rx);
+                    // A refused `Hello` that arrives after the handshake ends the session here: the
+                    // break is the whole difference, and nothing is settled for a session that is over.
+                    if self.handle(message, &mut rx).is_break() {
+                        break;
+                    }
                 }
                 // The 300 ms the detector waits out after the assistant stops speaking. A command
                 // arriving at the same moment is handled first, and the deadline has elapsed either
@@ -243,21 +363,9 @@ impl Session {
                     self.greet_if_withheld();
                 }
             }
-            // A turn that ended is settled here, where the borrow the select held is over. A turn
-            // the command just started has no history yet and is left alone.
-            self.settle_finished_turn().await;
         }
         // Nothing may keep speaking after the client hung up.
         self.cancel_running();
-    }
-
-    /// Applies the history of a turn that has ended, if the running one has ended.
-    async fn settle_finished_turn(&mut self) {
-        if self.current.as_ref().is_some_and(|turn| turn.handle.is_finished()) {
-            let mut turn = self.current.take().expect("checked just above");
-            let history = (&mut turn.done).await.ok();
-            self.end_turn(turn, history);
-        }
     }
 
     /// Ends a turn: records the history it produced, and arms the 300 ms guard the detector stays
@@ -307,7 +415,7 @@ impl Session {
         send(
             &self.out,
             ToClient::Event(Event::Welcome {
-                session_id: SESSION_ID,
+                session_id: self.session_id,
                 profile: self.profile.clone(),
                 ui_language: self.ui_language,
                 listening_mode: self.listening_mode,
@@ -322,21 +430,24 @@ impl Session {
         );
     }
 
-    /// Handles one message from the client and everything already queued behind it, so a
-    /// `ListenStop` never leaves the tail of an utterance waiting behind it. A command that starts
-    /// a turn also stops the draining, since the turn replaces whatever was queued.
-    fn handle(&mut self, first: ToServer, rx: &mut UnboundedReceiver<ToServer>) {
+    /// Handles one message and everything already queued behind it, so a `ListenStop` never leaves the
+    /// tail of an utterance waiting behind it. `Break` means the session is over: a `Hello` refused
+    /// here was refused at a message that is not the first one.
+    fn handle(&mut self, first: ToServer, rx: &mut UnboundedReceiver<ToServer>) -> ControlFlow<()> {
         let mut message = first;
         loop {
-            self.dispatch(message);
+            let flow = self.dispatch(message);
+            if flow.is_break() {
+                return flow;
+            }
             match rx.try_recv() {
                 Ok(next) => message = next,
-                Err(_) => return,
+                Err(_) => return ControlFlow::Continue(()),
             }
         }
     }
 
-    fn dispatch(&mut self, message: ToServer) {
+    fn dispatch(&mut self, message: ToServer) -> ControlFlow<()> {
         match message {
             ToServer::Command(command) => self.command(command),
             ToServer::Audio(Frame::Mic(samples)) => {
@@ -345,11 +456,11 @@ impl Session {
                 // once as an answer and once as a question (spec §4.2).
                 if self.login_active {
                     self.login_frame(&samples);
-                    return;
+                    return ControlFlow::Continue(());
                 }
                 // Frames arriving before `ListenStart` — or after `ListenStop` — belong to no turn.
                 if !self.listening {
-                    return;
+                    return ControlFlow::Continue(());
                 }
                 match self.listening_mode {
                     // `auto`: the detector decides what is an utterance (spec §6), and only what it
@@ -359,8 +470,9 @@ impl Session {
                     // the utterance, and `ListenStop` transcribes them.
                     ListeningMode::Push | ListeningMode::HandsFree => self.mic.extend_from_slice(&samples),
                 }
+                ControlFlow::Continue(())
             }
-            ToServer::Audio(Frame::Speech { .. }) => {}
+            ToServer::Audio(Frame::Speech { .. }) => ControlFlow::Continue(()),
         }
     }
 
@@ -412,7 +524,7 @@ impl Session {
         }));
     }
 
-    fn command(&mut self, command: Command) {
+    fn command(&mut self, command: Command) -> ControlFlow<()> {
         // While the door is shut, the commands that belong to the other side of it are ignored (spec
         // §4.2): no client of ours can send them — the screen is modal and has no other action — and
         // inventing an error for a state no user can reach would be wire surface with no user behind
@@ -427,30 +539,99 @@ impl Session {
                 Command::LoginStart | Command::LoginStop | Command::LoginAnswer { .. } | Command::Hello { .. }
             )
         {
-            return;
+            return ControlFlow::Continue(());
         }
         match command {
-            Command::Ask { text } => self.ask(text),
-            Command::Say { text } => self.say(text),
-            Command::ListenStart => self.listen_start(),
-            Command::ListenStop => self.listen_stop(),
-            Command::Cancel => self.cancel(),
-            Command::Reset => self.reset(),
-            Command::SetProfile { id } => self.set_profile(id),
-            Command::SetListeningMode { mode } => self.set_listening_mode(mode),
-            Command::Hello { .. } => {}
+            Command::Ask { text } => {
+                self.ask(text);
+                ControlFlow::Continue(())
+            }
+            Command::Say { text } => {
+                self.say(text);
+                ControlFlow::Continue(())
+            }
+            Command::ListenStart => {
+                self.listen_start();
+                ControlFlow::Continue(())
+            }
+            Command::ListenStop => {
+                self.listen_stop();
+                ControlFlow::Continue(())
+            }
+            Command::Cancel => {
+                self.cancel();
+                ControlFlow::Continue(())
+            }
+            Command::Reset => {
+                self.reset();
+                ControlFlow::Continue(())
+            }
+            Command::SetProfile { id } => {
+                self.set_profile(id);
+                ControlFlow::Continue(())
+            }
+            Command::SetListeningMode { mode } => {
+                self.set_listening_mode(mode);
+                ControlFlow::Continue(())
+            }
+            // The first `Hello` was judged in `run`, before the `Welcome`; this arm is both the
+            // idempotent second pass `handle` makes for a queued message and the one place a *late*
+            // `Hello` — after the handshake, with the channel still open — is refused. A client that
+            // got this far was already admitted, so a failure here means a second hello with
+            // different credentials: the session ends rather than changing its mind.
+            Command::Hello { token, client, protocol_version } => {
+                let hello = Command::Hello { token, client, protocol_version };
+                match self.policy.admits(&hello) {
+                    Ok(()) => ControlFlow::Continue(()),
+                    Err(code) => {
+                        self.refuse(code);
+                        ControlFlow::Break(())
+                    }
+                }
+            }
             // The Test probe asks a provider a question, not the session: Plan 2B Task 7 runs it in
             // the native client and Plan 3's server answers it over the wire. Accepted and ignored,
             // so the match stays exhaustive.
-            Command::TestProvider { .. } => {}
-            Command::LoginStart => self.login_start(),
-            Command::LoginStop => self.login_stop(),
-            Command::LoginAnswer { text } => self.login_answer(text),
+            Command::TestProvider { .. } => ControlFlow::Continue(()),
+            Command::LoginStart => {
+                self.login_start();
+                ControlFlow::Continue(())
+            }
+            Command::LoginStop => {
+                self.login_stop();
+                ControlFlow::Continue(())
+            }
+            Command::LoginAnswer { text } => {
+                self.login_answer(text);
+                ControlFlow::Continue(())
+            }
             // Task 1.3 owns these three: the configuration over the wire is answered by a session
             // only once there is a server to persist through. Accepted and ignored here so the match
             // stays exhaustive and this task owns no behaviour.
-            Command::GetConfig | Command::UpdateConfig { .. } | Command::SetKey { .. } => {}
+            Command::GetConfig | Command::UpdateConfig { .. } | Command::SetKey { .. } => ControlFlow::Continue(()),
         }
+    }
+
+    /// Answers a refused handshake: the `code` a client branches on, and a sentence it shows as-is.
+    ///
+    /// The message is deliberately **not** the code spelled out. v1 spec §4.2 makes
+    /// `Event::Error.message` "already localized to the profile's language", so no client may parse
+    /// it; the machine-readable half is `code`. Both halves of that rule are load-bearing: a client
+    /// that branched on this string would break the day somebody translated it.
+    fn refuse(&self, code: ErrorCode) {
+        let strings = tipsy_ui::strings(self.ui_language);
+        let message = match code {
+            ErrorCode::ProtocolVersion => strings.err_protocol_version,
+            ErrorCode::TokenRequired => strings.err_token_required,
+            ErrorCode::TokenInvalid => strings.err_token_invalid,
+            // `refuse` is called from the handshake only, where those three are the only endings; the
+            // fallback is what keeps it total rather than pretending a fourth case cannot be reached.
+            _ => strings.err_handshake,
+        };
+        send(
+            &self.out,
+            ToClient::Event(Event::Error { code, message: message.to_string(), recoverable: false }),
+        );
     }
 
     /// Applies the profile the configuration screen saved and tells the client about it, so the
@@ -731,12 +912,12 @@ impl Session {
         let brain = Arc::clone(&self.brain);
         let out = self.out.clone();
         let token = cancel.clone();
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             brain.run_turn(&mut history, input, out, token).await;
             // Only the session may record the history, and only if it still wants it.
             let _ = done_tx.send(history);
         });
-        Turn { cancel, done: done_rx, handle, generation }
+        Turn { cancel, done: done_rx, generation }
     }
 }
 
@@ -901,6 +1082,12 @@ mod tests {
         let profile = config.active().clone();
         let greeting_withheld = crate::login::applies(&config.login);
         let session = Session {
+            // A directly built session never runs the handshake, so its id is the first one and its
+            // policy is the in-process one; both fields are what `run`'s prelude fills in for a
+            // session that really serves a client.
+            session_id: 1,
+            policy: SessionPolicy::local(),
+            token_presented: true,
             config,
             brain,
             brain_config,
@@ -941,7 +1128,8 @@ mod tests {
     /// Drives `frames` microphone frames of 20 ms into the session, as a client would.
     fn speak(session: &mut Session, frames: usize) {
         for _ in 0..frames {
-            session.dispatch(ToServer::Audio(Frame::Mic(vec![0i16; MIC_FRAME_SAMPLES])));
+            // A microphone frame can never break the session: only a refused `Hello` can.
+            let _ = session.dispatch(ToServer::Audio(Frame::Mic(vec![0i16; MIC_FRAME_SAMPLES])));
         }
     }
 
@@ -972,7 +1160,7 @@ mod tests {
         let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
         let (mut session, mut rx, chat_calls) = login_session(config, "yo soy Andrés del equipo del core", one_utterance(1000));
 
-        session.command(Command::LoginStart);
+        let _ = session.command(Command::LoginStart);
         assert!(session.login_active, "the capture opens");
         speak(&mut session, 70);
 
@@ -992,7 +1180,7 @@ mod tests {
         let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
         let (mut session, mut rx, _) = login_session(config, "soy Andrés del score", one_utterance(1000));
 
-        session.command(Command::LoginStart);
+        let _ = session.command(Command::LoginStart);
         speak(&mut session, 70);
 
         let events = events_until_verdict(&mut rx).await;
@@ -1007,7 +1195,7 @@ mod tests {
         let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
         let (mut session, mut rx, _) = login_session(config, "unused", vec![0.0; 80]);
 
-        session.command(Command::LoginStart);
+        let _ = session.command(Command::LoginStart);
         speak(&mut session, 70);
 
         let next = timeout(Duration::from_millis(200), rx.recv()).await;

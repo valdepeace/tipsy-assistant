@@ -15,8 +15,10 @@ use tipsy_compadre::audio::pcm::Pcm;
 use tipsy_compadre::brain::BrainConfig;
 use tipsy_compadre::config::{Config, LoginEntry};
 use tipsy_compadre::providers::*;
-use tipsy_compadre::session::spawn_session;
-use tipsy_protocol::{AssistantState, Command, Event, Frame, LoginView, ToClient, ToServer};
+use tipsy_compadre::session::{SessionPolicy, spawn_session};
+use tipsy_protocol::{
+    AssistantState, ClientKind, Command, Event, Frame, LoginView, PROTOCOL_VERSION, ToClient, ToServer,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 // ---------- fakes ----------
@@ -87,7 +89,16 @@ fn session_with(config: Config) -> (UnboundedSender<ToServer>, UnboundedReceiver
         speech: Arc::new(FakeSpeech),
         transcribe: Arc::new(FakeTranscribe { text: "no se usa" }),
     });
-    let (to_server, from_server) = spawn_session(config, providers, BrainConfig::default());
+    let (to_server, from_server) = spawn_session(config, providers, BrainConfig::default(), SessionPolicy::local());
+    // The handshake every client sends first (spec §4.1): the session judges it before it says a
+    // word, so a harness that skipped it would wait out its timeouts on a session that is correct.
+    to_server
+        .send(ToServer::Command(Command::Hello {
+            token: None,
+            client: ClientKind::Tui,
+            protocol_version: PROTOCOL_VERSION,
+        }))
+        .expect("the session must still be listening");
     (to_server, from_server, chat)
 }
 

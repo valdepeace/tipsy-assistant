@@ -24,7 +24,7 @@ use crate::config::Config;
 use crate::keys::{env_var_name, KeyResolver};
 use crate::providers::{build_one, build_providers, ProviderSlot};
 use crate::realtime::{Call, CallSetup, Heard};
-use crate::session::spawn_with_events;
+use crate::session::{SessionPolicy, spawn_with_events};
 use crate::sysmon;
 
 /// One frame of the HUD.
@@ -127,7 +127,12 @@ impl Client {
 
     /// The frame loop: input, messages from the session, audio and drawing, about 30 times a second.
     fn frame_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
-        let ends = spawn_with_events(self.config.clone(), self.providers.clone(), BrainConfig::default());
+        let ends = spawn_with_events(
+            self.config.clone(),
+            self.providers.clone(),
+            BrainConfig::default(),
+            SessionPolicy::local(),
+        );
         let to_server = ends.to_server;
         let mut from_server = ends.from_server;
         // A second sender for the same client channel: the system monitor and the screen's Test
