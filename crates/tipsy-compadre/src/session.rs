@@ -247,6 +247,12 @@ impl Session {
                 ui_language: self.ui_language,
                 listening_mode: self.listening_mode,
                 web_bundle: false,
+                // The screen itself is the capture's to announce (Task 3), where
+                // `login::applies(&config.login)` is the one authority on whether there is a screen
+                // at all. `None` is this task's honest placeholder: no client reads the field until
+                // the screen is wired, and inventing a second `applies` here is what the plan's
+                // "one rule, in one place" forbids.
+                login: None,
             }),
         );
     }
@@ -349,6 +355,10 @@ impl Session {
             // the native client and Plan 3's server answers it over the wire. Accepted and ignored,
             // so the match stays exhaustive.
             Command::TestProvider { .. } => {}
+            // The login screen's own three commands drive a capture this task does not have yet
+            // (Task 3 owns it, together with the `welcome` that announces the screen). Accepted and
+            // ignored for now, so the match stays exhaustive and this task owns no behaviour here.
+            Command::LoginStart | Command::LoginStop | Command::LoginAnswer { .. } => {}
         }
     }
 

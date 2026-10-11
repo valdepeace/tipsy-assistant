@@ -19,6 +19,7 @@ pub struct Config {
     /// The realtime voice mode (spec §6, plan 2C). A section of its own because a call is a *mode of
     /// the client*: `Capability` stays chat/speech/transcribe and `build_providers` never sees it.
     pub realtime: RealtimeConfig,
+    pub login: LoginConfig,
     /// The user's own profiles first, the built-ins `with_builtin_profiles` appends after them.
     /// `personas` was this field's name until the rename, so the old array key is a serde alias too:
     /// a file written with `[[personas]]` still loads, and is only ever written back as `[[profiles]]`.
@@ -34,6 +35,7 @@ impl Default for Config {
             listening: ListeningConfig::default(),
             providers: ProvidersConfig::default(),
             realtime: RealtimeConfig::default(),
+            login: LoginConfig::default(),
             profiles: builtin_profiles(),
         }
     }
@@ -183,6 +185,40 @@ impl Default for RealtimeConfig {
             voice: "marin".into(),
             max_minutes: 10,
         }
+    }
+}
+
+/// `[login]` in `config.toml` (spec §5, plan login-screen). Both switches default in, and an empty
+/// `allowed` means the screen never appears — which is what makes the defaults safe for a file
+/// written before this feature.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoginConfig {
+    pub enabled: bool,
+    /// The microphone opens with the screen; only speech the local detector confirms is transcribed.
+    pub voice: bool,
+    /// Ordered on purpose: the first entry whose keywords are all in the answer wins (spec R5).
+    pub allowed: Vec<LoginEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoginEntry {
+    /// What the screen greets them with. May be empty.
+    pub name: String,
+    /// All of them must be in the answer, as whole words, in the order they are written.
+    pub keywords: Vec<String>,
+}
+
+impl Default for LoginConfig {
+    fn default() -> Self {
+        Self { enabled: true, voice: true, allowed: Vec::new() }
+    }
+}
+
+impl Default for LoginEntry {
+    fn default() -> Self {
+        Self { name: String::new(), keywords: Vec::new() }
     }
 }
 

@@ -81,7 +81,7 @@ pub fn load_or_create(path: &Path) -> std::io::Result<LoadOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ProviderKind, Profile, ServerConfig};
+    use crate::config::{LoginEntry, ProviderKind, Profile, ServerConfig};
     use tipsy_protocol::ListeningMode;
 
     #[test]
@@ -397,6 +397,21 @@ mic_gain = 9.5
         assert!(!text.contains("[realtime]"), "loading must not rewrite the file, got:\n{text}");
     }
 
+    /// A file from before this feature has no `[login]` section, and loading it must not invent one in
+    /// the file: the screen never appears (no entries, so `applies` is false), and the file is untouched.
+    #[test]
+    fn a_file_without_the_login_section_loads_and_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[listening]\nmode = \"auto\"\n").unwrap();
+        let c = load_or_create(&path).unwrap().config;
+        assert!(c.login.enabled, "the switch defaults on; the entries are what make a screen");
+        assert!(c.login.voice);
+        assert!(c.login.allowed.is_empty());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("login"), "loading must not rewrite the file, got:\n{text}");
+    }
+
     /// The section survives a save and a load with every field, and it is written as its own table.
     #[test]
     fn the_realtime_section_survives_a_save_load_roundtrip() {
@@ -423,5 +438,26 @@ mic_gain = 9.5
         }
         assert!(!text.contains("silence_ms = 25"), "silence is not a realtime field:\n{text}");
         assert_eq!(load_or_create(&path).unwrap().config.realtime, config.realtime);
+    }
+
+    /// The section round-trips through the file, entries in order: file order is the ranking the matcher
+    /// uses (spec R5), so a save that reordered them would change who is greeted first.
+    #[test]
+    fn login_round_trips_and_keeps_its_entry_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.login.enabled = true;
+        c.login.voice = false;
+        c.login.allowed = vec![
+            LoginEntry { name: "Andrés".into(), keywords: vec!["andres".into(), "core".into()] },
+            LoginEntry { name: "María".into(), keywords: vec!["maria".into(), "data".into()] },
+        ];
+        save(&path, &c).unwrap();
+        let again = load_or_create(&path).unwrap().config;
+        assert_eq!(again.login, c.login);
+        assert_eq!(again.login.allowed[0].name, "Andrés", "the first entry is still first");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[login.allowed]]"), "the array is written as an array of tables:\n{text}");
     }
 }

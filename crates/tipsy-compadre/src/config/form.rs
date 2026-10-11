@@ -7,10 +7,14 @@
 use std::collections::BTreeMap;
 
 use tipsy_protocol::Capability;
-use tipsy_ui::{ConfigForm, ConfigTab, ListeningForm, ProfileForm, ProviderForm, RealtimeForm, ServerForm};
+use tipsy_ui::{
+    AllowedPersonForm, ConfigForm, ConfigTab, ListeningForm, LoginForm, ProfileForm, ProviderForm, RealtimeForm,
+    ServerForm,
+};
 
 use super::model::{
-    Config, ListeningConfig, Profile, ProviderConfig, ProviderKind, ProvidersConfig, RealtimeConfig, ServerConfig,
+    Config, ListeningConfig, LoginConfig, LoginEntry, Profile, ProviderConfig, ProviderKind, ProvidersConfig,
+    RealtimeConfig, ServerConfig,
 };
 
 /// The form the screen opens on: a plain-value copy of `config`, and nothing else.
@@ -47,6 +51,17 @@ pub fn form_of(config: &Config) -> ConfigForm {
         key_name: config.realtime.key.clone(),
         voice: config.realtime.voice.clone(),
         max_minutes: config.realtime.max_minutes,
+    };
+    // Carried, not drawn: the same rule as `[realtime]` above, and for a section that is *only* ever
+    // written by hand. A save that dropped it would lock the owner out of their own login screen.
+    form.login = LoginForm {
+        enabled: config.login.enabled,
+        voice: config.login.voice,
+        allowed: config.login
+            .allowed
+            .iter()
+            .map(|entry| AllowedPersonForm { name: entry.name.clone(), keywords: entry.keywords.clone() })
+            .collect(),
     };
     form.server = ServerForm {
         bind: config.server.bind.clone(),
@@ -96,6 +111,19 @@ pub fn config_from(form: &ConfigForm) -> Result<Config, String> {
             key: form.realtime.key_name.clone(),
             voice: form.realtime.voice.clone(),
             max_minutes: form.realtime.max_minutes,
+        },
+        // The one section the screen does not draw *and* the one that is only ever written by hand:
+        // it goes back exactly as the form carries it, so a save from the screen cannot erase an
+        // allowlist the user typed into the file.
+        login: LoginConfig {
+            enabled: form.login.enabled,
+            voice: form.login.voice,
+            allowed: form
+                .login
+                .allowed
+                .iter()
+                .map(|entry| LoginEntry { name: entry.name.clone(), keywords: entry.keywords.clone() })
+                .collect(),
         },
         profiles,
     })
@@ -181,7 +209,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::config::{ListeningConfig, ProviderConfig, ProvidersConfig, ServerConfig};
+    use crate::config::{ListeningConfig, LoginEntry, ProviderConfig, ProvidersConfig, ServerConfig};
     use tipsy_protocol::ListeningMode;
 
     /// A configuration with every kind of value the screen can change, so the round trip has
@@ -249,6 +277,17 @@ mod tests {
                 voice: "cedar".into(),
                 max_minutes: 25,
             },
+            // The same rule again: `[login]` is written by hand only, so the fixture carries a
+            // non-default section — two entries, in this order — and the round trip has to bring it
+            // back entry for entry.
+            login: LoginConfig {
+                enabled: true,
+                voice: false,
+                allowed: vec![
+                    LoginEntry { name: "Andrés".into(), keywords: vec!["andres".into(), "core".into()] },
+                    LoginEntry { name: "María".into(), keywords: vec!["maria".into(), "data".into()] },
+                ],
+            },
             profiles,
         }
     }
@@ -279,6 +318,21 @@ mod tests {
 
         let form = form_of(&config);
         assert_eq!(config_from(&form).unwrap().realtime, config.realtime);
+    }
+
+    /// The one section the screen does not draw, through the one conversion that would otherwise drop it.
+    /// This is the test Plan 2C added for `[realtime]`, and it is here for the same reason: a save from
+    /// the configuration screen must not erase a hand-written allowlist.
+    #[test]
+    fn a_save_from_the_screen_keeps_the_login_section() {
+        let mut config = Config::default();
+        config.login.enabled = false;
+        config.login.voice = false;
+        config.login.allowed = vec![LoginEntry { name: "Andrés".into(), keywords: vec!["andres".into(), "core".into()] }];
+
+        let form = form_of(&config);
+        let back = config_from(&form).expect("an untouched form saves");
+        assert_eq!(back.login, config.login, "the section survives the trip through the form");
     }
 
     /// The three capabilities are always there, in the protocol's own order, spelled the way the
