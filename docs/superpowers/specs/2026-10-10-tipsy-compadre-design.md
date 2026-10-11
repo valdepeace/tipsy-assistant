@@ -281,6 +281,18 @@ voice = "marin"
 max_minutes = 10         # a call ends by itself after this long
 # turn detection reuses [listening] silence_ms: there is no silence_ms here on purpose
 
+# The login screen (spec docs/superpowers/specs/2026-10-11-login-screen-design.md). A ritual, not a
+# lock: `server.token` above is the only real requirement. The screen appears only when `enabled` is
+# true *and* an entry below has keywords; the first entry whose keywords are all in the answer wins,
+# and every keyword is matched as a whole word, case- and accent-insensitively.
+[login]
+enabled = true
+voice = true            # the microphone opens with the screen; typing always works
+
+[[login.allowed]]
+name = "Andrés"
+keywords = ["andres", "core"]
+
 [[profiles]]
 id = "compae"
 name = "El Compae"

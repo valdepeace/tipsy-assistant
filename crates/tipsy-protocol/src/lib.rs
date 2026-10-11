@@ -96,6 +96,14 @@ pub struct ProfileView {
     pub language: String,
 }
 
+/// Which login screen a client should show before its HUD (spec `2026-10-11-login-screen-design.md`).
+/// `Option::None` on `Welcome` means "no login screen": the client goes straight to the HUD.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginView {
+    /// Whether the microphone opens with the screen. Typing always works, and is always free.
+    pub voice: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
@@ -111,6 +119,14 @@ pub enum Command {
     /// The configuration screen's "Test" button: one minimal call against the connector for this
     /// capability. Plan 2B Task 7 runs the probe and answers with `Event::TestResult`.
     TestProvider { capability: Capability },
+    /// The login screen is up and the microphone is opening (`login_start` on the wire). The server
+    /// answers nothing: what it does is start collecting the audio the client is about to stream.
+    LoginStart,
+    /// Stop capturing and discard whatever was buffered (`login_stop`). Idempotent.
+    LoginStop,
+    /// A typed answer (`login_answer`). Judged whether or not a capture is active, so a typing-only
+    /// client never has to send `LoginStart` at all.
+    LoginAnswer { text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +138,10 @@ pub enum Event {
         ui_language: UiLanguage,
         listening_mode: ListeningMode,
         web_bundle: bool,
+        /// `None` — no login screen. Present on every `Welcome` from this server, absent from an older
+        /// one's, which `#[serde(default)]` turns into `None`.
+        #[serde(default)]
+        login: Option<LoginView>,
     },
     Status { state: AssistantState, detail: Option<String> },
     Heard { text: String },
@@ -144,6 +164,11 @@ pub enum Event {
     /// assistant is doing during a turn. Nothing else about the protocol changes: a call's
     /// transcripts still arrive as `Heard`, `ReplyDelta` and `Reply`.
     Live { active: bool },
+    /// What the transcriber heard from a login utterance, before the verdict. The screen shows it so
+    /// that a misheard accent is visible rather than mysterious.
+    LoginHeard { text: String },
+    /// The ruling: whether the door opens, and the matched entry's name when it does.
+    LoginVerdict { ok: bool, name: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

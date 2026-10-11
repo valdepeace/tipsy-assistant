@@ -116,6 +116,31 @@ pub struct RealtimeForm {
     pub max_minutes: u32,
 }
 
+/// `[login]`, carried and never drawn, exactly as `RealtimeForm` is: no tab of the screen shows it,
+/// but a save rebuilds the whole configuration from this form, so a hand-written allowlist has to
+/// survive the trip or saving an unrelated row would erase it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoginForm {
+    pub enabled: bool,
+    pub voice: bool,
+    pub allowed: Vec<AllowedPersonForm>,
+}
+
+/// One `[[login.allowed]]` entry, as plain values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AllowedPersonForm {
+    pub name: String,
+    pub keywords: Vec<String>,
+}
+
+impl Default for LoginForm {
+    /// The same defaults as `LoginConfig`, and a hand-written `Default` for the same reason
+    /// `ConfigForm`'s is: `derive` would say `enabled: false`, which is a different section.
+    fn default() -> Self {
+        Self { enabled: true, voice: true, allowed: Vec::new() }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProfileForm {
     pub id: String,
@@ -143,6 +168,8 @@ pub struct ConfigForm {
     pub listening: ListeningForm,
     /// Carried, never drawn: see [`RealtimeForm`].
     pub realtime: RealtimeForm,
+    /// Carried, never drawn: see [`LoginForm`].
+    pub login: LoginForm,
     pub profiles: Vec<ProfileForm>,
     pub server: ServerForm,
     pub notice: Option<(NoticeKind, String)>,
@@ -224,6 +251,8 @@ impl Default for ConfigForm {
             // The placeholder form draws no realtime row either, so its empty carry is never seen;
             // the native client fills it from the file on the only form that can be saved.
             realtime: RealtimeForm::default(),
+            // The same for `[login]`, whose carry is never drawn on any tab.
+            login: LoginForm::default(),
             // One placeholder profile, so the rows below have something to index. The native client
             // replaces every field of this form from the real configuration (Task 6).
             profiles: vec![ProfileForm {

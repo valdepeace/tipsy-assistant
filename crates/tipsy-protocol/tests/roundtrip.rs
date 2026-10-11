@@ -33,6 +33,8 @@ fn events_roundtrip() {
         ui_language: UiLanguage::Es,
         listening_mode: ListeningMode::Push,
         web_bundle: false,
+        // This fixture is the "no login screen" `Welcome`; the `Some` case is the next test's.
+        login: None,
     });
     roundtrip_event(Event::Status { state: AssistantState::Thinking, detail: None });
     roundtrip_event(Event::Heard { text: "oye".into() });
@@ -151,4 +153,48 @@ fn language_mapping() {
     assert_eq!(UiLanguage::from_bcp47("ES-mx"), UiLanguage::Es);
     assert_eq!(UiLanguage::from_bcp47("en-AU"), UiLanguage::En);
     assert_eq!(UiLanguage::from_bcp47(""), UiLanguage::En);
+}
+
+/// The login screen's three commands and two events (spec §4). They are additive, which is why
+/// `PROTOCOL_VERSION` does not move: Plan 2B's `TestResult` and Plan 2C's `Live` did the same.
+#[test]
+fn login_commands_and_events_roundtrip() {
+    roundtrip_command(Command::LoginStart);
+    roundtrip_command(Command::LoginStop);
+    roundtrip_command(Command::LoginAnswer { text: "yo soy Andrés del equipo del core".into() });
+    roundtrip_event(Event::LoginHeard { text: "yo soy Andrés del equipo del core".into() });
+    roundtrip_event(Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+    roundtrip_event(Event::LoginVerdict { ok: false, name: None });
+}
+
+/// The wire spellings are a contract: a client and a server that disagree about the tag do not fail
+/// to compile, they fail to connect.
+#[test]
+fn the_login_messages_spell_their_tags_as_the_spec_says() {
+    let json = serde_json::to_string(&Command::LoginAnswer { text: "andres".into() }).unwrap();
+    assert!(json.contains(r#""type":"login_answer""#), "{json}");
+    let json = serde_json::to_string(&Event::LoginVerdict { ok: false, name: None }).unwrap();
+    assert!(json.contains(r#""type":"login_verdict""#), "{json}");
+    assert!(json.contains(r#""ok":false"#), "{json}");
+    assert!(json.contains(r#""name":null"#), "{json}");
+}
+
+/// Both directions of compatibility in one test: a server that predates the field sends a `Welcome`
+/// without it, and a client that knows it must still parse the event (that is `#[serde(default)]`);
+/// serde ignores unknown fields, which is what makes the other direction work.
+#[test]
+fn a_welcome_without_the_login_field_parses_as_no_login_screen() {
+    let json = r#"{"type":"welcome","session_id":1,"profile":{"id":"compae","name":"El Compae","language":"es-ES"},"ui_language":"es","listening_mode":"push","web_bundle":false}"#;
+    match serde_json::from_str::<Event>(json).expect("an older server's Welcome must parse") {
+        Event::Welcome { login, .. } => assert_eq!(login, None, "an absent field is no screen"),
+        other => panic!("expected a Welcome, got {other:?}"),
+    }
+    roundtrip_event(Event::Welcome {
+        session_id: 1,
+        profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+        ui_language: UiLanguage::Es,
+        listening_mode: ListeningMode::Push,
+        web_bundle: false,
+        login: Some(LoginView { voice: true }),
+    });
 }
