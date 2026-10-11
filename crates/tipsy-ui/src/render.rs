@@ -78,7 +78,14 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
         // the full-screen form painted under them, and it shows the *screen's* title while the screen
         // is up: the header's line repaints its whole row, so the profile's title there would be
         // erased by it and the screen's own title would never be visible on the row it owns.
-        let mut hits = draw_header(frame, state, header, state.strings().cfg_title);
+        //
+        // That row is also the one `draw_form` draws the screen's own unsaved marker on
+        // (`render_config::draw_title`), so the marker travels with the header instead: it is the one
+        // thing on screen that says the edits are unsaved, and the header would erase it. The title
+        // stays the plain screen name — the header uppercases it into the badge — and the marker is
+        // drawn beside the badge in the copy's own case.
+        let mut hits =
+            draw_header(frame, state, header, state.strings().cfg_title, form.dirty.then_some(state.strings().cfg_dirty));
         hits.extend(screen);
         return hits;
     }
@@ -96,7 +103,7 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
     }
     // The header is drawn last because it is read last on the row and is the last thing on screen:
     // its own symbols win the cells they occupy however the panes and the screen have painted them.
-    let mut ordered = draw_header(frame, state, header, title);
+    let mut ordered = draw_header(frame, state, header, title, None);
     ordered.extend(hits);
     ordered
 }
@@ -104,13 +111,18 @@ pub fn draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) 
 /// Badge with the profile's title, the listening-mode indicator, whatever the assistant is doing,
 /// and the ⚙ button — whose click is reported as a [`Hit`], like the HUD's other titles.
 ///
+/// `dirty` is the configuration screen's unsaved marker, drawn beside the badge while the screen is
+/// open and the form has edits (`draw` hands it in): the header repaints the very row the screen
+/// draws that marker on, so the screen cannot keep it and the header has to carry it. It is `None`
+/// for the HUD, which has nothing unsaved.
+///
 /// The header's own two controls come first in the order `draw` reports, both answering `F9`: the
 /// mode indicator whose area is the word itself, then the gear at the right edge. A frame too small
 /// to draw either reports no `Hit` for it rather than a rectangle nobody can see. That is true while
 /// the configuration screen is up as well as when it is down: the screen is drawn beneath the header,
 /// so the gear is on screen and clickable either way.
-fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str) -> Vec<Hit> {
-    let (line, mode, gear) = header(state, area, title);
+fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str, dirty: Option<&str>) -> Vec<Hit> {
+    let (line, mode, gear) = header(state, area, title, dirty);
     frame.render_widget(line, area);
     [mode, gear]
         .into_iter()
@@ -127,8 +139,10 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, title: &str) -> V
 ///
 /// The mode sits immediately before the gear, at the right edge, so the gear is the last thing read
 /// on the row, and the status — the one span whose length the user's own data decides, a `⚠` notice
-/// or a failure — is cut to whatever is left between the badge and the mode.
-fn header(state: &UiState, area: Rect, title: &str) -> (Line<'static>, Hit, Hit) {
+/// or a failure — is cut to whatever is left between the badge and the mode. The unsaved marker is
+/// measured before the status and takes its room from it: while the screen is open that marker is the
+/// only thing saying the edits are unsaved, and a status the user cannot act on may be cut instead.
+fn header(state: &UiState, area: Rect, title: &str, dirty: Option<&str>) -> (Line<'static>, Hit, Hit) {
     let strings = state.strings();
     let spin = SPINNER[(state.elapsed_ms / 150) as usize % SPINNER.len()];
     let mode = match state.listening_mode {
@@ -151,6 +165,9 @@ fn header(state: &UiState, area: Rect, title: &str) -> (Line<'static>, Hit, Hit)
         Span::from(format!("● {}", strings.ready)).fg(Color::Green)
     };
     let badge = Span::from(format!(" ◉ {} ", title.to_uppercase())).fg(Color::Black).bg(CYAN).bold();
+    // The screen's unsaved marker, in the gold the screen's own title row draws it in. It is one
+    // span, cut below like the status, so a narrow frame loses its tail rather than the mode.
+    let dirty = dirty.map(|text| Span::from(format!("{text} ")).fg(GOLD).bold());
     // The mode is a word (§9: `push`, `auto`, `hands free`) and the microphone is the colour: red
     // while it is open, whatever the mode.
     let mode_span = Span::from(format!(" {mode} ")).fg(if state.mic_open { Color::Red } else { DIM });
@@ -179,12 +196,18 @@ fn header(state: &UiState, area: Rect, title: &str) -> (Line<'static>, Hit, Hit)
         key: KeyInput::F(9),
         action: Some(ConfigAction::Toggle),
     };
-    // The status keeps whatever is left between the badge and the mode, and never more.
+    // The status keeps whatever is left between the badge and the mode, and never more. The unsaved
+    // marker is measured first: it is the one span on this row the user has to see, so the status —
+    // a ready word, or a notice the screen itself repeats — takes what is left of the room.
     let used = drawn_width(&badge) + drawn_width(&gap);
-    let status_w = usize::from(mode_x.saturating_sub(area.x)).saturating_sub(used);
-    let status = cut_to(status.content.as_ref(), status.style, status_w);
-    let padding = usize::from(mode_x.saturating_sub(area.x)).saturating_sub(used + drawn_width(&status));
-    let line = Line::from(vec![badge, gap, status, Span::raw(" ".repeat(padding)), mode_span, gear]);
+    let room = usize::from(mode_x.saturating_sub(area.x));
+    let dirty = dirty
+        .map(|span| cut_to(span.content.as_ref(), span.style, room.saturating_sub(used)))
+        .unwrap_or_default();
+    let dirty_w = drawn_width(&dirty);
+    let status = cut_to(status.content.as_ref(), status.style, room.saturating_sub(used + dirty_w));
+    let padding = room.saturating_sub(used + dirty_w + drawn_width(&status));
+    let line = Line::from(vec![badge, gap, dirty, status, Span::raw(" ".repeat(padding)), mode_span, gear]);
     (line, mode_hit, gear_hit)
 }
 
@@ -659,6 +682,8 @@ fn human(bps: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn es() -> &'static crate::strings::Strings {
         crate::strings::strings(UiLanguage::Es)
@@ -736,5 +761,43 @@ mod tests {
     fn a_row_too_narrow_for_the_marker_still_terminates() {
         let rows = rendered(&wrap(log_pieces(&done("hola", 1500), es()), 1));
         assert_eq!(rows.concat(), "◆hola1.5s", "nothing may loop for ever or be lost: {rows:?}");
+    }
+
+    /// The scoped re-review's finding 1: the full-screen form writes `cfg_dirty` on the row the
+    /// header repaints last, so the header carries the marker while the screen is open. It is the one
+    /// thing on screen that says the edits are unsaved, and it is read off the header row itself —
+    /// the row the screen's own title was drawn on and lost.
+    #[test]
+    fn the_unsaved_marker_survives_the_header_while_the_screen_is_open() {
+        fn header_row(term: &Terminal<TestBackend>) -> String {
+            let buffer = term.backend().buffer();
+            (0..buffer.area.width).map(|x| buffer[(x, 0)].symbol().to_string()).collect()
+        }
+
+        let mut s = UiState::new();
+        s.on_key(KeyInput::F(9));
+        s.config_form.as_mut().unwrap().dirty = true;
+        let clock = ClockView { time: "10:42:07".into(), weekday: 4, day: 10, month: 9 };
+        let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
+        term.draw(|f| {
+            let _ = draw(f, &s, &clock, "Compae · el asistente de garrafón");
+        })
+        .unwrap();
+
+        let header = header_row(&term);
+        assert!(header.contains(es().cfg_dirty), "the unsaved marker must be on screen:\n{header}");
+        assert!(header.contains(es().cfg_title), "beside the screen's own name:\n{header}");
+        assert!(header.contains('⚙'), "and the header's own cells are untouched:\n{header}");
+
+        // A form with no edits has nothing unsaved, and the marker is not the header's to keep.
+        s.config_form.as_mut().unwrap().dirty = false;
+        term.draw(|f| {
+            let _ = draw(f, &s, &clock, "Compae · el asistente de garrafón");
+        })
+        .unwrap();
+        assert!(
+            !header_row(&term).contains(es().cfg_dirty),
+            "an untouched form must not be marked unsaved"
+        );
     }
 }
