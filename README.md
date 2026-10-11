@@ -229,11 +229,13 @@ shows a red `EN VIVO` / `LIVE` for as long as the call lasts, and the call ends 
 **A call is not free, and it does not hide what it costs.** Realtime bills per token, not per minute,
 and an open microphone is billed while it streams: the research note's rates are one input token per
 100 ms of audio and one output token per 50 ms of the model's own speech, at $32 per 1M audio input
-tokens and $64 per 1M audio output tokens for `gpt-realtime-2.1`. The rule of thumb from those
-figures — the note's own arithmetic, not a quoted per-minute price — is roughly **$0.32 per minute of
-listening and $1.28 per minute of the model speaking**, and about **$0.10 and $0.40** on
-`gpt-realtime-2.1-mini` ($10/$20 per 1M). Every `response.done` carries the session's own `usage` if
-you want to check them against your own bill — this client does not display it. Input transcription
+tokens and $64 per 1M audio output tokens for `gpt-realtime-2.1`. **Doing that arithmetic here**,
+rather than repeating a summary of it: ten input tokens a second is 600 a minute, which at $32 per 1M
+is about **$0.02 per minute of listening**; twenty output tokens a second is 1200 a minute, which at
+$64 per 1M is about **$0.08 per minute of the model speaking**. The same rates on
+`gpt-realtime-2.1-mini` ($10/$20 per 1M) give about **$0.006 and $0.024**. Every `response.done`
+carries the session's own `usage` if you want to check them against your own bill — this client does
+not display it. Input transcription
 is part of this mode — the client configures `gpt-4o-transcribe` so that what you said can appear in
 the log — and it bills separately on that model's own rate card.
 
