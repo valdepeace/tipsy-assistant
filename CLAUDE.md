@@ -12,8 +12,14 @@ constraints and the progress ledger with every ruling taken while executing it. 
 ledger**: tasks with a `Task <N>: complete` line are done; start at the first one without it.
 
 **In progress:** Plan 2B (`docs/superpowers/plans/2026-10-10-plan-2b-config-screen-and-auto-mode.md`)
-— the configuration screen (`F9`) and the `auto` listening mode. Its skeleton, its fixed interfaces
-and the bodies of Tasks 1–2 exist; Tasks 3–10 still need writing, against the real code.
+— the configuration screen (`F9`) and the `auto` listening mode. All ten task bodies are written, and
+its **Tasks 1–7 are implemented** on branch `plan-2b-config-screen-and-auto-mode`: the two new config
+fields with the token generator, the protocol's test pair, the form view model with its strings, the
+four tabs' rendering, opening the screen with `F9` and the header's gear, saving and applying without
+a restart, and the Test button. What remains is Task 8 (the `earshot` detector, which needs its crate
+fetched first), Task 9 (`auto` mode end to end), Task 10 (the README) and then the plan's single
+whole-branch review. **Written and not started:** Plan 2C
+(`docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md`), the OpenAI Realtime voice mode.
 
 **Not started:** the two throwaway spikes in a scratch directory outside the repo — Ratzilla
 (ratatui `Canvas` with Braille + mouse on wasm32) and Rustpotter (a custom Spanish wake word; the
@@ -41,6 +47,16 @@ profile's wake word stays provisional until Rustpotter verifies it.
   binary runs restricted and cannot create `%APPDATA%\tipsy-compadre\config.toml` — that trap cost
   hours once and is recorded in Plan 1's ledger. The permission recovery scripts live in
   `E:\workspace\personal\.dsh-acl-recovery\` (each with its own rollback command).
+- **Run the tests with `-j 1`.** At cargo's default job parallelism this machine dies with
+  `STATUS_STACK_BUFFER_OVERRUN`, which looks exactly like a code fault and is not one. Plan 2B's
+  ledger records the discovery.
+- **When DSH's sandbox breaks, the file tools keep working and the shell does not.** Symptom: every
+  `pwsh` call fails with `sandbox-local windows-acl temp grant materialization failed and its cleanup
+  also failed`, even a bare directory listing, while `read`, `write`, `glob` and `grep` stay fine. An
+  interrupted unconfined command can leave the grant half-materialised, and the bundled ACL diagnosis
+  reports `NOT_THIS_CLASS` because the project tree already has the permissions DSH needs. Switching
+  the session's access level may not clear it; restarting DSH does. Only cargo and git are out of
+  reach meanwhile, so nothing committed is at risk.
 - `git` prints `fsmonitor_ipc__send_query ... '.git/fsmonitor--daemon.ipc'` on every call: harmless.
 - Carried over from the Claude Code era, in case you go back: Haiku subagents fail with
   `400 system.4.type` unless Claude Code starts with `ENABLE_CLAUDEAI_MCP_SERVERS=false`, and in Git
