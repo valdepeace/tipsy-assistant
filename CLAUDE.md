@@ -38,24 +38,39 @@ release checklist still owes one live-key spoken exchange.
 the middle over a veiled, unreadable HUD; an allowlist of names and keywords in `[login]` in
 `config.toml`, judged on the server so it never travels to a client; typing and voice, with only the
 speech the local detector confirms ever uploaded; the profile's greeting withheld until the door opens.
-Five tasks, one whole-branch review, one fix wave and one scoped re-review that closed every finding —
-the worst of them being that the client could forward login audio before the microphone device had been
-opened. The merge was a fast-forward, and **master is at 420 tests, 0 failures**. It is a **ritual, not
-authentication**: `server.token` is still the only door, and nothing in its code, docs or comments
-claims otherwise. Its record is `.superpowers/sdd/2026-10-11-plan-login-screen/` — read
+**Six tasks** — four with written bodies in the plan and two executed from briefs, whose reports are in
+its workspace — one whole-branch review, one fix wave and one scoped re-review that closed every
+finding, the worst of them being that the client could forward login audio before the microphone device
+had been opened. The merge was a fast-forward. Since then a separate three-commit fix, whole-branch
+reviewed and then re-reviewed, found that a *pass* verdict left the login capture open and that `Passed`
+was not terminal for the phase — a later `Tab`, a stale refusal or an error could put the user back
+outside a door they had walked through. Both are fixed, and **master is at 425 tests, 0 failures**. It
+is a **ritual, not authentication**: `server.token` is still the only door, and nothing in its code,
+docs or comments claims otherwise. Its record is `.superpowers/sdd/2026-10-11-plan-login-screen/` — read
 `coordinator-rulings.md` there, not `progress.md`, which another session overwrote.
 
 **Written, not started: Plan 3, the web tier**
 (`docs/superpowers/plans/2026-10-11-plan-3-web-tier.md`, spec
-`docs/superpowers/specs/2026-10-11-web-tier-design.md`) — 19 tasks in three phases: the server web tier,
-the web terminal, and the web client, whose Ratzilla spike is already marked PASS inside the plan. Start
-from `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`: it names which of its tasks can begin
-without touching a file another plan owns, and the two obligations Plan 3 owes the login screen.
+`docs/superpowers/specs/2026-10-11-web-tier-design.md`) — **20 tasks in three phases** (9 server and
+remote client, 4 web terminal, 7 web client), whose Ratzilla gate is answered `PASS`. Start from
+`docs/superpowers/plans/2026-10-11-plan-3-start-here.md`: it names which of its tasks can begin without
+touching a file another task owns, the order the compiler imposes, and the environment traps.
 
-**Not started: Rustpotter** — the custom Spanish wake word (the shipped one is "oye compae"), which
-every profile's wake word stays provisional until it verifies. The Ratzilla spike, the other throwaway,
-is **done and PASS** (Plan 3's Task 3.1 records it), so the web client's gate is cleared. Both live in a
-scratch directory outside the repo.
+**Both throwaway spikes are done, and the second one shapes `hands_free`.** They live in scratch
+directories outside the repo and nothing of them is committed. **Ratzilla: PASS on all four gate
+questions and on all four items that had been left `UNVERIFIED`**
+(`.superpowers/sdd/plan-3-research/ratzilla-spike-verdict.md`) — `WebGl2Backend` is the recommendation,
+and the DOM backend is wrong on three counts: ~2.4× slower on a real GPU (24.6 fps against 59.9), it
+**panics at an 18 px font** (issue #188, bisected: 16 and 17 px are safe), and `CanvasBackend` mis-maps
+clicks by a row and a column. **Rustpotter: yes, with conditions**
+(`.superpowers/sdd/plan-4-research/rustpotter.md`) — Spanish costs nothing because it compares acoustics
+rather than language, and the repository's own `oye casa` references are a tested asset. But a consumer
+must pin **`half = "=2.3.1"`** or the build fails with 20 errors in `candle-core`; a model needs
+**recordings of a real voice** (there is no phonetic path — a TTS-built reference is the cheap start,
+and one ~10-minute validation with the user's own voice is unavoidable); it needs **its own stateful
+detector beside `VadState`**, because it wants 480-sample frames where the client sends 320; and
+**Porcupine is no longer an alternative at all** — every version of its Rust crate is yanked and the
+free tier was withdrawn. Every profile's wake word stays provisional until it is verified.
 
 ## Budget rules (user is on a tight budget)
 

@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status: integrated on `master`, and this document is short by two task bodies.** All six tasks were
+executed, reviewed (one whole-branch review, one fix wave, one scoped re-review that closed every
+finding) and merged. The written bodies below cover **tasks 1–4**; **tasks 5 (the widget and the veil)
+and 6 (the client wiring and the documents) were executed from briefs and exist here only as their
+reports** — `task-5-report.md` and `task-6-report.md` in
+`.superpowers/sdd/2026-10-11-plan-login-screen/`. That directory is the plan's real record: read
+**`coordinator-rulings.md`** there first, because `progress.md` in it was overwritten by another
+session and does not tell the truth.
+
 **Goal:** Ask who you are before the assistant lets you in: a widget with the core in the middle over a
 veiled, unreadable HUD, which opens for the keywords the machine's owner listed in `config.toml`
 (`andres`, `core`) and tells anyone else to go and get their hair combed somewhere else — by keyboard
