@@ -248,7 +248,32 @@ fn transcribe_provider(cfg: &ProviderConfig, keys: &KeyResolver) -> Result<Arc<d
     }
 }
 
+// Counts the provider stacks built **on this thread**, for Plan 3 Task 1.7's audit: the `--connect`
+// client must never build one, and `client.rs`'s `the_remote_path_builds_no_provider_and_asks_the_server_instead`
+// is what reads it. Thread-local rather than global because `cargo test` runs this binary's other
+// tests — which build providers on purpose — on other threads at the same time.
+#[cfg(test)]
+thread_local! {
+    static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has built a provider stack or a single connector.
+#[cfg(test)]
+pub fn builds_on_this_thread() -> usize {
+    BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn count_a_build() {
+    BUILDS.with(|built| built.set(built.get() + 1));
+}
+
+/// A release build counts nothing: the audit exists only in the test binary.
+#[cfg(not(test))]
+fn count_a_build() {}
+
 pub fn build_providers(config: &ProvidersConfig, keys: &KeyResolver) -> Result<Providers, BuildError> {
+    count_a_build();
     // The capabilities are decided for all three connectors *before* any key is resolved: a
     // capability that cannot exist is not a missing-key problem, whoever else in the file has no
     // key. The builders below repeat the check so they stay correct on their own.
@@ -284,6 +309,7 @@ pub enum Connector {
 /// The capability is checked before any key is resolved, exactly as [`build_providers`] does it: a
 /// capability that cannot exist is not a missing-key problem, whoever else in the file has no key.
 pub fn build_one(cfg: &ProviderConfig, capability: Capability, keys: &KeyResolver) -> Result<Connector, BuildError> {
+    count_a_build();
     if !supports(cfg.kind, capability) {
         return Err(BuildError::UnsupportedCapability { capability, kind: cfg.kind });
     }
