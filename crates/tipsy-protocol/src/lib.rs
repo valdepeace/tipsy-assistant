@@ -255,7 +255,13 @@ pub enum Command {
     GetConfig,
     /// The configuration screen saving. The server replaces the editable configuration, persists it,
     /// re-derives every session's brain and broadcasts `Event::ConfigChanged` (spec §4.2).
-    UpdateConfig { config: ConfigView },
+    ///
+    /// **Boxed on purpose**, and so is `Event::Config`. `ConfigView` carries seven section views and is
+    /// large enough that clippy's `large_enum_variant` fires on `Command`, on `Event`, and on every
+    /// enum that carries either of them — `ToServer`, `ToClient` and `UiAction` — which is five
+    /// findings out of one payload. Serde sees through a `Box`, so the wire JSON is byte-identical and
+    /// `tests/roundtrip.rs` pins that. Do not unbox these two fields without re-measuring the lint.
+    UpdateConfig { config: Box<ConfigView> },
     /// A new API key for the *server's* credential store. Refused unless the connection is loopback
     /// or TLS (spec §9.4), and answered with `Event::ConfigChanged` when it is accepted.
     SetKey { name: String, value: String },
@@ -301,8 +307,9 @@ pub enum Event {
     LoginHeard { text: String },
     /// The ruling: whether the door opens, and the matched entry's name when it does.
     LoginVerdict { ok: bool, name: Option<String> },
-    /// The redacted configuration, answering `Command::GetConfig` (spec §4.4).
-    Config { config: ConfigView },
+    /// The redacted configuration, answering `Command::GetConfig` (spec §4.4). Boxed for the same
+    /// reason `UpdateConfig`'s payload is, and the note on that variant says why.
+    Config { config: Box<ConfigView> },
     /// The active profile changed. Carries the same three fields `Welcome` carries.
     ProfileChanged { profile: ProfileView },
     /// The configuration changed. Deliberately no payload: a client that is showing it asks again

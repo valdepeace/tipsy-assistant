@@ -282,7 +282,7 @@ fn config_view() -> ConfigView {
 #[test]
 fn the_configuration_commands_roundtrip() {
     roundtrip_command(Command::GetConfig);
-    roundtrip_command(Command::UpdateConfig { config: config_view() });
+    roundtrip_command(Command::UpdateConfig { config: Box::new(config_view()) });
     roundtrip_command(Command::SetKey { name: "openrouter".into(), value: "sk-or-v1-…a1b2".into() });
 }
 
@@ -290,7 +290,7 @@ fn the_configuration_commands_roundtrip() {
 /// `Welcome` carries, which is why it is built from the type that already exists.
 #[test]
 fn the_configuration_events_roundtrip() {
-    roundtrip_event(Event::Config { config: config_view() });
+    roundtrip_event(Event::Config { config: Box::new(config_view()) });
     roundtrip_event(Event::ProfileChanged {
         profile: ProfileView { id: "senyor".into(), name: "O Senyor".into(), language: "gl-ES".into() },
     });
@@ -321,7 +321,7 @@ fn the_configuration_messages_spell_their_tags_as_the_spec_says() {
 
     // `UpdateConfig` is the one shape whose whole payload is nested, so it is read apart in full:
     // the field name is `config`, and the view's own field names are the form's, unchanged.
-    let json = serde_json::to_string(&Command::UpdateConfig { config: config_view() }).unwrap();
+    let json = serde_json::to_string(&Command::UpdateConfig { config: Box::new(config_view()) }).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["type"], "update_config");
     assert_eq!(value["config"]["active_profile"], "compae");
@@ -333,7 +333,7 @@ fn the_configuration_messages_spell_their_tags_as_the_spec_says() {
     assert_eq!(value["config"]["login"]["allowed"][0]["name"], "Andrés");
     assert_eq!(value["config"]["profiles"][0]["voices"][0][0], "elevenlabs");
 
-    let json = serde_json::to_string(&Event::Config { config: config_view() }).unwrap();
+    let json = serde_json::to_string(&Event::Config { config: Box::new(config_view()) }).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["type"], "config");
     assert_eq!(value["config"]["server"]["token"], "0123456789abcdef0123456789abcdef");
