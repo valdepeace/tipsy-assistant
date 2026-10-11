@@ -14,6 +14,8 @@ pub mod keys;
 
 pub mod providers;
 
+pub mod realtime;
+
 pub mod session;
 
 pub mod vad;
