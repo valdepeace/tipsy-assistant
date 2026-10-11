@@ -2,7 +2,9 @@
 
 use std::collections::VecDeque;
 
-use tipsy_protocol::{AssistantState, Command, Event, ListeningMode, ProfileView, UiLanguage};
+use tipsy_protocol::{
+    AssistantState, Command, ErrorCode, Event, ListeningMode, ProfileView, UiLanguage,
+};
 
 use crate::config_form::{ConfigAction, ConfigEffect, ConfigForm};
 use crate::render::Hit;
@@ -98,6 +100,66 @@ pub enum UiAction {
     /// Start a live call, or end the one that is running (Plan 2C). The client owns the socket and
     /// the HUD only asks: the indicator turns on when the socket says it is live, never here.
     ToggleLive,
+    /// The door opened and the user pressed `Enter`: the client closes the screen and enters the HUD.
+    LoginDone,
+}
+
+/// How many characters the login's box takes. A login answer is a sentence, and this is what keeps a
+/// pasted novel out of the transcription path (spec §6.2).
+pub const LOGIN_INPUT_MAX: usize = 200;
+
+/// How many refusals in a row the screen keeps listening through before it waits for a key (spec L8).
+pub const LOGIN_AUTO_REARM: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginPhase {
+    /// No capture: the microphone is off or has not been opened yet.
+    Waiting,
+    /// The capture is open and nothing is in flight.
+    Listening,
+    /// An answer is with the server: typed or spoken, and a verdict is coming.
+    Judging,
+    Refused,
+    Passed,
+}
+
+/// Which sentence the widget's one line shows (spec §6.1), in this precedence: `Passed`, `Refused`,
+/// `Heard`, a failure, and the prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginLine {
+    Prompt,
+    Heard(String),
+    Refused,
+    /// `NothingHeard`, whose wording is the UI's: the server's message for it is English.
+    NothingHeard,
+    /// Any other `Event::Error`: the provider's own words.
+    Failed(String),
+    Passed,
+}
+
+/// The login screen's own state (spec §6). `open` is the capture **the client reconciles the
+/// microphone to**: the reducer cannot return an action from `apply`, so a refusal that stops listening
+/// is expressed as a state the client reads, never as a command nobody could send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginState {
+    pub input: String,
+    /// The `Welcome.login.voice` switch: with it off there is no capture and `Tab` does nothing.
+    pub voice: bool,
+    pub open: bool,
+    pub phase: LoginPhase,
+    pub line: LoginLine,
+    /// The matched entry's name, once the door opens.
+    pub name: Option<String>,
+    /// Refusals in a row: the streak `LOGIN_AUTO_REARM` guards.
+    pub refusals: u32,
+}
+
+impl LoginState {
+    /// True once the streak has stopped the automatic re-arm: the border swaps to the escape hint, and
+    /// the microphone stays shut until `Tab` — which is why a locked-out owner is never stuck (spec §6).
+    pub fn needs_a_key(&self) -> bool {
+        self.refusals >= LOGIN_AUTO_REARM
+    }
 }
 
 pub struct UiState {
@@ -129,6 +191,9 @@ pub struct UiState {
     /// The configuration screen's form while it is open: `None` is the closed HUD. Kept as plain
     /// values (Task 3) so this crate still knows nothing about `config.toml`.
     pub config_form: Option<ConfigForm>,
+    /// The login screen while it is up: `None` is a client that has been let in, or one the server
+    /// never asked (spec §3 — `Welcome.login` is the only authority).
+    pub login: Option<LoginState>,
 }
 
 impl Default for UiState {
@@ -163,6 +228,7 @@ impl UiState {
             voice_envelope: Vec::new(),
             voice_pos_ms: 0,
             config_form: None,
+            login: None,
         }
     }
 
@@ -195,6 +261,19 @@ impl UiState {
         let mut form = form;
         form.mark_filled();
         self.config_form = Some(form);
+    }
+
+    /// Shows the login screen, the client's answer to `Welcome.login`.
+    pub fn show_login(&mut self, voice: bool) {
+        self.login = Some(LoginState {
+            input: String::new(),
+            voice,
+            open: false,
+            phase: LoginPhase::Waiting,
+            line: LoginLine::Prompt,
+            name: None,
+            refusals: 0,
+        });
     }
 
     /// A click, dispatched the way the control that reported it meant it.
@@ -251,6 +330,61 @@ impl UiState {
             return Vec::new();
         };
         effects_to_actions(form.key(key).effects)
+    }
+
+    /// The login screen's keys (spec §6.2). It is the outermost screen, so it is asked before the
+    /// configuration screen's: `F9` and the gear do nothing while the door is shut.
+    ///
+    /// `Tab` is the microphone because every letter is also a possible answer, and `Enter` is the only
+    /// other key: no bare-letter shortcut can live here.
+    fn login_key(&mut self, key: KeyInput) -> Vec<UiAction> {
+        let Some(login) = self.login.as_mut() else {
+            return Vec::new();
+        };
+        match key {
+            KeyInput::Char(c) if !c.is_control() && login.input.chars().count() < LOGIN_INPUT_MAX => {
+                login.input.push(c);
+                Vec::new()
+            }
+            KeyInput::Char(_) => Vec::new(),
+            KeyInput::Backspace => {
+                login.input.pop();
+                Vec::new()
+            }
+            KeyInput::Enter => {
+                let text = login.input.trim().to_string();
+                match (text.is_empty(), login.phase) {
+                    (_, LoginPhase::Passed) => vec![UiAction::LoginDone],
+                    (false, _) => {
+                        login.input.clear();
+                        login.phase = LoginPhase::Judging;
+                        vec![UiAction::Send(Command::LoginAnswer { text })]
+                    }
+                    // An empty box after a refusal is the same re-arm `Tab` is.
+                    (true, LoginPhase::Refused) => {
+                        login.phase = LoginPhase::Listening;
+                        login.open = true;
+                        login.refusals = 0;
+                        login.line = LoginLine::Prompt;
+                        vec![UiAction::Send(Command::LoginStart)]
+                    }
+                    (true, _) => Vec::new(),
+                }
+            }
+            KeyInput::Tab if login.voice => {
+                let was_open = login.open;
+                login.open = !was_open;
+                login.phase = if was_open { LoginPhase::Waiting } else { LoginPhase::Listening };
+                login.line = LoginLine::Prompt;
+                if !was_open {
+                    // An explicit key is consent, and the guard's job is to stop *automatic* listening.
+                    login.refusals = 0;
+                }
+                vec![UiAction::Send(if was_open { Command::LoginStop } else { Command::LoginStart })]
+            }
+            KeyInput::Esc => vec![UiAction::Quit],
+            _ => Vec::new(),
+        }
     }
 
     /// The assistant entry the next reply belongs to: the last one that has not been said yet.
@@ -384,13 +518,43 @@ impl UiState {
                     self.end_pending_replies();
                 }
             }
-            // A login utterance and its verdict belong to the login screen's own state, which Task 4
-            // adds to this reducer along with the arms that use them. They are here to keep the match
-            // exhaustive and this task behaviour-free, exactly as the `Live` arm above was until
-            // Task 6 gave it the indicator's flag.
-            Event::LoginHeard { .. } => {}
-            Event::LoginVerdict { .. } => {}
-            Event::Error { message, .. } => {
+            // A login utterance and its verdict belong to the login screen's own state (spec §6), and
+            // are data about nothing while no screen is up: the client shows the screen once per run,
+            // from `Welcome`.
+            Event::LoginHeard { text } => {
+                if let Some(login) = self.login.as_mut() {
+                    login.line = LoginLine::Heard(text.clone());
+                }
+            }
+            Event::LoginVerdict { ok, name } => {
+                if let Some(login) = self.login.as_mut() {
+                    if *ok {
+                        login.phase = LoginPhase::Passed;
+                        login.line = LoginLine::Passed;
+                        login.name = name.clone();
+                    } else {
+                        login.phase = LoginPhase::Refused;
+                        login.line = LoginLine::Refused;
+                        login.refusals += 1;
+                        if login.needs_a_key() {
+                            login.open = false;
+                        }
+                    }
+                }
+            }
+            Event::Error { code, message, .. } => {
+                // While the door is shut, a failure belongs to the screen and not to the log: the
+                // wording of "nothing heard" is the UI's, and any other failure stops the voice.
+                if let Some(login) = self.login.as_mut() {
+                    if *code == ErrorCode::NothingHeard {
+                        login.line = LoginLine::NothingHeard;
+                    } else {
+                        login.line = LoginLine::Failed(message.clone());
+                        login.open = false;
+                        login.phase = LoginPhase::Waiting;
+                    }
+                    return;
+                }
                 if let Some(e) = self.pending_assistant() {
                     e.pending = false;
                     // The warning is advisory: the session is already retrying a recoverable one,
@@ -404,6 +568,10 @@ impl UiState {
     }
 
     pub fn on_key(&mut self, key: KeyInput) -> Vec<UiAction> {
+        if self.login.is_some() {
+            // The door is the outermost screen: nothing behind it answers a key while it is up.
+            return self.login_key(key);
+        }
         if self.config_form.is_some() {
             // F9 and Esc are the screen's door: everything else — Tab, Enter, characters, F4 —
             // belongs to the form while it is on screen.
@@ -1094,6 +1262,185 @@ mod tests {
         assert!(!s.live, "the indicator is the first thing to go");
         assert!(!s.busy(), "a call that ended is not still thinking: {:#?}", s.log);
         assert_eq!(s.log.last().unwrap().text, "Aquí andamos", "the partial reply stays readable");
+    }
+
+    // ---- the login screen (spec 2026-10-11-login-screen-design.md, §6) ----
+
+    fn login_state(voice: bool) -> UiState {
+        let mut s = UiState::new();
+        s.show_login(voice);
+        s
+    }
+
+    fn refused(s: &mut UiState) {
+        s.apply(&Event::LoginVerdict { ok: false, name: None });
+    }
+
+    /// The screen is the outermost thing on it: while the door is shut there is no second screen, and
+    /// `esc` is still the way out (spec §6.2).
+    #[test]
+    fn the_login_screen_is_asked_first_and_f9_does_nothing() {
+        let mut s = login_state(true);
+        assert!(s.on_key(KeyInput::F(9)).is_empty(), "F9 is not a door out of the login");
+        assert!(s.config_form.is_none(), "and it does not open the configuration screen");
+        assert_eq!(s.on_key(KeyInput::Esc), vec![UiAction::Quit]);
+    }
+
+    /// The screen has its own buffer, so the HUD's box behind the veil stays empty, and 200 characters
+    /// is where it stops (spec §6.2).
+    #[test]
+    fn typing_goes_to_the_screen_and_is_capped() {
+        let mut s = login_state(true);
+        type_text(&mut s, "andres");
+        assert_eq!(s.login.as_ref().unwrap().input, "andres");
+        assert!(s.input.is_empty(), "the HUD's own box is not the screen's");
+        type_text(&mut s, &"x".repeat(250));
+        assert_eq!(s.login.as_ref().unwrap().input.chars().count(), LOGIN_INPUT_MAX);
+        let _ = s.on_key(KeyInput::Backspace);
+        assert_eq!(s.login.as_ref().unwrap().input.chars().count(), LOGIN_INPUT_MAX - 1);
+    }
+
+    /// A typed answer is a `LoginAnswer` the server judges; the box empties and the screen says it is
+    /// waiting (spec §6.2).
+    #[test]
+    fn enter_sends_the_typed_answer() {
+        let mut s = login_state(true);
+        type_text(&mut s, "  yo soy andres del core  ");
+        assert_eq!(
+            s.on_key(KeyInput::Enter),
+            vec![UiAction::Send(Command::LoginAnswer { text: "yo soy andres del core".into() })]
+        );
+        let login = s.login.as_ref().unwrap();
+        assert_eq!(login.input, "", "the box empties");
+        assert_eq!(login.phase, LoginPhase::Judging);
+    }
+
+    /// A refusal is a line and a counter, and the microphone stays open for the next thing said — that
+    /// is the automatic re-arm; the third refusal in a row is what stops it (spec §6.2, L8).
+    #[test]
+    fn the_third_refusal_in_a_row_closes_the_microphone() {
+        let mut s = login_state(true);
+        let _ = s.on_key(KeyInput::Tab);
+        assert!(s.login.as_ref().unwrap().open);
+        refused(&mut s);
+        assert_eq!(s.login.as_ref().unwrap().line, LoginLine::Refused);
+        assert!(s.login.as_ref().unwrap().open, "attempt 1 leaves the capture open");
+        refused(&mut s);
+        assert!(s.login.as_ref().unwrap().open, "and so does attempt 2");
+        refused(&mut s);
+        let login = s.login.as_ref().unwrap();
+        assert_eq!(login.refusals, 3);
+        assert!(!login.open, "the third stops the automatic re-arm");
+        assert!(login.needs_a_key());
+    }
+
+    /// `Tab` is the microphone: on, off, and on again. An explicit re-arm is consent, so it resets the
+    /// streak — the guard's whole job is to stop *automatic* listening (spec §6.2).
+    #[test]
+    fn tab_toggles_the_capture_and_an_explicit_re_arm_resets_the_streak() {
+        let mut s = login_state(true);
+        assert_eq!(s.on_key(KeyInput::Tab), vec![UiAction::Send(Command::LoginStart)]);
+        assert!(s.login.as_ref().unwrap().open);
+        assert_eq!(s.on_key(KeyInput::Tab), vec![UiAction::Send(Command::LoginStop)]);
+        assert!(!s.login.as_ref().unwrap().open);
+        let _ = s.on_key(KeyInput::Tab);
+        for _ in 0..3 {
+            refused(&mut s);
+        }
+        assert!(s.login.as_ref().unwrap().needs_a_key());
+        assert_eq!(s.on_key(KeyInput::Tab), vec![UiAction::Send(Command::LoginStart)]);
+        assert_eq!(s.login.as_ref().unwrap().refusals, 0, "an explicit re-arm starts the count over");
+    }
+
+    /// With the voice switch off there is no capture to toggle and no hint to draw (spec §6).
+    #[test]
+    fn tab_does_nothing_when_the_voice_is_off() {
+        let mut s = login_state(false);
+        assert!(s.on_key(KeyInput::Tab).is_empty());
+        assert!(!s.login.as_ref().unwrap().open);
+    }
+
+    /// The greeting stays until `Enter`, which is the client's cue to close the screen and enter the
+    /// HUD (spec §6.2).
+    #[test]
+    fn a_passed_screen_waits_for_enter_and_then_finishes() {
+        let mut s = login_state(true);
+        s.apply(&Event::LoginHeard { text: "yo soy Andrés del core".into() });
+        assert_eq!(
+            s.login.as_ref().unwrap().line,
+            LoginLine::Heard("yo soy Andrés del core".into()),
+            "a misheard accent is visible rather than mysterious"
+        );
+        s.apply(&Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+        let login = s.login.as_ref().unwrap();
+        assert_eq!(login.phase, LoginPhase::Passed);
+        assert_eq!(login.line, LoginLine::Passed);
+        assert_eq!(login.name.as_deref(), Some("Andrés"));
+        assert_eq!(s.on_key(KeyInput::Enter), vec![UiAction::LoginDone]);
+    }
+
+    /// "Nothing heard" is the UI's wording, not the server's, and it counts no attempt: a cough is not
+    /// a wrong answer (spec §4.1, §6.2).
+    #[test]
+    fn nothing_heard_counts_no_attempt_and_leaves_the_capture_open() {
+        let mut s = login_state(true);
+        let _ = s.on_key(KeyInput::Tab);
+        s.apply(&Event::Error {
+            code: ErrorCode::NothingHeard,
+            message: "nothing was heard".into(),
+            recoverable: true,
+        });
+        let login = s.login.as_ref().unwrap();
+        assert_eq!(login.line, LoginLine::NothingHeard);
+        assert_eq!(login.refusals, 0);
+        assert!(login.open, "the capture keeps listening");
+    }
+
+    /// Any other failure turns the microphone off and shows the provider's own words: retrying the
+    /// voice would only repeat it, and typing still works (spec §6.2).
+    #[test]
+    fn another_error_turns_the_microphone_off_and_shows_its_message() {
+        let mut s = login_state(true);
+        let _ = s.on_key(KeyInput::Tab);
+        s.apply(&Event::Error {
+            code: ErrorCode::NoKey,
+            message: "no key named `openrouter`".into(),
+            recoverable: true,
+        });
+        let login = s.login.as_ref().unwrap();
+        assert_eq!(login.line, LoginLine::Failed("no key named `openrouter`".into()));
+        assert!(!login.open);
+        assert!(s.log.is_empty(), "a login failure is not a conversation entry");
+    }
+
+    /// An empty `Enter` after a refusal re-arms the capture, and does nothing before one: the prompt is
+    /// not a button (spec §6.2). The case is the third refusal in a row, which is the one that closes
+    /// the capture by itself — a manual `Tab` moves the phase out of `Refused`, and re-arming a refused
+    /// screen is *that* key's job, not a general "open the microphone" key: that one is `Tab`.
+    #[test]
+    fn an_empty_enter_re_arms_only_after_a_refusal() {
+        let mut s = login_state(true);
+        assert!(s.on_key(KeyInput::Enter).is_empty(), "nothing to say, nothing to re-arm");
+        let _ = s.on_key(KeyInput::Tab);
+        for _ in 0..LOGIN_AUTO_REARM {
+            refused(&mut s);
+        }
+        assert!(!s.login.as_ref().unwrap().open, "the third refusal stopped the automatic re-arm");
+        assert_eq!(s.on_key(KeyInput::Enter), vec![UiAction::Send(Command::LoginStart)]);
+        assert!(s.login.as_ref().unwrap().open);
+        assert_eq!(s.login.as_ref().unwrap().refusals, 0);
+    }
+
+    /// With no screen up, a login event is data about nothing and must not touch the HUD (spec §3: the
+    /// client shows the screen once per run, from `Welcome`).
+    #[test]
+    fn login_events_without_a_screen_are_ignored() {
+        let mut s = UiState::new();
+        s.apply(&Event::LoginHeard { text: "andres".into() });
+        s.apply(&Event::LoginVerdict { ok: true, name: Some("Andrés".into()) });
+        assert!(s.login.is_none());
+        assert!(s.log.is_empty());
+        assert!(s.notice.is_none());
     }
 }
 

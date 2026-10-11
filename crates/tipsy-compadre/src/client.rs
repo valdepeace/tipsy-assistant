@@ -464,6 +464,14 @@ impl Client {
                 }
                 false
             }
+            // Task 4's fallout, and deliberately kept to the smallest thing that compiles: the login
+            // screen's own state is the UI's, and closing the capture it was holding — the `LoginStop`,
+            // the stream, the reconciliation of `LoginState::open` — is Task 6's. Dropping the screen is
+            // this arm's whole job, and it does not change any behaviour that existed before it.
+            UiAction::LoginDone => {
+                self.state.login = None;
+                false
+            }
             UiAction::Quit => true,
             // `F10`: the key asks, the socket answers. The indicator follows the call task's own
             // `Event::Live`, never this arm.
