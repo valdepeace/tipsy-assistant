@@ -10,6 +10,7 @@
 //! sends. What this module owns is the call's own bookkeeping: the socket task, the frames in, the
 //! events out, the item the device is playing and the call's deadline.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -125,14 +126,55 @@ pub fn pcm16_bytes(samples: &[i16]) -> Vec<u8> {
     bytes
 }
 
+/// Bytes of one millisecond of the API's audio: 24 kHz mono PCM16 is 48 000 bytes per second
+/// (research note, Interruption 4). The one number a barge-in must not get wrong.
+pub const BYTES_PER_MS: u64 = 48;
+
+/// Whole milliseconds in `bytes`. Flooring, never rounding: a partial millisecond is a claim about
+/// audio the user has not heard.
+pub fn ms_of(bytes: u64) -> u64 {
+    bytes / BYTES_PER_MS
+}
+
+/// Bytes of an item's audio that have left the playback buffer.
+///
+/// `appended` is every chunk handed to the device for that item, in order; `remaining` is how many
+/// of them the device still holds (`Player::progress`); `pos_ms` is the position inside the one
+/// playing. The chunks that have finished are the first `appended.len() - remaining` of them, and
+/// the one playing contributes only what it has actually played, never more than its own length.
+///
+/// Every uncertain term here resolves downwards: a stale position is not counted once nothing is
+/// queued, and a chunk of something else in the sink can only make `remaining` too large, which
+/// understates. Overstating is the direction that corrupts the conversation (Review Focus 2).
+pub fn played_bytes(appended: &[usize], remaining: usize, pos_ms: u64) -> u64 {
+    // A device that holds more chunks than were ever appended to *this* item means the queue holds
+    // something else too: the finished set is empty and only the playing chunk counts, which is the
+    // floor rather than a guess about what those extra chunks were. Nothing here may grow the count.
+    let finished = appended.len().saturating_sub(remaining);
+    let done: u64 = appended[..finished].iter().map(|bytes| *bytes as u64).sum();
+    let playing = match appended.get(finished) {
+        Some(length) if remaining > 0 => (pos_ms * BYTES_PER_MS).min(*length as u64),
+        _ => 0,
+    };
+    done + playing
+}
+
 /// What the call knows about the audio the device is playing.
 ///
-/// This task keeps the item it belongs to — the id and content index a truncate would have to name.
-/// Task 5 adds the count of what has actually been heard and the handshake with the client's frame
-/// loop, which is the only place the device's own queue is visible.
+/// Two threads touch it, and neither waits for the other: the client's frame loop writes what has
+/// actually left the playback buffer — the device's queue is visible nowhere else — and the socket
+/// task reads it when the server reports that the user started speaking. No lock here is ever held
+/// across an `await`, and none of this touches the audio thread.
 #[derive(Debug, Default)]
 pub struct Heard {
     item: Mutex<Option<(String, u32)>>,
+    /// Every chunk handed to the device for the current item, in order, in bytes.
+    appended: Mutex<Vec<usize>>,
+    /// How much of the current item has been heard, in bytes: the client publishes it from
+    /// `Player::progress` after each chunk, and the socket task reads it at a barge-in.
+    played: AtomicU64,
+    /// Set by a barge-in: the client's next frame silences the device and clears the count.
+    interrupted: AtomicBool,
 }
 
 impl Heard {
@@ -140,10 +182,53 @@ impl Heard {
         Arc::new(Heard::default())
     }
 
-    /// The first audio delta of a response names the item the device is playing.
+    /// The first audio delta of a response names the item the device is playing, and the count
+    /// starts at nothing.
     pub fn begin(&self, item_id: &str, content_index: u32) {
         *self.item.lock().expect("the item lock is never held across a panic") =
             Some((item_id.to_string(), content_index));
+        self.forget();
+    }
+
+    /// One chunk handed to the device, and what the device says about the queue afterwards.
+    pub fn push(&self, chunk_bytes: usize, remaining: usize, pos_ms: u64) {
+        let played = {
+            let mut appended = self.appended.lock().expect("the chunk lock is never held across a panic");
+            appended.push(chunk_bytes);
+            played_bytes(&appended, remaining, pos_ms)
+        };
+        self.played.store(played, Ordering::Relaxed);
+    }
+
+    /// The milliseconds of the current item the user has actually heard. `None` while none of it has
+    /// been played: a partial millisecond is not rounded up to one, and nothing is claimed about an
+    /// item the device has not started.
+    pub fn heard_ms(&self) -> Option<u64> {
+        if self.item.lock().ok()?.is_none() {
+            return None;
+        }
+        match ms_of(self.played.load(Ordering::Relaxed)) {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
+    /// What a barge-in must tell the model: the item the device is playing, its content index and
+    /// the milliseconds of it the user heard — or `None` when there is nothing safe to send.
+    ///
+    /// The item comes from the bookkeeping and not from the event: `speech_started` names the user's
+    /// input item (research note, Interruption 1), and a truncate cuts the transcript of whatever
+    /// item it names (Interruption 3), so naming the wrong one is the failure this task exists to
+    /// prevent.
+    ///
+    /// The count is read *before* the item, deliberately. The client's frame loop writes both, and a
+    /// chunk it publishes between the two reads would otherwise pair an older item with a newer
+    /// count — the direction that overstates. Reading the count first can only pair a count that is
+    /// at or below the truth for the item, which is the safe direction.
+    pub fn truncation(&self) -> Option<(String, u32, u64)> {
+        let heard_ms = self.heard_ms()?;
+        let (item_id, content_index) = self.item()?;
+        Some((item_id, content_index, heard_ms))
     }
 
     /// The item the device is playing, if one is.
@@ -151,15 +236,40 @@ impl Heard {
         self.item.lock().expect("the item lock is never held across a panic").clone()
     }
 
-    /// Forgets the item: the call ended, or a barge-in took it away.
+    /// Asks the client's frame loop to silence the device: only the client owns the `Player`.
+    pub fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::SeqCst);
+    }
+
+    /// True exactly once per barge-in, for the client that acts on it.
+    pub fn take_interrupted(&self) -> bool {
+        self.interrupted.swap(false, Ordering::SeqCst)
+    }
+
+    /// Forgets the item and everything counted for it: the call ended, a barge-in took it away, or a
+    /// new item began. What is left is the interrupted flag, which belongs to the frame loop that
+    /// has not acted on it yet.
     pub fn clear(&self) {
         *self.item.lock().expect("the item lock is never held across a panic") = None;
+        self.forget();
     }
+
+    fn forget(&self) {
+        self.appended.lock().expect("the chunk lock is never held across a panic").clear();
+        self.played.store(0, Ordering::Relaxed);
+    }
+}
+
+/// What the client asks of a call while it lasts.
+enum Control {
+    /// The user is taking the floor by hand: the response is cancelled rather than truncated.
+    Interrupt,
 }
 
 /// One call's handle, held by the client.
 pub struct Call {
     mic: Sender<Vec<i16>>,
+    control: UnboundedSender<Control>,
     heard: Arc<Heard>,
     cancel: CancellationToken,
 }
@@ -172,9 +282,10 @@ impl Call {
     /// session reports its own.
     pub fn open(setup: CallSetup, heard: Arc<Heard>, out: UnboundedSender<ToClient>) -> Call {
         let (mic, frames) = tokio::sync::mpsc::channel(MIC_QUEUE);
+        let (control, orders) = tokio::sync::mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
-        tokio::spawn(run(setup, Arc::clone(&heard), frames, out, cancel.clone()));
-        Call { mic, heard, cancel }
+        tokio::spawn(run(setup, Arc::clone(&heard), frames, orders, out, cancel.clone()));
+        Call { mic, control, heard, cancel }
     }
 
     /// Queues one microphone frame for the socket. Bounded and lossy: a busy client drops a frame
@@ -186,6 +297,16 @@ impl Call {
     /// The bookkeeping the client fills in as it plays: Task 5's barge-in count.
     pub fn heard(&self) -> &Arc<Heard> {
         &self.heard
+    }
+
+    /// The user is taking the floor by hand: the server is told to cancel the response, and the
+    /// device is silenced on the client's next frame.
+    ///
+    /// A local interrupt cancels instead of truncating (research note, Interruption 5): the number a
+    /// truncate carries comes from the server's own report of what the user heard, and a key press
+    /// has no such report to give.
+    pub fn interrupt(&self) {
+        let _ = self.control.send(Control::Interrupt);
     }
 
     /// Ends the call: the socket is closed and the task finishes. Dropping the handle does the same,
@@ -209,8 +330,15 @@ struct Turn {
     text: String,
     /// True once any of this response's audio reached the device.
     spoke: bool,
+    /// The item this response is playing, and its content index — the pair a truncate names. It is
+    /// fixed by the response's first audio delta and never replaced, so a later delta of another
+    /// item is not this response's audio.
+    item: Option<(String, u32)>,
     /// True once the HUD was told the assistant is speaking.
     speaking: bool,
+    /// True from a barge-in until the next turn: a response the user talked over must not be played
+    /// even if its deltas are still in flight (research note, Interruption 1).
+    silenced: bool,
     /// The sequence number of the next `SpeechChunk`/`Frame::Speech` pair.
     seq: u32,
 }
@@ -228,6 +356,7 @@ async fn run(
     setup: CallSetup,
     heard: Arc<Heard>,
     mut frames: Receiver<Vec<i16>>,
+    orders: tokio::sync::mpsc::UnboundedReceiver<Control>,
     out: UnboundedSender<ToClient>,
     cancel: CancellationToken,
 ) {
@@ -262,6 +391,10 @@ async fn run(
     // The first tick is immediate; the socket was just configured, so it is skipped.
     keepalive.tick().await;
     let mut turn = Turn::default();
+    // The client's orders, as an `Option` so that the day the client drops its handle the arm is
+    // disabled instead of firing on a closed channel for ever. `None` is not an ending: the call
+    // ends through the token, exactly as it does when the handle is dropped.
+    let mut orders = Some(orders);
 
     loop {
         tokio::select! {
@@ -271,6 +404,20 @@ async fn run(
                 report(&out, ErrorCode::Timeout, "the call reached its limit ([realtime] max_minutes)");
                 break;
             }
+            // The user's own key press, which only the client can see. Cancelling nothing is safe:
+            // the research note says the cancel errors on the server and the session survives, so it
+            // is sent without checking what is running.
+            Some(order) = recv_order(&mut orders) => match order {
+                None => orders = None,
+                Some(Control::Interrupt) => {
+                    let message = events::cancel_message();
+                    if socket.send(&serde_json::from_str(&message).expect("our own JSON")).await.is_err() {
+                        report(&out, ErrorCode::Network, SOCKET_CLOSED);
+                        break;
+                    }
+                    heard.interrupt();
+                }
+            },
             frame = frames.recv() => {
                 let Some(frame) = frame else { break };
                 let samples = mic_to_api(&frame);
@@ -293,26 +440,43 @@ async fn run(
                 }
             }
             event = socket.recv() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        // `e`'s own words, prefixed: the user has to be able to read which side
+                        // went quiet (Review Focus 1).
+                        if !at_cap(&mut socket, &setup, &out).await {
+                            report(&out, e.code(), &format!("the call's socket failed: {e}"));
+                            break;
+                        }
+                        continue;
+                    }
+                };
                 match event {
-                    Ok(SocketEvent::Text(text)) => {
-                        if let Step::Stop = on_event(&text, &mut turn, &heard, &out) {
+                    // A text frame cannot be acted on while `recv` still holds the socket — a
+                    // `select!` can stop polling the read but the value it produced borrows the
+                    // socket until the end of the arm — so `on_event` is the whole of the arm's
+                    // work, as it already was, and it answers with the one frame it wants sent.
+                    // The truncate goes out here, after the read. Losing the socket between the two
+                    // costs the truncate and the call, which is the ending that was already coming.
+                    SocketEvent::Text(text) => {
+                        let (step, truncate) = on_event(&text, &mut turn, &heard, &out);
+                        if let Some(message) = truncate
+                            && socket.send(&serde_json::from_str(&message).expect("our own JSON")).await.is_err()
+                        {
+                            report(&out, ErrorCode::Network, SOCKET_CLOSED);
+                            break;
+                        }
+                        if let Step::Stop = step {
                             break;
                         }
                     }
                     // A close, clean or not, ends the call: the note marks close codes and reconnect
                     // semantics as undocumented, so no code is read. A session at its own cap is the
                     // one ending that reopens instead — and only when the cap has really elapsed.
-                    Ok(SocketEvent::Closed { .. }) => {
+                    SocketEvent::Closed { .. } => {
                         if !at_cap(&mut socket, &setup, &out).await {
                             report(&out, ErrorCode::Network, SOCKET_CLOSED);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        // `e`'s own words, prefixed: the user has to be able to read which side
-                        // went quiet (Review Focus 1).
-                        if !at_cap(&mut socket, &setup, &out).await {
-                            report(&out, e.code(), &format!("the call's socket failed: {e}"));
                             break;
                         }
                     }
@@ -322,6 +486,19 @@ async fn run(
     }
     let _ = socket.close().await;
     ended(&out);
+}
+
+/// The next order the client sent, or `None` when it has dropped its handle.
+///
+/// `orders` is taken away once that happens, which is what keeps a closed channel from being a busy
+/// loop: a channel with no senders is ready for ever, and an arm that is ready for ever spins the
+/// whole `select!`. The call itself ends when the token is cancelled, not here.
+async fn recv_order(orders: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Control>>) -> Option<Option<Control>> {
+    match orders {
+        Some(receiver) => Some(receiver.recv().await),
+        // Already disabled: a future that is never ready, so the arm cannot fire.
+        None => std::future::pending().await,
+    }
 }
 
 /// Reopens the socket when the session has reached the API's own 60-minute cap, and answers whether
@@ -343,12 +520,16 @@ async fn at_cap(socket: &mut RealtimeSocket, setup: &CallSetup, out: &UnboundedS
 }
 
 /// One text frame from the server.
+///
+/// The answer is deliberately not carried out through `socket`: a `select!` arm's `recv` keeps the
+/// socket borrowed for as long as the arm's binds live, so this function cannot send and must not
+/// try. It says what the call should do, and the one frame it wants sent goes back with it.
 fn on_event(
     text: &str,
     turn: &mut Turn,
     heard: &Arc<Heard>,
     out: &UnboundedSender<ToClient>,
-) -> Step {
+) -> (Step, Option<String>) {
     // An event this crate does not know is data, not death (Review Focus 4): `map` answers
     // `Action::Ignored` for a type we have never seen. Only a *known* event with a malformed payload
     // is an error, and then it is a typed one that ends the call in words the user can read.
@@ -356,29 +537,58 @@ fn on_event(
         Ok(action) => action,
         Err(e) => {
             report(out, e.code(), &format!("the call sent an event we cannot read: {e}"));
-            return Step::Stop;
+            return (Step::Stop, None);
         }
     };
     match action {
         // The session is configured and the call is already live: `run` raised the flag when the
         // socket came up.
         Action::SessionConfigured { .. } => {}
-        // The user talked over the model. Task 5 acts on this; the plumbing that matters here is
-        // that the item the device is playing is the call's own bookkeeping, not the event's.
+        // The user talked over the model. Playback stops on the client's next frame, and the model
+        // is told how much of its own speech was actually heard, so its memory matches the user's
+        // (research note, Interruption 2 and 3). The truncate is asked for, not sent: the caller
+        // owns the socket by the time the arm is over.
         Action::SpeechStarted => {
+            let truncate = heard
+                .truncation()
+                .map(|(item_id, content_index, audio_end_ms)| {
+                    events::truncate_message(&item_id, content_index, audio_end_ms)
+                });
+            // The count is spent: a second barge-in counts from the next item, and nothing of this
+            // one can be added to it by a delta that is still arriving.
             heard.clear();
+            heard.interrupt();
+            turn.silenced = true;
+            return (Step::Continue, truncate);
         }
-        Action::AudioDelta { pcm } => {
+        Action::AudioDelta { item_id, content_index, pcm } => {
+            // The tail of a response the user talked over is not played, and is not counted: it is
+            // audio nobody asked to hear any more.
+            if turn.silenced {
+                return (Step::Continue, None);
+            }
             let samples = pcm16_le(&pcm);
             if samples.is_empty() {
-                return Step::Continue;
+                return (Step::Continue, None);
             }
-            // The first delta of a response is the one that reaches the device. A delta after it
-            // would be a second response speaking over the first — a cancelled one still arriving —
-            // and its bytes must reach neither the device nor the count a later truncate is derived
-            // from, so exactly one delta per response is played.
-            if turn.spoke {
-                return Step::Continue;
+            // The first delta of the response names the item the device is playing, and `Heard`
+            // starts its count there. The count is per item and is fed one chunk per delta, so it is
+            // that first delta and no later one that calls `begin`: calling it again would throw the
+            // chunks already counted away and understate the audio the user has heard.
+            if turn.item.is_none() {
+                turn.item = Some((item_id.clone().unwrap_or_default(), content_index));
+                // A delta whose frame carries no name (the note marks that field inferred) is still
+                // played — it is the model's audio — but it leaves nothing safe to truncate later
+                // rather than naming whatever arrived last.
+                if let Some(item_id) = &item_id {
+                    heard.begin(item_id, content_index);
+                }
+            }
+            // A delta of an item this response is not playing is not heard at all. It is what a
+            // cancelled response still arriving looks like, and its bytes must reach neither the
+            // device nor the count a later truncate is derived from.
+            if turn.item.as_ref().is_some_and(|(playing, _)| Some(playing.as_str()) != item_id.as_deref()) {
+                return (Step::Continue, None);
             }
             turn.spoke = true;
             if turn.first_audio_ms.is_none() {
@@ -416,14 +626,14 @@ fn on_event(
         }
         Action::ServerError { message } => {
             report(out, ErrorCode::BadResponse, &message);
-            return Step::Stop;
+            return (Step::Stop, None);
         }
         // Known types with nothing to do here: the acknowledgement of our own `session.update`, the
         // turn-end half of the VAD pair (the server commits the item and starts the response on its
         // own) and a type this build has never seen (Review Focus 4).
         Action::SpeechStopped | Action::Ignored => {}
     }
-    Step::Continue
+    (Step::Continue, None)
 }
 
 /// Says what a response said, in the events the text pipeline also sends, so the HUD's entry stops
@@ -556,5 +766,133 @@ mod tests {
         assert_eq!(heard.item(), Some(("item_a".to_string(), 0)));
         heard.clear();
         assert_eq!(heard.item(), None, "a barge-in takes the item away");
+    }
+
+    #[test]
+    fn the_bytes_per_millisecond_are_the_notes_forty_eight() {
+        // The research note's Interruption 4: 24 kHz mono PCM16 is 24000 samples × 2 bytes per
+        // second, i.e. 48 bytes per millisecond. An off-by-48 error is a whole millisecond of the
+        // model's memory, every barge-in (Review Focus 2).
+        assert_eq!(BYTES_PER_MS, u64::from(API_SAMPLE_RATE) * 2 / 1000);
+        assert_eq!(BYTES_PER_MS, 48);
+        assert_eq!(ms_of(960), 20);
+        assert_eq!(ms_of(47), 0, "a partial millisecond is never rounded up");
+    }
+
+    #[test]
+    fn nothing_played_yet_is_nothing_to_truncate() {
+        let heard = Heard::new();
+        assert_eq!(played_bytes(&[], 0, 0), 0);
+        assert_eq!(heard.heard_ms(), None);
+        assert_eq!(heard.truncation(), None, "no item, no truncate");
+
+        heard.begin("item_a", 0);
+        assert_eq!(heard.heard_ms(), None, "an item the user has not heard is not a truncation");
+        assert_eq!(heard.truncation(), None);
+
+        // A chunk that is still entirely in the queue has not been heard. The note does not say
+        // whether `audio_end_ms: 0` is legal, so nothing is sent rather than a zero that claims
+        // something about an item nobody heard.
+        heard.push(960, 1, 0);
+        assert_eq!(heard.heard_ms(), None, "queued is not played");
+        assert_eq!(heard.truncation(), None);
+    }
+
+    // ---- Where the brief's numbers and its own arithmetic disagree ---------------------------
+    //
+    // Two of the six pure tests below do not assert every value the brief prints, and the reason is
+    // arithmetic rather than preference: the brief's expected values cannot be produced by the
+    // `played_bytes` that same brief prescribes, and one of them claims audio nobody heard. The
+    // implementation follows the prescribed function exactly, and the brief's own hand-stated
+    // client side of the integration test is reproduced by it byte for byte — three 20 ms chunks
+    // with `remaining` 3 → 2 → 1 and a 12 ms position give 2496 bytes, i.e. the 52 ms that
+    // `a_barge_in_truncates_the_item_at_the_milliseconds_that_were_heard` asserts. The full table,
+    // `appended` being one entry longer per `push`:
+    //
+    //   push         appended      finished  playing          truth    brief says
+    //   (960,1,12)   [960]         0         12 ms            12 ms    Some(12)  ✓
+    //   (960,1,20)   [960,960]     1         20 ms            40 ms    Some(20)  ✗
+    //   (960,1,100)  [960;3]       2         960 B (capped)  60 ms    Some(40)  ✗
+    //
+    //   (960,3,0)    [960]         0          0              None     None      ✓
+    //   (960,2,0)    [960,960]     0          0              None     Some(20)  ✗
+    //   (960,1,12)   [960;3]       1         12 ms            52 ms    Some(52)  ✓
+    //   (960,1,20)   [960;4]       2         20 ms            80 ms    Some(60)  ✗
+    //   (960,0,999)  [960;5]       5         none (empty)   100 ms    Some(80)  ✗
+    //
+    // The brief is internally inconsistent as well: its third line expects the *first* chunk plus a
+    // 12 ms position to be 52 ms, and its fourth expects "three finished" to be 60 ms — one line
+    // after the same three chunks were 52 ms. Every value below is the arithmetic's. Where the two
+    // disagree the arithmetic wins, because the truncate that overstates is the one failure this
+    // task exists to prevent. **Numbered defect D1 in `task-5-report.md`; if the controller prefers
+    // the brief's numbers, `played_bytes` is the single function to change and these are the two
+    // tests that pin it.**
+
+    #[test]
+    fn a_partially_played_chunk_counts_only_what_left_the_buffer() {
+        let heard = Heard::new();
+        heard.begin("item_a", 0);
+        heard.push(960, 1, 12);
+        assert_eq!(heard.heard_ms(), Some(12), "12 × 48 of the chunk's 960 bytes");
+        heard.push(960, 1, 20);
+        assert_eq!(heard.heard_ms(), Some(40), "the chunk that finished plus the one playing");
+        heard.push(960, 1, 100);
+        assert_eq!(heard.heard_ms(), Some(60), "a position cannot report more than its own chunk");
+    }
+
+    #[test]
+    fn the_chunks_that_finished_are_counted_and_the_one_playing_is_added() {
+        let heard = Heard::new();
+        heard.begin("item_a", 0);
+        heard.push(960, 3, 0);
+        assert_eq!(heard.heard_ms(), None, "all three are still queued");
+        heard.push(960, 2, 0);
+        assert_eq!(heard.heard_ms(), None, "the device still holds everything it was handed");
+        heard.push(960, 1, 12);
+        assert_eq!(heard.heard_ms(), Some(52), "the first has finished, plus 12 ms of the third");
+        heard.push(960, 1, 20);
+        assert_eq!(heard.heard_ms(), Some(80), "two finished plus 20 ms of the third");
+        heard.push(960, 0, 999);
+        // An empty queue is the boundary that matters most: nothing is playing, so the stale `999`
+        // contributes nothing. Five 20 ms chunks are 100 ms; adding the stale position would claim
+        // audio the user has not heard (Review Focus 2).
+        assert_eq!(heard.heard_ms(), Some(100), "an empty queue: the stale position is not added");
+        assert_eq!(heard.truncation(), Some(("item_a".to_string(), 0, 100)));
+    }
+
+    #[test]
+    fn a_delta_for_another_item_never_counts_towards_this_one() {
+        let heard = Heard::new();
+        heard.begin("item_a", 0);
+        heard.push(960, 1, 20);
+        assert_eq!(heard.truncation(), Some(("item_a".to_string(), 0, 20)));
+
+        // The next response's item takes the count's place: the old item's bytes were never played
+        // as part of it, and truncating the wrong item's transcript is the one failure this whole
+        // task exists to prevent. (The socket-level half of the same rule is
+        // `a_delta_for_another_item_is_not_played` in `tests/realtime.rs`.)
+        heard.begin("item_b", 7);
+        assert_eq!(heard.heard_ms(), None);
+        assert_eq!(heard.truncation(), None);
+        heard.push(960, 1, 20);
+        assert_eq!(heard.truncation(), Some(("item_b".to_string(), 7, 20)));
+
+        // A second barge-in counts from the new item only: `clear` is what the task sends before it
+        // raises the interrupt flag, so nothing of the first one survives into the second.
+        heard.clear();
+        assert_eq!(heard.heard_ms(), None);
+        heard.begin("item_c", 0);
+        heard.push(960, 1, 20);
+        assert_eq!(heard.truncation(), Some(("item_c".to_string(), 0, 20)));
+    }
+
+    #[test]
+    fn the_truncate_and_cancel_messages_are_the_ones_the_note_quotes() {
+        // Research note, Interruption 3 and 5, verbatim.
+        assert_eq!(
+            events::truncate_message("item_a", 0, 1500),
+            r#"{"type":"conversation.item.truncate","item_id":"item_a","content_index":0,"audio_end_ms":1500}"#
+        );
+        assert_eq!(events::cancel_message(), r#"{"type":"response.cancel"}"#);
     }
 }

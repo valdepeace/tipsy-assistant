@@ -226,4 +226,14 @@ mod tests {
         player.play();
         assert!(!player.is_paused(), "`play` is what lets the next `play()` be heard");
     }
+
+    /// The rodio behaviour `Player::progress` is built on, pinned here for the same reason
+    /// `a_cleared_rodio_player_stays_paused_until_it_is_resumed` is: the barge-in count is these two
+    /// numbers, and an empty sink is the boundary the count must read as "nothing has been heard".
+    #[test]
+    fn an_empty_rodio_player_has_nothing_queued_and_no_position() {
+        let (player, _queue) = RodioPlayer::new();
+        assert_eq!(player.len(), 0, "rodio counts a source until it finishes (player.rs:325-330)");
+        assert_eq!(player.get_pos(), Duration::ZERO, "nothing is playing, so there is no position");
+    }
 }

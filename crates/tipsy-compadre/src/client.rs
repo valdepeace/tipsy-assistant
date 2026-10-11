@@ -4,6 +4,7 @@
 //! microphone. It holds no conversation state beyond what it draws.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
@@ -167,6 +168,7 @@ impl Client {
             }
             self.drain_mic(&to_server);
             self.sync_mic();
+            self.sync_call();
 
             let mut quit = false;
             for key in keys {
@@ -232,7 +234,10 @@ impl Client {
 
     /// Silences the device: whatever rodio still has queued is audio the assistant no longer wants
     /// to say. The samples already kept for `Replay` are untouched.
-    fn flush_playback(&mut self) {
+    ///
+    /// Takes `&self` on purpose: the only thing it touches is the device, so a caller holding the
+    /// live call's bookkeeping can silence the device without giving that borrow up.
+    fn flush_playback(&self) {
         if let Some(player) = &self.player {
             player.stop();
         }
@@ -253,11 +258,39 @@ impl Client {
             return;
         }
         self.reply.extend_from_slice(&samples);
+        let bytes = samples.len() * 2;
         if let Some(player) = &self.player {
             player.play(samples, self.rate);
         }
+        // While a call is live the device is asked what it has actually played — the queue it still
+        // holds is subtracted, because a response is generated faster than it is spoken and the
+        // bytes merely handed over would overstate what the user heard (Review Focus 2). The device
+        // is reachable only from this thread, so this is where the number is worked out.
+        if let (Some(call), Some(player)) = (&self.call, &self.player) {
+            let (remaining, pos) = player.progress();
+            call.heard().push(bytes, remaining, pos.as_millis() as u64);
+        }
         // The oscilloscope shows the reply as it is heard, so it is rebuilt as it grows.
         self.state.start_voice(envelope(&i16_to_f32(&self.reply), self.rate));
+    }
+
+    /// Acts on what the call's socket task decided since the last frame.
+    ///
+    /// A barge-in is the one thing the socket task cannot do itself: stopping the device means
+    /// touching the `Player`, which lives on this thread. The task marks it, the frame loop flushes,
+    /// and the count starts again from nothing — the chunks it just dropped were never heard.
+    fn sync_call(&mut self) {
+        // The bookkeeping is an `Arc` shared with the socket task, so the handle on the client is
+        // only read to reach it: nothing here borrows the client while the device is flushed.
+        let Some(heard) = self.call.as_ref().map(|call| Arc::clone(call.heard())) else {
+            return;
+        };
+        if heard.take_interrupted() {
+            // The count first: whatever the device had queued when the flag was raised was not
+            // heard, and a stale reading left behind after the flush would overstate it.
+            heard.clear();
+            self.flush_playback();
+        }
     }
 
     /// Forwards every captured frame and shows its loudness in the oscilloscope.
@@ -308,6 +341,25 @@ impl Client {
     ) -> bool {
         match action {
             UiAction::Send(command) => {
+                // A call replaces the whole pipeline for as long as it lasts, so while one is live
+                // the session is told nothing: a `Reset` or a profile change could not reach a
+                // socket whose `instructions` were fixed when it opened, and a typed question would
+                // be spoken over the call.
+                if let Some(call) = self.call.as_ref() {
+                    // The verbs that mean "the user is taking the floor" become the local barge-in.
+                    // The count goes first, while the flag is still down, so no stale reading can
+                    // reach a truncate that a later server-reported barge-in may send. Then the
+                    // device is silenced, and last the socket task is asked for `response.cancel`:
+                    // it is the only side that can send, and it raises the interrupt flag the frame
+                    // loop acts on.
+                    if takes_the_floor(&command) {
+                        let heard = Arc::clone(call.heard());
+                        heard.clear();
+                        self.flush_playback();
+                        call.interrupt();
+                    }
+                    return false;
+                }
                 // The only two things that quiet the device: the user starting a new turn over the
                 // reply still being spoken (barge-in), and the cancel the user asked for. Reaching
                 // the end of a turn is not an interruption — see `flush_on_interrupt`.
@@ -547,6 +599,24 @@ fn mic_wanted(mic_open: bool, live: bool) -> bool {
     mic_open || live
 }
 
+/// Whether a command means the user is taking the floor while a call is live.
+///
+/// In push mode these verbs are the microphone key and the cancel; in a call the microphone is
+/// already open for the whole call, so both directions of that key mean the same thing — "stop
+/// talking, I am talking" — and they are answered locally with `response.cancel` rather than sent to
+/// a session that is not driving the conversation (Review Focus 2's safe side; the server's own VAD
+/// is what reports a barge-in and what knows the number).
+fn takes_the_floor(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Ask { .. }
+            | Command::Say { .. }
+            | Command::ListenStart
+            | Command::ListenStop
+            | Command::Cancel
+    )
+}
+
 /// Whether a command starts the next turn, which is what makes the audio kept for `Replay` stale.
 ///
 /// The session cancels the running turn and starts another one for `Ask`, `Say` and `ListenStop`
@@ -657,7 +727,7 @@ fn clock_view() -> ClockView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tipsy_protocol::{AssistantState, ListeningMode};
+    use tipsy_protocol::{AssistantState, ClientKind, ListeningMode};
 
     use crate::config::form::form_of;
     use crate::keys::{KeyResolver, MemoryStore, SecretStore};
@@ -790,6 +860,27 @@ mod tests {
         let (events, _results) = tokio::sync::mpsc::unbounded_channel();
         client.on_action(UiAction::Send(Command::Ask { text: "¿y eso?".into() }), &to_server, &events);
         assert!(client.reply.is_empty(), "the next turn speaks a reply of its own");
+    }
+
+    #[test]
+    fn the_verbs_that_take_the_floor_are_the_ones_a_call_answers_locally() {
+        for command in [
+            Command::Ask { text: "¿qué pasa?".into() },
+            Command::Say { text: "hola compadre".into() },
+            Command::ListenStart,
+            Command::ListenStop,
+            Command::Cancel,
+        ] {
+            assert!(takes_the_floor(&command), "{command:?} means the user is taking the floor");
+        }
+        for command in [
+            Command::Reset,
+            Command::SetProfile { id: "meigo".into() },
+            Command::SetListeningMode { mode: ListeningMode::Push },
+            Command::Hello { token: None, client: ClientKind::Tui, protocol_version: 1 },
+        ] {
+            assert!(!takes_the_floor(&command), "{command:?} is not an interruption");
+        }
     }
 
     /// Review Focus 3, second half: the screen opens on the file as it is *now*. A `config.toml`
