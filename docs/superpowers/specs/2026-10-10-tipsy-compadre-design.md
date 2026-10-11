@@ -284,7 +284,8 @@ max_minutes = 10         # a call ends by itself after this long
 # The login screen (spec docs/superpowers/specs/2026-10-11-login-screen-design.md). A ritual, not a
 # lock: `server.token` above is the only real requirement. The screen appears only when `enabled` is
 # true *and* an entry below has keywords; the first entry whose keywords are all in the answer wins,
-# and every keyword is matched as a whole word, case- and accent-insensitively.
+# and every keyword is matched as a whole word, case- and accent-insensitively for the letters these
+# profiles use (`á é í ó ú ü ñ ç` and their relatives — not full Unicode normalization).
 [login]
 enabled = true
 voice = true            # the microphone opens with the screen; typing always works
