@@ -321,8 +321,9 @@ what a test cannot hear.
       `response.output_audio_transcript.delta` are **inferred from sibling events in the research
       note, not verified** (its documentation page truncated before the Response section), so that
       shape is pinned in three places and nowhere else: the two `INFERRED PAYLOAD` fixtures in
-      `crates/tipsy-compadre/src/realtime/events.rs`, the two `field(...)` reads beside them in the
-      same file's mapping, and the two builders (`delta`, `transcript_delta`) in
+      `crates/tipsy-compadre/src/realtime/events.rs`, the reads beside them in the same file's mapping
+      (`field(...)` for `delta`, and `optional_field(...)` for the `item_id` a frame may legitimately
+      omit), and the two builders (`delta`, `transcript_delta`) in
       `crates/tipsy-compadre/tests/realtime.rs`. They change together. If the transcript stays empty
       while the audio plays, that inference is what is wrong, and the field name in those three
       places is what to change.
