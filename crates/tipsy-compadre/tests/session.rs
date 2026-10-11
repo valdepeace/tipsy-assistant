@@ -16,9 +16,12 @@ use tipsy_compadre::brain::BrainConfig;
 use tipsy_compadre::config::Config;
 use tipsy_compadre::config::store;
 use tipsy_compadre::providers::*;
-use tipsy_compadre::session::spawn_session;
+use tipsy_compadre::session::{SessionPolicy, spawn_session, spawn_with_events};
 use tipsy_compadre::vad::{Earshot, Scorer, VadEvent, VadState};
-use tipsy_protocol::{AssistantState, Command, Event, Frame, ListeningMode, ToClient, ToServer, UiLanguage};
+use tipsy_protocol::{
+    AssistantState, ClientKind, Command, ErrorCode, Event, Frame, ListeningMode, PROTOCOL_VERSION, ToClient,
+    ToServer, UiLanguage,
+};
 use tokio::sync::mpsc;
 
 // ---------- fakes (copied from `tests/brain.rs`) ----------
@@ -116,20 +119,71 @@ fn config() -> Config {
     store::load_or_create(&dir.path().join("config.toml")).unwrap().config
 }
 
-/// Runs a session on fake providers, handing back its ends and the transcribe fake.
-fn session(
+/// A session on fake providers with the handshake policy the test needs, handing back its ends, its
+/// session id and the transcribe fake.
+///
+/// `spawn_with_events` and not `spawn_session`: the tests that follow need the id, and
+/// `spawn_session`'s return is the two channels and nothing else.
+fn session_with_policy(
     chat: Arc<FakeChat>,
     speech: Arc<FakeSpeech>,
     transcript: &'static str,
-) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>, Arc<FakeTranscribe>) {
+    policy: SessionPolicy,
+) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>, Arc<FakeTranscribe>, u64) {
     let transcribe = Arc::new(FakeTranscribe {
         text: transcript,
         languages: Mutex::new(Vec::new()),
         pcms: Mutex::new(Vec::new()),
     });
     let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
-    let (tx, rx) = spawn_session(config(), providers, BrainConfig::default());
+    let ends = spawn_with_events(config(), providers, BrainConfig::default(), policy.clone());
+    let session_id = ends.session_id;
+    let (tx, rx) = (ends.to_server, ends.from_server);
+    // The handshake here, and not in the test, because it is what an in-process client sends and not
+    // what the test is about; the two token refusals keep the harness's handshake and send their own,
+    // and send it first, because a second `Hello` after an admitted one ends the session.
+    if !policy.require_token {
+        tx.send(ToServer::Command(hello(None, PROTOCOL_VERSION)))
+            .expect("the session must still be listening");
+    }
+    (tx, rx, transcribe, session_id)
+}
+
+/// The same session over the in-process policy: the handshake path covers both transports, and the
+/// in-process one needs no token (spec §4.1).
+fn session(
+    chat: Arc<FakeChat>,
+    speech: Arc<FakeSpeech>,
+    transcript: &'static str,
+) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>, Arc<FakeTranscribe>) {
+    let (tx, rx, transcribe, _) = session_with_policy(chat, speech, transcript, SessionPolicy::local());
     (tx, rx, transcribe)
+}
+
+/// The only message that may precede any other, and the one the whole handshake is judged from.
+fn hello(token: Option<&str>, protocol_version: u32) -> Command {
+    Command::Hello {
+        token: token.map(str::to_string),
+        client: ClientKind::Tui,
+        protocol_version,
+    }
+}
+
+/// Everything the session sends until it closes its channel, or `wait_ms` passes with it still open.
+async fn until_closed(rx: &mut mpsc::UnboundedReceiver<ToClient>, wait_ms: u64) -> Vec<ToClient> {
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return out;
+        }
+        match tokio::time::timeout(left, rx.recv()).await {
+            Ok(Some(message)) => out.push(message),
+            // `Ok(None)`: the session dropped its sender, so it is over. `Err`: the deadline.
+            _ => return out,
+        }
+    }
 }
 
 fn send(tx: &mpsc::UnboundedSender<ToServer>, command: Command) {
@@ -192,6 +246,112 @@ async fn drain(rx: &mut mpsc::UnboundedReceiver<ToClient>, wait_ms: u64) -> Vec<
             _ => return out,
         }
     }
+}
+
+// ---------- the handshake ----------
+
+/// The next `Event::Error` as `(code, message, recoverable)`, panicking with everything received if
+/// the session closes or the timeout expires first. The test asserts on `code` because `message` is
+/// interface copy, already localized (v1 spec §4.2), and therefore not a thing a client may branch on.
+async fn next_error(rx: &mut mpsc::UnboundedReceiver<ToClient>, wait_ms: u64) -> (ErrorCode, String, bool) {
+    match next_matching(rx, |m| matches!(m, ToClient::Event(Event::Error { .. })), wait_ms).await {
+        ToClient::Event(Event::Error { code, message, recoverable }) => (code, message, recoverable),
+        other => panic!("expected an error event, got {other:?}"),
+    }
+}
+
+/// The whole refusal clause of §4.1: the error event, no `Welcome` before it and none after, and a
+/// session that has ended by the time the last message has been read.
+#[tokio::test]
+async fn a_hello_with_the_wrong_protocol_version_is_refused_before_the_welcome() {
+    let (tx, mut rx, _, _) =
+        session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", SessionPolicy::local());
+    send(&tx, hello(None, PROTOCOL_VERSION + 1));
+
+    let (code, message, recoverable) = next_error(&mut rx, 1000).await;
+    assert_eq!((code, recoverable), (ErrorCode::ProtocolVersion, false));
+    assert!(
+        !message.contains("protocol_version"),
+        "the code belongs in `code`, not spelled into the message: {message}"
+    );
+    assert!(message.split_whitespace().count() > 1, "the message is a sentence: {message}");
+
+    // …and nothing was welcomed, before the error or after it.
+    let seen = until_closed(&mut rx, 1000).await;
+    assert!(
+        !seen.iter().any(|m| matches!(m, ToClient::Event(Event::Welcome { .. }))),
+        "a refused handshake is never welcomed: {seen:#?}"
+    );
+    assert!(tx.send(ToServer::Command(hello(None, PROTOCOL_VERSION))).is_err(), "the session closed");
+}
+
+#[tokio::test]
+async fn a_token_the_server_requires_and_does_not_receive_is_refused() {
+    let (tx, mut rx, _, _) =
+        session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", SessionPolicy::exposed("s3cret"));
+    send(&tx, hello(None, PROTOCOL_VERSION));
+
+    let (code, message, recoverable) = next_error(&mut rx, 1000).await;
+    assert_eq!((code, recoverable), (ErrorCode::TokenRequired, false));
+    assert!(
+        !message.contains("token_required") && !message.contains("s3cret"),
+        "neither the code nor the token may appear in the message: {message}"
+    );
+
+    let seen = until_closed(&mut rx, 1000).await;
+    assert!(!seen.iter().any(|m| matches!(m, ToClient::Event(Event::Welcome { .. }))), "{seen:#?}");
+}
+
+#[tokio::test]
+async fn a_wrong_token_is_refused() {
+    let (tx, mut rx, _, _) =
+        session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", SessionPolicy::exposed("s3cret"));
+    send(&tx, hello(Some("not-the-token"), PROTOCOL_VERSION));
+
+    let (code, message, recoverable) = next_error(&mut rx, 1000).await;
+    assert_eq!((code, recoverable), (ErrorCode::TokenInvalid, false));
+    assert!(
+        !message.contains("token_invalid") && !message.contains("not-the-token"),
+        "the refused token is not echoed back to the client that sent it: {message}"
+    );
+
+    let seen = until_closed(&mut rx, 1000).await;
+    assert!(!seen.iter().any(|m| matches!(m, ToClient::Event(Event::Welcome { .. }))), "{seen:#?}");
+}
+
+/// The acceptance path, and the row of §4.1's table that must not be over-refused: the right version
+/// and the right token are served exactly as the in-process client is.
+#[tokio::test]
+async fn the_right_version_and_token_are_welcomed() {
+    let (tx, mut rx, _, _) =
+        session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", SessionPolicy::exposed("s3cret"));
+    send(&tx, hello(Some("s3cret"), PROTOCOL_VERSION));
+
+    let first = next_matching(&mut rx, |_: &ToClient| true, 500).await;
+    assert!(
+        matches!(first, ToClient::Event(Event::Welcome { .. })),
+        "the accepted handshake is served: {first:?}"
+    );
+    // The greeting turn then runs, which is the proof that nothing about a valid handshake changed.
+    next_matching(&mut rx, is_done, 500).await;
+}
+
+/// The exposure surface of the prelude, which the three refusals above cannot see: `Hello` is the
+/// only message allowed to be first, so a first message that is not one is refused as
+/// `ProtocolVersion` rather than served. Judging the handshake only when the message already parsed
+/// as a `Hello` would hand an exposed session the `Ask` below without a token ever being presented.
+#[tokio::test]
+async fn a_first_message_that_is_not_a_hello_is_refused() {
+    let (tx, mut rx, _, _) =
+        session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", SessionPolicy::exposed("s3cret"));
+    send(&tx, Command::Ask { text: "¿y el ticket?".into() });
+
+    let (code, _, recoverable) = next_error(&mut rx, 1000).await;
+    assert_eq!((code, recoverable), (ErrorCode::ProtocolVersion, false));
+
+    let seen = until_closed(&mut rx, 1000).await;
+    assert!(!seen.iter().any(|m| matches!(m, ToClient::Event(Event::Welcome { .. }))), "{seen:#?}");
+    assert!(!seen.iter().any(|m| matches!(m, ToClient::Event(Event::Reply { .. }))), "the question was never asked: {seen:#?}");
 }
 
 // ---------- tests ----------
@@ -357,7 +517,8 @@ async fn a_rebuilt_provider_stack_answers_the_next_turn() {
         speech: speech.clone(),
         transcribe: transcribe.clone(),
     });
-    let (tx, mut rx) = spawn_session(config(), slot.clone(), BrainConfig::default());
+    let (tx, mut rx) = spawn_session(config(), slot.clone(), BrainConfig::default(), SessionPolicy::local());
+    send(&tx, hello(None, PROTOCOL_VERSION));
     next_matching(&mut rx, is_done, 500).await; // the greeting
 
     send(&tx, Command::Ask { text: "primera pregunta".into() });
@@ -388,7 +549,8 @@ async fn a_new_listening_mode_is_announced_to_the_client() {
             pcms: Mutex::new(Vec::new()),
         }),
     });
-    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default());
+    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default(), SessionPolicy::local());
+    send(&tx, hello(None, PROTOCOL_VERSION));
     let first = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Welcome { .. })), 500).await;
     assert!(
         matches!(first, ToClient::Event(Event::Welcome { listening_mode: ListeningMode::Push, .. })),
@@ -418,7 +580,8 @@ async fn switching_profile_changes_the_prompt_of_the_next_turn() {
             pcms: Mutex::new(Vec::new()),
         }),
     });
-    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default());
+    let (tx, mut rx) = spawn_session(config(), slot, BrainConfig::default(), SessionPolicy::local());
+    send(&tx, hello(None, PROTOCOL_VERSION));
     next_matching(&mut rx, is_done, 500).await; // the greeting
 
     send(&tx, Command::SetProfile { id: "senyor".into() });
@@ -465,7 +628,8 @@ fn auto_session(
         pcms: Mutex::new(Vec::new()),
     });
     let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
-    let (tx, rx) = spawn_session(auto_config(silence_ms), providers, BrainConfig::default());
+    let (tx, rx) = spawn_session(auto_config(silence_ms), providers, BrainConfig::default(), SessionPolicy::local());
+    send(&tx, hello(None, PROTOCOL_VERSION));
     (tx, rx, transcribe)
 }
 
