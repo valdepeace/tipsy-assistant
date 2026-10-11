@@ -21,7 +21,9 @@ use crate::audio::device::MIC_SAMPLE_RATE;
 use crate::audio::pcm::{i16_to_f32, Pcm};
 use crate::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use crate::config::Config;
+use crate::config::form::config_of;
 use crate::providers::{ChatMessage, ProviderSlot, Role};
+use crate::server::Hub;
 use crate::vad::{Scorer, VadEvent, VadState};
 
 /// The session ids this process has handed out. One session per connection means the id can no
@@ -113,8 +115,9 @@ pub fn spawn_session(
     providers: ProviderSlot,
     brain_config: BrainConfig,
     policy: SessionPolicy,
+    hub: Hub,
 ) -> (UnboundedSender<ToServer>, UnboundedReceiver<ToClient>) {
-    let session = spawn_with_events(config, providers, brain_config, policy);
+    let session = spawn_with_events(config, providers, brain_config, policy, hub);
     (session.to_server, session.from_server)
 }
 
@@ -136,6 +139,7 @@ pub fn spawn_with_events(
     providers: ProviderSlot,
     brain_config: BrainConfig,
     policy: SessionPolicy,
+    hub: Hub,
 ) -> SessionEnds {
     let session_id = next_session_id();
     let (to_server_tx, to_server_rx) = mpsc::unbounded_channel();
@@ -156,6 +160,7 @@ pub fn spawn_with_events(
         policy,
         token_presented: false,
         config,
+        hub,
         brain,
         brain_config,
         providers,
@@ -229,6 +234,11 @@ struct Session {
     /// The configuration the session was built from. A `SetProfile` re-derives the brain from it, so
     /// a switch takes effect on the next turn.
     config: Config,
+    /// The registry this session is one of. The three configuration commands of Task 1.1 are answered
+    /// *through* it, so that a change one client makes reaches the others (spec §5.2) instead of
+    /// mutating this session alone. A handle like every other field here, which is why it is cloned
+    /// rather than shared.
+    hub: Hub,
     brain: Arc<Brain>,
     brain_config: BrainConfig,
     /// The live provider stack (Task 6): read once per turn, swapped in place by a save.
@@ -567,11 +577,30 @@ impl Session {
                 ControlFlow::Continue(())
             }
             Command::SetProfile { id } => {
-                self.set_profile(id);
+                // The profile is global (spec §5.2), so the command is the hub's to apply: it persists
+                // the choice, re-derives every session and announces `ProfileChanged` to every client,
+                // this one included. A session that mutated only its own copy would be the bug the
+                // spec's §4.2 broadcast exists to prevent.
+                let _ = self.hub.set_profile(&id);
                 ControlFlow::Continue(())
             }
             Command::SetListeningMode { mode } => {
+                // A mode the session is already in is the hub's own re-announcement — `Hub::resend_welcome`
+                // sends this very command back to every session — so the whole of this arm is the fresh
+                // `Welcome` the header reads (spec §5.2: the mode is not configuration, so it is not a
+                // `ConfigChanged`).
+                if self.listening_mode == mode {
+                    self.set_listening_mode(mode);
+                    return ControlFlow::Continue(());
+                }
+                // A genuine change, so it is the hub's to persist and to announce to everyone. The
+                // local field is moved **first**, before the hub fans the same mode back out: the
+                // echo then arrives at a session that is already in it and stops here, where taking the
+                // hub's answer first would send it back to the hub and round again for ever. The
+                // `Welcome` this sends is the client's own immediate answer, and the hub's
+                // announcement adds the same one for every other connection.
                 self.set_listening_mode(mode);
+                let _ = self.hub.set_listening_mode(mode);
                 ControlFlow::Continue(())
             }
             // The first `Hello` was judged in `run`, before the `Welcome`; this arm is both the
@@ -605,10 +634,46 @@ impl Session {
                 self.login_answer(text);
                 ControlFlow::Continue(())
             }
-            // Task 1.3 owns these three: the configuration over the wire is answered by a session
-            // only once there is a server to persist through. Accepted and ignored here so the match
-            // stays exhaustive and this task owns no behaviour.
-            Command::GetConfig | Command::UpdateConfig { .. } | Command::SetKey { .. } => ControlFlow::Continue(()),
+            Command::GetConfig => {
+                // §4.3: the token goes to a client that already presented it, or to a loopback one.
+                // The session is the only thing that knows which it is, so it is the thing that says.
+                send(
+                    &self.out,
+                    ToClient::Event(Event::Config {
+                        config: Box::new(self.hub.config_view(self.token_presented)),
+                    }),
+                );
+                ControlFlow::Continue(())
+            }
+            Command::UpdateConfig { config } => {
+                // `config_of` is the same refusal, by the same row names, that the configuration
+                // screen's own save makes (`config/form.rs:142-144`): a view that does not describe a
+                // configuration is refused here, before anything is written.
+                //
+                // The hub is **not** called back: by the time this message exists the hub has already
+                // written the file, remembered the value and fanned the same view out to every
+                // session, so this arm's whole job is the session's own half of the change. Calling
+                // `Hub::update_config` here is what made a single `SetListeningMode` spin for ever:
+                // the hub would write, fan out, and every session would call the hub back with the
+                // same view for the hub to write and fan out again.
+                // A view that does not describe a configuration is refused with nothing written and
+                // nothing re-derived: the client's own screen shows the row it could not parse,
+                // exactly as it does for a local save. `Err` is deliberately silent, which is why this
+                // is an `if let` and not a `match` with an empty arm.
+                if let Ok(config) = config_of(*config) {
+                    self.reconfigure(config);
+                }
+                ControlFlow::Continue(())
+            }
+            Command::SetKey { name, value } => {
+                // Spec §9.4's refusal — `Error { code: ErrorCode::InsecureTransport, recoverable:
+                // true }` unless the connection is loopback or TLS — is Task 1.8's, and this is the
+                // point it plugs into: `self.policy.loopback` is the fact it needs, and
+                // `self.hub.set_key` is the call it guards. Implementing the refusal here would put
+                // the rule where TLS is not visible.
+                let _ = self.hub.set_key(&name, &value);
+                ControlFlow::Continue(())
+            }
         }
     }
 
@@ -634,17 +699,21 @@ impl Session {
         );
     }
 
-    /// Applies the profile the configuration screen saved and tells the client about it, so the
-    /// header, the interface language and the next turn all follow the switch.
+    /// Replaces the configuration this session is running and re-derives what comes from it: the
+    /// `Brain` is rebuilt, and the profile the header shows and the interface language follow the newly
+    /// active profile. The provider stack is unchanged — a save that changed it swaps the slot in
+    /// place, which `client.rs:702-705` and `providers/mod.rs:175` already do. This is
+    /// `UpdateConfig`'s session half (spec §5.2): no restart, and a turn already running keeps the
+    /// brain it started with, because the rebuild happens here and the turn holds its own `Arc`.
     ///
-    /// The edited *texts* of a profile cannot travel the channel (`Command` carries an id), so this
-    /// re-derives the brain from the configuration the session holds: an id that is not in it is a
-    /// no-op rather than a brain built around nothing.
-    fn set_profile(&mut self, id: String) {
-        if !self.config.profiles.iter().any(|profile| profile.id == id) {
-            return;
-        }
-        self.config.active_profile = id;
+    /// **The listening mode is deliberately not read here.** It is the one fact whose announcement is
+    /// this very command, and `Hub::resend_welcome` re-announces it by sending `SetListeningMode` to
+    /// every session: a `reconfigure` that re-read the mode would undo what that arm had just applied
+    /// when a `Command::UpdateConfig` for the same save arrived behind it, the session would see a
+    /// change again the next time the hub announced, and a client that changed its mode would spin the
+    /// pair of them for ever. The field belongs to `SetListeningMode` alone.
+    fn reconfigure(&mut self, config: Config) {
+        self.config = config;
         let profile = self.config.active();
         self.profile = profile.view();
         self.ui_language = UiLanguage::from_bcp47(&profile.language);
@@ -653,11 +722,14 @@ impl Session {
             turn_profile(&self.config),
             self.brain_config.clone(),
         ));
-        self.welcome();
     }
 
-    /// Applies the listening mode a save changed. The mode lives in `Welcome` and nowhere else, so
-    /// the session announces it again — that is what moves the header's indicator.
+    /// Applies the listening mode and announces it again, which is what moves the header's indicator:
+    /// the mode lives in `Welcome` and nowhere else.
+    ///
+    /// The `SetListeningMode` arm is its only caller, in both of the shapes that arm has: a mode a
+    /// client really changed, which the hub then persists, and the hub's own re-announcement, which
+    /// arrives here for a session that is already in the mode.
     fn set_listening_mode(&mut self, mode: ListeningMode) {
         self.listening_mode = mode;
         self.welcome();
@@ -958,6 +1030,7 @@ mod tests {
 
     use crate::audio::device::MIC_FRAME_SAMPLES;
     use crate::config::{LoginConfig, LoginEntry};
+    use crate::keys::KeyResolver;
     use crate::providers::{
         ChatProvider, ChatRequest, ProviderError, Providers, SpeechProvider, SpeechRequest, TextStream,
         TranscribeProvider,
@@ -1081,6 +1154,16 @@ mod tests {
         let silence_ms = config.listening.silence_ms;
         let profile = config.active().clone();
         let greeting_withheld = crate::login::applies(&config.login);
+        // The login tests never reach the configuration commands, so this session's registry is a hub
+        // of its own. The tempdir is leaked rather than dropped: a `Hub` whose configuration file sat
+        // in a directory that had already gone away would turn any later save into a refusal.
+        let dir = tempfile::tempdir().unwrap().keep();
+        let hub = Hub::new(
+            config.clone(),
+            dir.join("config.toml"),
+            KeyResolver::new(Box::new(crate::keys::MemoryStore::default()), Box::new(|_| None)),
+            providers.clone(),
+        );
         let session = Session {
             // A directly built session never runs the handshake, so its id is the first one and its
             // policy is the in-process one; both fields are what `run`'s prelude fills in for a
@@ -1089,6 +1172,7 @@ mod tests {
             policy: SessionPolicy::local(),
             token_presented: true,
             config,
+            hub,
             brain,
             brain_config,
             providers,

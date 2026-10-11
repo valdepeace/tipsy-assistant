@@ -17,14 +17,14 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::device::{Mic, Player};
 use crate::audio::pcm::{envelope, i16_to_f32, rms};
-use crate::brain::BrainConfig;
 use crate::config::form::{config_from, form_of, provider_config};
 use crate::config::store;
 use crate::config::Config;
 use crate::keys::{env_var_name, KeyResolver};
 use crate::providers::{build_one, build_providers, ProviderSlot};
 use crate::realtime::{Call, CallSetup, Heard};
-use crate::session::{SessionPolicy, spawn_with_events};
+use crate::server::Hub;
+use crate::session::SessionPolicy;
 use crate::sysmon;
 
 /// One frame of the HUD.
@@ -127,12 +127,25 @@ impl Client {
 
     /// The frame loop: input, messages from the session, audio and drawing, about 30 times a second.
     fn frame_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
-        let ends = spawn_with_events(
+        // The in-process client's own hub: no listener, one session, and a save from the screen still
+        // reaches it through the same three commands the server uses. The hub takes the provider
+        // stack, so this is the one slot the client's `Player`, its `Test` probe and the session all
+        // read.
+        //
+        // The resolver is the system one, built here rather than borrowed from `self.keys`:
+        // `KeyResolver` is not `Clone` (two boxed trait objects, `keys.rs:79-82`), and it is the same
+        // resolver `main.rs:75` already builds — environment first, then the OS credential store — so
+        // a key the hub stores for `SetKey` is the key the `Test` probe resolves.
+        let hub = Hub::new(
             self.config.clone(),
+            self.config_path.clone(),
+            KeyResolver::system(),
             self.providers.clone(),
-            BrainConfig::default(),
-            SessionPolicy::local(),
         );
+        let ends = hub.spawn(SessionPolicy::local());
+        // `self.providers` and `hub.providers()` are the same slot; after this line the client reads
+        // the stack through the hub, so a `reconfigure_all` reaches the `Test` probe too.
+        self.providers = hub.providers();
         let to_server = ends.to_server;
         let mut from_server = ends.from_server;
         // A second sender for the same client channel: the system monitor and the screen's Test

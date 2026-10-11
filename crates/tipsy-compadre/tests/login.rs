@@ -14,7 +14,9 @@ use tipsy_compadre::audio::device::MIC_FRAME_SAMPLES;
 use tipsy_compadre::audio::pcm::Pcm;
 use tipsy_compadre::brain::BrainConfig;
 use tipsy_compadre::config::{Config, LoginEntry};
+use tipsy_compadre::keys::{KeyResolver, MemoryStore};
 use tipsy_compadre::providers::*;
+use tipsy_compadre::server::Hub;
 use tipsy_compadre::session::{SessionPolicy, spawn_session};
 use tipsy_protocol::{
     AssistantState, ClientKind, Command, Event, Frame, LoginView, PROTOCOL_VERSION, ToClient, ToServer,
@@ -82,6 +84,10 @@ impl TranscribeProvider for FakeTranscribe {
 // ---------- helpers ----------
 
 /// A session with one fake provider of each kind, and the handles the tests assert on.
+///
+/// The hub is a registry of its own with a configuration file in a tempdir nothing here reads: the
+/// login tests never reach a configuration command, and `hub.rs`'s own tests own `Hub`'s behaviour.
+/// The tempdir is leaked rather than dropped so the path stays writable for the life of the test.
 fn session_with(config: Config) -> (UnboundedSender<ToServer>, UnboundedReceiver<ToClient>, Arc<FakeChat>) {
     let chat = FakeChat::new(vec![Ok(vec!["vale"]), Ok(vec!["vale"]), Ok(vec!["vale"])]);
     let providers = ProviderSlot::new(Providers {
@@ -89,7 +95,15 @@ fn session_with(config: Config) -> (UnboundedSender<ToServer>, UnboundedReceiver
         speech: Arc::new(FakeSpeech),
         transcribe: Arc::new(FakeTranscribe { text: "no se usa" }),
     });
-    let (to_server, from_server) = spawn_session(config, providers, BrainConfig::default(), SessionPolicy::local());
+    let dir = tempfile::tempdir().unwrap().keep();
+    let hub = Hub::new(
+        config.clone(),
+        dir.join("config.toml"),
+        KeyResolver::new(Box::new(MemoryStore::default()), Box::new(|_| None)),
+        providers.clone(),
+    );
+    let (to_server, from_server) =
+        spawn_session(config, providers, BrainConfig::default(), SessionPolicy::local(), hub);
     // The handshake every client sends first (spec §4.1): the session judges it before it says a
     // word, so a harness that skipped it would wait out its timeouts on a session that is correct.
     to_server

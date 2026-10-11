@@ -18,6 +18,8 @@ pub mod providers;
 
 pub mod realtime;
 
+pub mod server;
+
 pub mod session;
 
 pub mod vad;
