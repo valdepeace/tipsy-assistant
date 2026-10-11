@@ -7,7 +7,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tipsy_protocol::{AssistantState, Command, Event, Frame, ListeningMode, ProfileView, ToClient, ToServer, UiLanguage};
+use tipsy_protocol::{
+    AssistantState, Command, Event, Frame, ListeningMode, LoginView, ProfileView, ToClient, ToServer, UiLanguage,
+};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +19,7 @@ use crate::audio::pcm::{i16_to_f32, Pcm};
 use crate::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use crate::config::Config;
 use crate::providers::{ChatMessage, ProviderSlot, Role};
-use crate::vad::{VadEvent, VadState};
+use crate::vad::{Scorer, VadEvent, VadState};
 
 /// The session id reported to clients. There is one session per process for now.
 const SESSION_ID: u64 = 1;
@@ -31,6 +33,10 @@ const HISTORY_MAX_MESSAGES: usize = 40;
 /// The turn's `Done` arrives while the device is still speaking the last sentence, which is what
 /// this is for.
 const GUARD: Duration = Duration::from_millis(300);
+
+/// Samples of continuous speech after which a login utterance is closed whether or not the detector
+/// has ended it: a login answer is a sentence, and a transcription bill is not a joke (spec §4.1).
+const LOGIN_MAX_UTTERANCE_SAMPLES: usize = MIC_SAMPLE_RATE as usize * 15;
 
 /// Starts a session on its own task and returns the two ends of its channels.
 pub fn spawn_session(
@@ -83,6 +89,14 @@ pub fn spawn_with_events(config: Config, providers: ProviderSlot, brain_config: 
         ui_language: UiLanguage::from_bcp47(&profile.language),
         listening_mode,
         greeting: profile.greeting.clone(),
+        login_active: false,
+        login_mic: Vec::new(),
+        login_heard: false,
+        login_vad: VadState::with_scorer(
+            Box::new(crate::vad::Earshot::default()) as Box<dyn Scorer + Send>,
+            listening_silence_ms,
+        ),
+        login_turn: None,
     };
 
     tokio::spawn(async move {
@@ -144,6 +158,19 @@ struct Session {
     ui_language: UiLanguage,
     listening_mode: ListeningMode,
     greeting: String,
+    /// True between `LoginStart` and `LoginStop`: the microphone's frames belong to the login screen
+    /// and to nothing else (spec §4.2).
+    login_active: bool,
+    /// The login capture's own audio, and the detector that decides what in it is speech. Both are
+    /// separate from `mic`/`vad` on purpose: a capture and a listening session must never share a
+    /// carry buffer, and they can never be open at the same time.
+    login_mic: Vec<i16>,
+    login_heard: bool,
+    /// Boxed rather than `Earshot` so a test can hand it a script: `earshot` cannot be asked to call
+    /// synthetic audio speech, and the capture's logic is what needs testing.
+    login_vad: VadState<Box<dyn Scorer + Send>>,
+    /// The login transcription in flight, if any: a newer utterance replaces it (spec §4.1).
+    login_turn: Option<CancellationToken>,
 }
 
 impl Session {
@@ -247,12 +274,12 @@ impl Session {
                 ui_language: self.ui_language,
                 listening_mode: self.listening_mode,
                 web_bundle: false,
-                // The screen itself is the capture's to announce (Task 3), where
-                // `login::applies(&config.login)` is the one authority on whether there is a screen
-                // at all. `None` is this task's honest placeholder: no client reads the field until
-                // the screen is wired, and inventing a second `applies` here is what the plan's
-                // "one rule, in one place" forbids.
-                login: None,
+                // The one authority on whether a client shows the login screen. A native client never
+                // reads `[login]` itself, so it cannot disagree with the server that will judge it.
+                // Sent on every `Welcome`; the client shows the screen once per run and ignores the
+                // later ones.
+                login: crate::login::applies(&self.config.login)
+                    .then_some(LoginView { voice: self.config.login.voice }),
             }),
         );
     }
@@ -275,6 +302,13 @@ impl Session {
         match message {
             ToServer::Command(command) => self.command(command),
             ToServer::Audio(Frame::Mic(samples)) => {
+                // An open login capture owns the microphone: its frames are the answer being spoken,
+                // and feeding them to the listening path as well would transcribe the login twice —
+                // once as an answer and once as a question (spec §4.2).
+                if self.login_active {
+                    self.login_frame(&samples);
+                    return;
+                }
                 // Frames arriving before `ListenStart` — or after `ListenStop` — belong to no turn.
                 if !self.listening {
                     return;
@@ -341,6 +375,22 @@ impl Session {
     }
 
     fn command(&mut self, command: Command) {
+        // While the door is shut, the commands that belong to the other side of it are ignored (spec
+        // §4.2): no client of ours can send them — the screen is modal and has no other action — and
+        // inventing an error for a state no user can reach would be wire surface with no user behind
+        // it. `Hello` is unaffected: the handshake happens before the screen exists.
+        //
+        // Spec §4.2 asks for a `tracing::debug!` here and this crate has no `tracing` (and the plan's
+        // Global Constraints forbid a new dependency), so the ignore is documented rather than
+        // logged: there is no subscriber in this process for a debug line to reach.
+        if self.login_active
+            && !matches!(
+                command,
+                Command::LoginStart | Command::LoginStop | Command::LoginAnswer { .. } | Command::Hello { .. }
+            )
+        {
+            return;
+        }
         match command {
             Command::Ask { text } => self.ask(text),
             Command::Say { text } => self.say(text),
@@ -355,10 +405,9 @@ impl Session {
             // the native client and Plan 3's server answers it over the wire. Accepted and ignored,
             // so the match stays exhaustive.
             Command::TestProvider { .. } => {}
-            // The login screen's own three commands drive a capture this task does not have yet
-            // (Task 3 owns it, together with the `welcome` that announces the screen). Accepted and
-            // ignored for now, so the match stays exhaustive and this task owns no behaviour here.
-            Command::LoginStart | Command::LoginStop | Command::LoginAnswer { .. } => {}
+            Command::LoginStart => self.login_start(),
+            Command::LoginStop => self.login_stop(),
+            Command::LoginAnswer { text } => self.login_answer(text),
         }
     }
 
@@ -445,6 +494,109 @@ impl Session {
             samples: i16_to_f32(&samples),
             sample_rate: MIC_SAMPLE_RATE,
         }));
+    }
+
+    /// `LoginStart`: open the capture. Ignored when there is no screen to serve, and when a capture is
+    /// already open — a repeated start must not eat an utterance in flight (spec §4.1).
+    fn login_start(&mut self) {
+        if !crate::login::applies(&self.config.login) || self.login_active {
+            return;
+        }
+        self.login_active = true;
+        self.login_mic.clear();
+        self.login_heard = false;
+        // A fresh detector, without throwing away the scorer this session was built with: `resume`
+        // leaves exactly the state `VadState::new` starts in — the counters at zero and the carry
+        // dropped — and keeping the scorer is what lets a test hand the capture its own script. The
+        // plan rebuilt the box here, which replaced the scripted scorer with earshot and left the
+        // capture unable to hear synthetic audio. Production builds the session with earshot, so the
+        // server's own behaviour is the same either way.
+        self.login_vad.resume();
+    }
+
+    /// `LoginStop`: close the capture, drop what it held, and cancel the transcription in flight with
+    /// it — a verdict that arrives after the screen is gone has nothing to answer.
+    fn login_stop(&mut self) {
+        self.login_active = false;
+        self.login_mic.clear();
+        self.login_heard = false;
+        self.cancel_login_turn();
+    }
+
+    /// Stops the login transcription in flight, if any.
+    ///
+    /// A `CancellationToken` is cancelled by `cancel()` and by nothing else: replacing or dropping the
+    /// handle leaves the task running to its own end, so both places the capture lets go of one — a
+    /// newer utterance (spec §4.1: the last thing said is the thing that counts) and `LoginStop` —
+    /// call this instead of just forgetting the token.
+    fn cancel_login_turn(&mut self) {
+        if let Some(in_flight) = self.login_turn.take() {
+            in_flight.cancel();
+        }
+    }
+
+    /// `LoginAnswer`: a typed answer, judged here and now. Judged whether or not a capture is open, so
+    /// a typing-only client never has to send `LoginStart` (spec §4.1). When the screen does not apply
+    /// the ruling opens: there is nothing to check, so nobody is refused.
+    fn login_answer(&mut self, text: String) {
+        let verdict = crate::login::judge(&self.config.login, &text);
+        send(&self.out, ToClient::Event(Event::LoginVerdict { ok: verdict.ok, name: verdict.name }));
+    }
+
+    /// One microphone frame of an open capture: the same detector discipline `auto` mode uses, with
+    /// its own buffer — nothing before a confirmed onset is kept, and only confirmed speech is ever
+    /// transcribed.
+    fn login_frame(&mut self, samples: &[i16]) {
+        match self.login_vad.push(samples) {
+            VadEvent::SpeechStarted => {
+                self.login_heard = true;
+                self.login_mic.clear();
+                self.login_mic.extend_from_slice(samples);
+            }
+            VadEvent::SpeechEnded => {
+                self.login_heard = false;
+                self.login_mic.extend_from_slice(samples);
+                self.login_utterance_ended();
+                return;
+            }
+            VadEvent::None => {
+                if self.login_heard {
+                    self.login_mic.extend_from_slice(samples);
+                }
+            }
+        }
+        // A monologue is not an answer: the cap closes the utterance the detector has not.
+        if self.login_heard && self.login_mic.len() >= LOGIN_MAX_UTTERANCE_SAMPLES {
+            self.login_heard = false;
+            self.login_utterance_ended();
+        }
+    }
+
+    /// The capture's detector says the answer is over: transcribe it in a task of its own, exactly as a
+    /// turn runs, and let a newer utterance replace this one.
+    fn login_utterance_ended(&mut self) {
+        let samples = std::mem::take(&mut self.login_mic);
+        if samples.is_empty() {
+            return;
+        }
+        // Spec §4.1: a newer utterance *cancels* the transcription in flight, so a stale verdict can
+        // never land after a fresh one.
+        self.cancel_login_turn();
+        let cancel = CancellationToken::new();
+        self.login_turn = Some(cancel.clone());
+        let brain = Arc::clone(&self.brain);
+        let out = self.out.clone();
+        let login = self.config.login.clone();
+        tokio::spawn(async move {
+            send(&out, status(AssistantState::Transcribing));
+            let pcm = Pcm { samples: i16_to_f32(&samples), sample_rate: MIC_SAMPLE_RATE };
+            if let Some(text) = brain.transcribe_once(pcm, &out, &cancel).await {
+                send(&out, ToClient::Event(Event::LoginHeard { text: text.clone() }));
+                let verdict = crate::login::judge(&login, &text);
+                send(&out, ToClient::Event(Event::LoginVerdict { ok: verdict.ok, name: verdict.name }));
+            }
+            send(&out, status(AssistantState::Idle));
+        });
     }
 
     /// `Cancel`: stop the running turn without starting another one.
@@ -566,6 +718,17 @@ fn send(out: &UnboundedSender<ToClient>, message: ToClient) {
 mod tests {
     use super::*;
 
+    use crate::audio::device::MIC_FRAME_SAMPLES;
+    use crate::config::{LoginConfig, LoginEntry};
+    use crate::providers::{
+        ChatProvider, ChatRequest, ProviderError, Providers, SpeechProvider, SpeechRequest, TextStream,
+        TranscribeProvider,
+    };
+    use crate::vad::{Scorer, scripted::Scripted};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::timeout;
+
     /// One question and its reply, numbered so a window can be checked message by message.
     fn exchange(n: usize) -> [ChatMessage; 2] {
         [
@@ -626,5 +789,190 @@ mod tests {
         assert_eq!(history[0].role, Role::User, "the window must open with a question: {history:#?}");
         assert_eq!(history.last().unwrap().content, "pregunta sin respuesta");
         assert!(history.len() <= HISTORY_MAX_MESSAGES);
+    }
+
+    /// A chat provider that must never be asked anything. It counts the calls instead of panicking
+    /// because panicking inside the spawned turn would be reported as a task failure, not as the
+    /// honest assertion this test wants.
+    struct NeverChat(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl ChatProvider for NeverChat {
+        async fn stream(&self, _req: ChatRequest) -> Result<TextStream, ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::BadResponse("the login path must not ask for a reply".into()))
+        }
+    }
+
+    /// A speech provider that must never be asked anything either.
+    struct NeverSpeech;
+
+    #[async_trait]
+    impl SpeechProvider for NeverSpeech {
+        async fn synthesize(&self, _req: SpeechRequest) -> Result<Pcm, ProviderError> {
+            Err(ProviderError::BadResponse("the login path must not speak".into()))
+        }
+    }
+
+    struct FakeTranscribe(&'static str);
+
+    #[async_trait]
+    impl TranscribeProvider for FakeTranscribe {
+        async fn transcribe(&self, _pcm: Pcm, _language: &str) -> Result<String, ProviderError> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    /// A session whose transcriber answers `transcript`, whose chat and speech providers count their
+    /// calls, and whose login detector answers `scores` in order. The listening detector is the real
+    /// one: these tests never open it.
+    fn login_session(
+        config: Config,
+        transcript: &'static str,
+        scores: Vec<f32>,
+    ) -> (Session, UnboundedReceiver<ToClient>, Arc<AtomicUsize>) {
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let providers = ProviderSlot::new(Providers {
+            chat: Arc::new(NeverChat(Arc::clone(&chat_calls))),
+            speech: Arc::new(NeverSpeech),
+            transcribe: Arc::new(FakeTranscribe(transcript)),
+        });
+        let brain_config = BrainConfig::default();
+        let brain = Arc::new(Brain::new(providers.clone(), turn_profile(&config), brain_config.clone()));
+        let (out, rx) = mpsc::unbounded_channel();
+        let silence_ms = config.listening.silence_ms;
+        let profile = config.active().clone();
+        let session = Session {
+            config,
+            brain,
+            brain_config,
+            providers,
+            out,
+            history: Vec::new(),
+            current: None,
+            generation: 0,
+            listening: false,
+            mic: Vec::new(),
+            vad: VadState::new(silence_ms),
+            heard: false,
+            utterance: Vec::new(),
+            guard: None,
+            profile: profile.view(),
+            ui_language: UiLanguage::from_bcp47(&profile.language),
+            listening_mode: ListeningMode::Push,
+            greeting: profile.greeting.clone(),
+            login_active: false,
+            login_mic: Vec::new(),
+            login_heard: false,
+            login_vad: VadState::with_scorer(Box::new(Scripted::new(scores)) as Box<dyn Scorer + Send>, silence_ms),
+            login_turn: None,
+        };
+        (session, rx, chat_calls)
+    }
+
+    /// The script of one confirmed utterance: three voiced windows to open it (`ONSET_FRAMES`), then
+    /// the silence budget to close it, then zeros for whatever the detector asks after that.
+    fn one_utterance(silence_ms: u32) -> Vec<f32> {
+        let mut scores = vec![0.9; 3];
+        scores.extend(std::iter::repeat_n(0.0, silence_ms.div_ceil(16) as usize + 1));
+        scores
+    }
+
+    /// Drives `frames` microphone frames of 20 ms into the session, as a client would.
+    fn speak(session: &mut Session, frames: usize) {
+        for _ in 0..frames {
+            session.dispatch(ToServer::Audio(Frame::Mic(vec![0i16; MIC_FRAME_SAMPLES])));
+        }
+    }
+
+    /// Everything the session sent until the verdict (or until two seconds pass, which fails the test
+    /// rather than hanging it).
+    async fn events_until_verdict(rx: &mut UnboundedReceiver<ToClient>) -> Vec<Event> {
+        let mut seen = Vec::new();
+        loop {
+            let next = timeout(Duration::from_secs(2), rx.recv()).await.expect("the verdict must arrive").expect("the channel stays open");
+            if let ToClient::Event(event) = next {
+                let verdict = matches!(event, Event::LoginVerdict { .. });
+                seen.push(event);
+                if verdict {
+                    return seen;
+                }
+            }
+        }
+    }
+
+    fn allowed(name: &str, keywords: &[&str]) -> LoginConfig {
+        LoginConfig { enabled: true, voice: true, allowed: vec![LoginEntry { name: name.into(), keywords: keywords.iter().map(|k| (*k).into()).collect() }] }
+    }
+
+    /// The whole voice path, and the three things that must *not* happen on it: no chat call, no
+    /// speech, no turn. `transcribe_once` is what keeps the login out of the conversation.
+    #[tokio::test]
+    async fn a_login_utterance_becomes_a_verdict_without_a_turn() {
+        let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
+        let (mut session, mut rx, chat_calls) = login_session(config, "yo soy Andrés del equipo del core", one_utterance(1000));
+
+        session.command(Command::LoginStart);
+        assert!(session.login_active, "the capture opens");
+        speak(&mut session, 70);
+
+        let events = events_until_verdict(&mut rx).await;
+        assert!(events.iter().any(|e| matches!(e, Event::Status { state: AssistantState::Transcribing, .. })), "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, Event::LoginHeard { text } if text == "yo soy Andrés del equipo del core")), "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, Event::LoginVerdict { ok: true, name: Some(name) } if name == "Andrés")), "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, Event::Reply { .. } | Event::ReplyDelta { .. } | Event::SpeechChunk { .. })), "the login path never replies: {events:?}");
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 0, "the chat provider is never asked");
+        assert!(session.history.is_empty(), "and the conversation is untouched");
+    }
+
+    /// The same capture, refusing: the keywords are not there, so the verdict says no and the capture
+    /// stays open for the next attempt (spec §6.2 — the automatic re-arm).
+    #[tokio::test]
+    async fn a_login_utterance_without_the_keywords_is_refused_and_the_capture_stays_open() {
+        let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
+        let (mut session, mut rx, _) = login_session(config, "soy Andrés del score", one_utterance(1000));
+
+        session.command(Command::LoginStart);
+        speak(&mut session, 70);
+
+        let events = events_until_verdict(&mut rx).await;
+        assert!(events.iter().any(|e| matches!(e, Event::LoginVerdict { ok: false, .. })), "{events:?}");
+        assert!(session.login_active, "the next utterance is the next attempt");
+    }
+
+    /// Silence is not an answer: no transcription request, `NothingHeard`, and no verdict at all — a
+    /// cough must never be counted as a wrong answer (spec §4.1).
+    #[tokio::test]
+    async fn silence_asks_for_no_transcription_and_no_verdict() {
+        let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
+        let (mut session, mut rx, _) = login_session(config, "unused", vec![0.0; 80]);
+
+        session.command(Command::LoginStart);
+        speak(&mut session, 70);
+
+        let next = timeout(Duration::from_millis(200), rx.recv()).await;
+        assert!(next.is_err(), "nothing is sent for silence, got {:?}", next.map(|m| m.map(|m| format!("{m:?}"))));
+    }
+
+    /// Spec §4.1: a newer utterance cancels the transcription in flight, so the last thing said is the
+    /// thing that counts. The plan replaced the token without cancelling it, and a replaced
+    /// `CancellationToken` stops nothing — the older transcription would have run to its own end and
+    /// sent its verdict after the newer one's. The detector is not part of this rule, so the two
+    /// utterances are closed directly.
+    #[tokio::test]
+    async fn a_new_utterance_cancels_the_transcription_in_flight() {
+        let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
+        let (mut session, _rx, _) = login_session(config, "unused", Vec::new());
+
+        session.login_mic = vec![0i16; MIC_FRAME_SAMPLES];
+        session.login_utterance_ended();
+        let first = session.login_turn.clone().expect("the first transcription is in flight");
+
+        session.login_mic = vec![0i16; MIC_FRAME_SAMPLES];
+        session.login_utterance_ended();
+        let second = session.login_turn.clone().expect("the second transcription is in flight");
+
+        assert!(first.is_cancelled(), "the newer utterance cancels the one in flight");
+        assert!(!second.is_cancelled(), "and the newer one is left alone to answer");
     }
 }
