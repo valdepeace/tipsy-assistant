@@ -123,7 +123,12 @@ impl Client {
             let hits = draw_frame(terminal, &self.state)?;
 
             let waited = FRAME.saturating_sub(drawn.elapsed());
+            // What this frame's input came to: the keys that were typed, and the hits that were
+            // clicked, in the order they arrived. The two are dispatched differently on purpose — a
+            // key goes to the state's own translator, a click names its target — and both end up as
+            // `UiAction`s below, so a click and the keystroke it replaces cannot disagree.
             let mut keys = Vec::new();
+            let mut clicked = Vec::new();
             if event::poll(waited).map_err(|e| e.to_string())? {
                 // Everything already typed is handled in this frame; a held key is not throttled
                 // to one character per frame.
@@ -136,12 +141,12 @@ impl Client {
                         }
                         TermEvent::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)) => {
                             if let Some(hit) = hit_at(&hits, mouse.column, mouse.row) {
-                                keys.push(hit.key);
+                                clicked.push(hit);
                             }
                         }
                         _ => {}
                     }
-                    if keys.len() >= MAX_INPUT_PER_FRAME {
+                    if keys.len() + clicked.len() >= MAX_INPUT_PER_FRAME {
                         break;
                     }
                 }
@@ -161,6 +166,11 @@ impl Client {
             let mut quit = false;
             for key in keys {
                 for action in self.state.on_key(key) {
+                    quit |= self.on_action(action, &to_server, &events);
+                }
+            }
+            for hit in clicked {
+                for action in self.state.on_hit(&hit) {
                     quit |= self.on_action(action, &to_server, &events);
                 }
             }
@@ -322,6 +332,11 @@ impl Client {
     /// Opens the configuration screen on a copy read from the file *now* (Review Focus 3): a
     /// `config.toml` edited while the app runs is what the screen shows. Opening changes nothing
     /// that is running — `Esc` discards the edits, and only a save applies them.
+    ///
+    /// The screen is put up filled only when the file was read: a read that fails leaves the
+    /// placeholder form on screen, unmarked (finding G), and that form refuses `Ctrl+S` and `F4`
+    /// rather than writing blank base URLs and models over the user's `config.toml`. The notice
+    /// below is what tells the user why the screen is empty.
     fn open_screen(&mut self) {
         match store::load_or_create(&self.config_path) {
             Ok(loaded) => {

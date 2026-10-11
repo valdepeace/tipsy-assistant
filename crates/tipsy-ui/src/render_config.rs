@@ -12,7 +12,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::config_form::{ConfigForm, ConfigTab, FormRow, NoticeKind};
+use crate::config_form::{ConfigAction, ConfigForm, ConfigTab, FormRow, NoticeKind};
 use crate::render::Hit;
 use crate::state::KeyInput;
 use crate::strings::Strings;
@@ -23,11 +23,12 @@ const GOLD: Color = Color::Rgb(255, 190, 60);
 /// The bar the focused row is drawn on: dark enough that the label and the value keep their own
 /// colours on top of it, the same dark teal the HUD's gauges use.
 const BAR: Color = Color::Rgb(0, 30, 40);
-/// The `F` keys the screen's tabs answer to: the HUD already spends `F7` and `F8` on chat/network,
-/// so the screen's four tabs take the four after them.
-const TAB_KEYS: [u8; 4] = [7, 8, 9, 10];
-/// The screen's two actions. `F2` and `F4` are the HUD's replay and clear, and the screen reuses
-/// neither while it is open.
+/// The `F` keys the screen's tabs answer to: the HUD already spends `F2` (replay), `F4` (clear),
+/// `F7` and `F8` (chat/network) — and `F9` is the door in and out of the screen (`UiState::on_key`),
+/// so no tab may answer it. `F5`, `F6`, `F8` and `F10` are the ones left.
+const TAB_KEYS: [u8; 4] = [5, 6, 8, 10];
+/// The screen's two actions, wired to the same two `F` keys the action line draws beside them: the
+/// HUD's `F2` is the replay and its `F4` the clear, and neither exists while the screen is up.
 const TEST_KEY_F: u8 = 2;
 const SAVE_KEY_F: u8 = 4;
 /// The label column: a third of the body, wide enough for "Instrucciones de voz" and narrow enough
@@ -100,7 +101,13 @@ fn draw_tabs(frame: &mut Frame, form: &ConfigForm, strings: &Strings, area: Rect
             Style::new().fg(DIM)
         };
         if width > 0 && x.saturating_add(width) <= area.right() {
-            hits.push(Hit { area: Rect::new(x, area.y, width, 1), key: KeyInput::F(TAB_KEYS[index]) });
+            hits.push(Hit {
+                area: Rect::new(x, area.y, width, 1),
+                key: KeyInput::F(TAB_KEYS[index]),
+                // The click names the tab it landed on rather than the `F` key beside it: the tab
+                // rows are the same list `ConfigForm::tab_title` names, so the index is the tab.
+                action: Some(ConfigAction::SelectTab(*tab)),
+            });
         }
         runs.push((label.to_string(), style));
         runs.push((" ".to_string(), Style::default()));
@@ -230,12 +237,18 @@ fn draw_row(
         spans.push(Span::styled(cut(&row.value, width, false), Style::new().fg(fg)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(bar), value);
-    Some(Hit { area: value, key: KeyInput::Enter })
+    // The hit names the row it is drawn on. The row's own action is the form's to decide — a text
+    // row opens its buffer, a switch flips, a profile row is chosen — and a click that reported
+    // `Enter` would actuate whichever row happened to be focused instead.
+    Some(Hit { area: value, key: KeyInput::Enter, action: Some(ConfigAction::FocusRow(index)) })
 }
 
 /// The action line: the Test button and the Save button, each a padded label on a bar and each
 /// reporting the cells of its own label. The words are the table's, the same two the row list uses
 /// for its Test and Save rows, so the screen has no third name for either action.
+///
+/// Each button reports the action it performs *and* the `F` key it answers, so the two paths agree
+/// by construction: the key is read back off the action rather than kept beside it in a second list.
 fn draw_actions(frame: &mut Frame, strings: &Strings, area: Rect) -> Vec<Hit> {
     if area.is_empty() {
         return Vec::new();
@@ -243,9 +256,9 @@ fn draw_actions(frame: &mut Frame, strings: &Strings, area: Rect) -> Vec<Hit> {
     let mut runs = Vec::new();
     let mut hits = Vec::new();
     let mut x = area.x;
-    for (label, colour, key) in [
-        (strings.cfg_test, GOLD, KeyInput::F(TEST_KEY_F)),
-        (strings.cfg_save, CYAN, KeyInput::F(SAVE_KEY_F)),
+    for (label, colour, action) in [
+        (strings.cfg_test, GOLD, ConfigAction::Test),
+        (strings.cfg_save, CYAN, ConfigAction::Save),
     ] {
         let button = format!(" {label} ");
         let button_w = text_width(&button) as u16;
@@ -256,7 +269,8 @@ fn draw_actions(frame: &mut Frame, strings: &Strings, area: Rect) -> Vec<Hit> {
         }
         hits.push(Hit {
             area: Rect::new(x.saturating_add(1), area.y, text_width(label) as u16, 1),
-            key,
+            key: action_key(action),
+            action: Some(action),
         });
         runs.push((button, Style::new().fg(Color::Black).bg(colour).bold()));
         runs.push((" ".repeat(ACTION_GAP as usize), Style::default()));
@@ -264,6 +278,15 @@ fn draw_actions(frame: &mut Frame, strings: &Strings, area: Rect) -> Vec<Hit> {
     }
     frame.render_widget(Paragraph::new(cut_line(runs, area.width as usize)), area);
     hits
+}
+
+/// The `F` key a button row answers, so the drawn button and the keyboard cannot name different
+/// actions. Only the two buttons of the action line are ever asked.
+fn action_key(action: ConfigAction) -> KeyInput {
+    match action {
+        ConfigAction::Test => KeyInput::F(TEST_KEY_F),
+        _ => KeyInput::F(SAVE_KEY_F),
+    }
 }
 
 /// The columns `text` takes on screen, by ratatui's own reckoning.
@@ -331,7 +354,10 @@ fn cut_line(runs: Vec<(String, Style)>, width: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_form::{ConfigTab, ListeningForm, NoticeKind, ProfileForm, ProviderForm, ServerForm};
+    use crate::config_form::{
+        ConfigAction, ConfigEffect, ConfigTab, ListeningForm, NoticeKind, ProfileForm, ProviderForm,
+        ServerForm, SERVER_ROW_REGENERATE, SERVER_ROW_SAVE,
+    };
     use crate::strings::strings;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -593,6 +619,118 @@ mod tests {
         assert_eq!(hits.len() - 6, rows.len(), "every row has exactly one hit: {} hits, {} rows", hits.len(), rows.len());
     }
 
+    /// Geometry is the test above; this one is the semantics. Every control reports a `ConfigAction`
+    /// that names the thing under the pointer — the tab, the row, the button — so the click path
+    /// never has to guess from the keyboard focus. Applying that action must move the form the way
+    /// the pixels promise.
+    #[test]
+    fn every_control_reports_the_action_it_is_drawn_for() {
+        let mut f = providers();
+        let (_, hits, _) = rendered(&f, UiLanguage::Es, 120, 40);
+        let action = |hit: &Hit| hit.action.expect("every screen control names its own action");
+
+        // The four tab labels, in the order `draw_form` reports them, each naming its own tab.
+        for (index, tab) in [
+            ConfigTab::Providers,
+            ConfigTab::Listening,
+            ConfigTab::Profiles,
+            ConfigTab::Server,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(action(&hits[index]), ConfigAction::SelectTab(tab), "tab {index}");
+        }
+        // And a click on one selects it, clearing the focus the way a tab switch does.
+        f.field = 5;
+        f.apply(action(&hits[2]));
+        assert_eq!(f.tab, ConfigTab::Profiles, "a click on the Profiles label shows the Profiles tab");
+        assert_eq!(f.field, 0);
+
+        // The rows name themselves, not the focus: every row hit's action carries the index whose
+        // rectangle it is, and the buttons carry their own action.
+        f.tab = ConfigTab::Providers;
+        for hit in hits.iter().filter(|h| h.action.is_some()) {
+            if let ConfigAction::FocusRow(index) = action(hit) {
+                assert_eq!(index as u16 + 3, hit.area.y, "the row hit at {index} is drawn on the row it names");
+            }
+        }
+        assert_eq!(
+            action(hits.iter().rev().nth(1).unwrap()),
+            ConfigAction::Test,
+            "the Test button names Test"
+        );
+        assert_eq!(action(hits.last().unwrap()), ConfigAction::Save, "the Save button names Save");
+
+        // The Server tab draws the token's two rows, and each names its own action.
+        f.tab = ConfigTab::Server;
+        let (_, hits, _) = rendered(&f, UiLanguage::Es, 120, 40);
+        let named = |wanted: ConfigAction| {
+            hits.iter()
+                .find(|h| h.action == Some(wanted))
+                .map(|h| h.area.y)
+                .expect("a hit")
+        };
+        let regenerate = named(ConfigAction::FocusRow(SERVER_ROW_REGENERATE));
+        let save = named(ConfigAction::FocusRow(SERVER_ROW_SAVE));
+        assert_eq!(regenerate + 1, save, "Regenerate sits on the row above Save");
+        // The row's own action is RegenerateToken, which is what the client performs on a click.
+        f.apply(ConfigAction::FocusRow(SERVER_ROW_REGENERATE));
+        assert!(f.dirty, "the regenerate row is a button, not a switch");
+        assert!(!f.server.lan, "and it does not touch the LAN switch");
+    }
+
+    /// The click path, end to end through the form: clicking "Perfiles" shows the Profiles tab
+    /// instead of closing the screen, and clicking a row edits that row and not the focused one.
+    #[test]
+    fn a_click_selects_its_own_tab_and_row() {
+        let mut f = providers();
+        let (_, hits, _) = rendered(&f, UiLanguage::Es, 120, 40);
+        let profiles = hits
+            .iter()
+            .find(|h| h.action == Some(ConfigAction::SelectTab(ConfigTab::Profiles)))
+            .expect("the Profiles tab is clickable");
+        assert_ne!(
+            profiles.key,
+            KeyInput::F(9),
+            "no tab may answer F9: that key closes the screen and throws the edits away"
+        );
+
+        f.field = 0;
+        f.apply(profiles.action.unwrap());
+        assert_eq!(f.tab, ConfigTab::Profiles, "the click opened the tab, it did not close the screen");
+
+        // A click on a text row opens that row's buffer, whatever row was focused.
+        f.tab = ConfigTab::Providers;
+        f.field = 0;
+        let model = f.rows().iter().position(|r| r.label == strings(UiLanguage::Es).cfg_model).unwrap();
+        let (_, hits, _) = rendered(&f, UiLanguage::Es, 120, 40);
+        let row = hits
+            .iter()
+            .find(|h| h.action == Some(ConfigAction::FocusRow(model)))
+            .expect("the model row is clickable");
+        f.apply(row.action.unwrap());
+        assert_eq!(f.field, model, "the clicked row is the focused one");
+        assert_eq!(f.editing.as_deref(), Some(""), "and its buffer is the one that opened");
+
+        // A click on a group's Test row presses *that* group's Test, not the focused row's: the
+        // third capability's Test row is the last one of the fifteen.
+        f.apply(ConfigAction::Close);
+        f.field = 0;
+        let test_row = 3 * 5 - 1; // five rows per capability group
+        let (_, hits, _) = rendered(&f, UiLanguage::Es, 120, 40);
+        let hit = hits
+            .iter()
+            .find(|h| h.action == Some(ConfigAction::FocusRow(test_row)))
+            .expect("the third group's Test row is clickable");
+        assert_eq!(
+            f.apply(hit.action.unwrap()),
+            vec![ConfigEffect::Test(Capability::Transcribe)],
+            "the click pressed the third group's Test"
+        );
+        assert_eq!(f.field, test_row, "and the focus followed the click");
+    }
+
     #[test]
     fn a_value_too_long_for_its_column_is_cut_and_never_spills() {
         let mut f = providers();
@@ -635,7 +773,8 @@ mod tests {
         // rather than by reporting a rectangle nobody can see. The sentinel is what proves the
         // closure ran at all: a draw that never happened would have left it in place.
         let mut term = Terminal::new(TestBackend::new(1, 1)).unwrap();
-        let mut hits = vec![Hit { area: Rect::ZERO, key: KeyInput::Enter }];
+        let mut hits =
+            vec![Hit { area: Rect::ZERO, key: KeyInput::Enter, action: None }];
         term.draw(|frame| hits = draw_form(frame, &providers(), strings(UiLanguage::Es), 0)).unwrap();
         assert!(hits.is_empty(), "a 1x1 frame has no clickable area, and it reports none: {hits:?}");
     }

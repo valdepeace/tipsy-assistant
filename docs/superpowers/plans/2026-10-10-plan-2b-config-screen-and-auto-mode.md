@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Amended during execution — read the ledger beside it.** This document's task bodies were
+> written before any of the work began, and the implementation changed some of the interfaces they
+> pin. `VOICE_LABEL_ROW` is now the computed `ConfigForm::voice_label_row()`; a profile contributes
+> **seven** field rows, not eleven; `ConfigForm::tab_title` is a method rather than a free function;
+> and the mode strings that are serde spellings are deliberately identical in both string tables
+> rather than translated. Task 3 recorded twenty amendments to its own brief, Task 8 fixed four
+> defects in its brief and Task 9 two, and this plan's `mic_device` field is stored, rendered and
+> **read by nobody** (the README says so). **Where this document and the code disagree, the code and
+> `.superpowers/sdd/2026-10-10-plan-2b-config-screen-and-auto-mode/progress.md` win** — the ledger
+> carries every ruling, every amendment and every carried finding.
 **Goal:** Make the assistant configurable from inside the terminal — a full-screen screen on `F9` (or the header's ⚙) with Providers, Listening, Profiles and Server tabs, applied on save without restarting — and make `auto` mode real, so one press of `Tab` starts listening and the assistant stops by itself after the configured silence.
 
 **Architecture:** The screen's editing state lives in `tipsy-ui` as a **form view model** of plain values (`ConfigForm`), never in the native configuration types: `tipsy-ui` must keep compiling to `wasm32-unknown-unknown` and cannot depend on `tipsy-compadre`. The native client owns the two conversions (`Config` → `ConfigForm` to open the screen, `ConfigForm` → `Config` on save), writes the file, rebuilds the providers and applies the new configuration to the running session without a restart. Voice activity detection is a small state machine in `tipsy-compadre` over `earshot`, driven by the microphone frames the client already streams to the session, and it is paused while the assistant speaks.

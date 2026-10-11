@@ -156,7 +156,9 @@ impl Session {
         loop {
             // The guard's deadline is read once per iteration, so the timer's branch borrows nothing
             // the turn's branch is already borrowing. A turn that ends below arms the next
-            // iteration's deadline.
+            // iteration's deadline, and a turn that starts clears it: the deadline read here is
+            // never one a later turn has already left behind, because the message branch wins the
+            // iteration that handles the command and the next iteration reads the cleared guard.
             let guard = self.guard;
             tokio::select! {
                 // The running turn is polled first, so a turn that finished applies its history
@@ -449,6 +451,14 @@ impl Session {
     }
 
     /// `Reset`: stop the running turn and forget the conversation.
+    ///
+    /// A reset is a hard reset, and the detector is part of it: it is resumed here rather than
+    /// through a guard, because `resume` is reachable only from [`Session::guard_elapsed`] and a
+    /// reset that merely dropped the guard would make `auto` mode deaf for good — `Tab` opens the
+    /// microphone, frames arrive, `push` reports nothing and nothing is ever transcribed until some
+    /// later turn ends. That is the common case, too: clearing a conversation is exactly when a user
+    /// reaches for F4. Nothing is left playing to be heard, because the cancelled turn's audio is
+    /// flushed with the rest.
     fn reset(&mut self) {
         self.cancel_running();
         self.history.clear();
@@ -456,6 +466,7 @@ impl Session {
         self.utterance.clear();
         self.heard = false;
         self.guard = None;
+        self.vad.resume();
         self.listening = false;
         // A turn that ignored the cancellation must not restore what this just cleared.
         self.generation += 1;
@@ -482,6 +493,12 @@ impl Session {
 
     /// Spawns one turn with a fresh cancellation token and the history as it stands now.
     fn start_turn(&mut self, input: TurnInput) -> Turn {
+        // A deadline left over from the turn before this one must not outlive it: the guard resumes
+        // the detector when it elapses, and a new turn starting inside the previous turn's guard
+        // would be un-paused mid-turn — over the assistant's own voice, which is the one thing spec
+        // §6's pause and Review Focus 2 forbid. The detector is paused for the whole turn anyway,
+        // and `end_turn` re-arms the guard when this turn really ends.
+        self.guard = None;
         // The assistant is about to speak, and the speaker is what the detector would otherwise
         // hear. Pausing at the start of the turn also covers synthesis and transcription, which is
         // stricter than spec §6's "while the session is speaking" and never lets a leak through.

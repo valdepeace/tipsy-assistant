@@ -13,33 +13,38 @@ use super::model::{Config, ListeningConfig, Profile, ProviderConfig, ProviderKin
 
 /// The form the screen opens on: a plain-value copy of `config`, and nothing else.
 pub fn form_of(config: &Config) -> ConfigForm {
-    ConfigForm {
-        tab: ConfigTab::Providers,
-        field: 0,
-        editing: None,
-        active_profile: config.active_profile.clone(),
-        // Always three, in `Capability` order: the rows the screen draws and the click areas that
-        // select them both come from this list.
-        providers: vec![
-            provider_form(Capability::Chat, &config.providers.chat),
-            provider_form(Capability::Speech, &config.providers.speech),
-            provider_form(Capability::Transcribe, &config.providers.transcribe),
-        ],
-        listening: ListeningForm {
-            mode: config.listening.mode,
-            silence_ms: config.listening.silence_ms.to_string(),
-            mic_gain: config.listening.mic_gain.to_string(),
-            mic_device: config.listening.mic_device.clone(),
-        },
-        profiles: config.profiles.iter().map(profile_form).collect(),
-        server: ServerForm {
-            bind: config.server.bind.clone(),
-            lan: config.server.lan,
-            token: config.server.token.clone(),
-        },
-        notice: None,
-        dirty: false,
-    }
+    // Built field by field rather than as a struct literal: `ConfigForm` keeps a private `filled`
+    // flag, because a form the client has not answered for yet must not be saveable, and only
+    // `tipsy-ui` may use literal syntax. `mark_filled` is what says this one carries the real
+    // configuration.
+    let mut form = ConfigForm::default();
+    form.tab = ConfigTab::Providers;
+    form.field = 0;
+    form.editing = None;
+    form.active_profile = config.active_profile.clone();
+    // Always three, in `Capability` order: the rows the screen draws and the click areas that
+    // select them both come from this list.
+    form.providers = vec![
+        provider_form(Capability::Chat, &config.providers.chat),
+        provider_form(Capability::Speech, &config.providers.speech),
+        provider_form(Capability::Transcribe, &config.providers.transcribe),
+    ];
+    form.listening = ListeningForm {
+        mode: config.listening.mode,
+        silence_ms: config.listening.silence_ms.to_string(),
+        mic_gain: config.listening.mic_gain.to_string(),
+        mic_device: config.listening.mic_device.clone(),
+    };
+    form.profiles = config.profiles.iter().map(profile_form).collect();
+    form.server = ServerForm {
+        bind: config.server.bind.clone(),
+        lan: config.server.lan,
+        token: config.server.token.clone(),
+    };
+    form.notice = None;
+    form.dirty = false;
+    form.mark_filled();
+    form
 }
 
 /// The configuration the form describes, or the reason it cannot be one.

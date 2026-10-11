@@ -116,12 +116,17 @@ impl<S: Scorer> VadState<S> {
         self.silence_run = 0;
     }
 
-    /// Re-arms the detector and starts the onset search from nothing.
+    /// Re-arms the detector and starts the onset search from nothing: the counters go back to zero
+    /// and so does the carry, so a partial window left over from *before* the pause cannot be
+    /// completed by the first samples of the next utterance. Those samples are the assistant's own
+    /// tail, and a window that mixed the two would score neither.
     pub fn resume(&mut self) {
         self.paused = false;
         self.in_speech = false;
         self.speech_run = 0;
         self.silence_run = 0;
+        // `clear`, not a fresh `Vec`: the capacity for one window is worth keeping.
+        self.carry.clear();
     }
 
     /// True while an utterance is open: the samples pushed since `SpeechStarted` are its audio.
@@ -131,6 +136,9 @@ impl<S: Scorer> VadState<S> {
 
     /// The silence budget in frames: how many silent frames after the last voiced one report
     /// `SpeechEnded`. The session's tests count with this instead of repeating `div_ceil(16)`.
+    ///
+    /// A hand-edited `silence_ms = 0` is reported as the zero frames the file asked for, and still
+    /// ends the utterance on the first silent frame: the frame that ends speech ends it.
     pub fn silence_frames(&self) -> u32 {
         self.hangover_frames
     }
@@ -179,7 +187,13 @@ impl<S: Scorer> VadState<S> {
                 return VadEvent::None;
             }
             self.silence_run += 1;
-            if self.hangover_frames > 0 && self.silence_run >= self.hangover_frames {
+            // `max(1)` is what makes a hand-edited `silence_ms = 0` a real budget. The detector
+            // still reports the zero frames the file asked for (`silence_frames`), and the first
+            // frame of silence after voice is the one that ends the utterance — "zero means the
+            // frame that ends speech ends it", which is what
+            // `the_silence_budget_is_reported_in_frames` claims. Without it `silence_run >= 0` is
+            // unreachable for a zero budget and the utterance would never end by itself.
+            if self.silence_run >= self.hangover_frames.max(1) {
                 self.in_speech = false;
                 self.silence_run = 0;
                 self.speech_run = 0;
@@ -382,5 +396,58 @@ mod tests {
             }
         }
         assert!(endings <= 1, "one budget of silence ends one utterance, got {endings}");
+    }
+
+    /// A hand-edited `silence_ms = 0` is a real budget: the detector reports the zero frames the
+    /// file asked for and the first silent frame after voice is the one that ends the utterance —
+    /// what `the_silence_budget_is_reported_in_frames` says zero means. The `> 0` guard that used to
+    /// sit in front of the comparison made a zero budget unreachable, so the utterance never ended
+    /// by itself, and a supported input (the file is hand-edited) left `auto` mode with no way to
+    /// close a turn but `Tab`.
+    #[test]
+    fn a_zero_silence_budget_ends_the_utterance_on_the_first_silent_frame() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut vad = state(&calls, &[0.9, 0.9, 0.9, 0.0, 0.9, 0.9, 0.9], 0);
+        assert_eq!(vad.silence_frames(), 0, "a zero budget is reported as zero frames");
+        assert_eq!(vad.push(&loud()), VadEvent::None);
+        assert_eq!(vad.push(&loud()), VadEvent::None);
+        assert_eq!(vad.push(&loud()), VadEvent::SpeechStarted);
+        assert_eq!(vad.push(&silent()), VadEvent::SpeechEnded, "the frame that ends speech ends it");
+        assert!(!vad.in_speech());
+        // And the detector starts over: the next utterance still needs three voiced frames.
+        assert_eq!(vad.push(&loud()), VadEvent::None);
+        assert_eq!(vad.push(&loud()), VadEvent::None);
+        assert_eq!(vad.push(&loud()), VadEvent::SpeechStarted);
+    }
+
+    /// `resume` starts from nothing, the carry included. The 255 samples waiting for a window when
+    /// the pause began are the assistant's own tail; completing that window with the first sample of
+    /// the next utterance would score half of each, so the resume drops them instead.
+    #[test]
+    fn a_resume_drops_the_samples_carried_from_before_the_pause() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut vad = state(&calls, &[0.9, 0.9, 0.9, 0.9], 32);
+        // 255 samples: one short of a window, so nothing has been scored.
+        assert_eq!(vad.push(&[12_000; 255]), VadEvent::None);
+        assert_eq!(calls.borrow().sizes.len(), 0, "255 samples are not a window");
+        vad.pause();
+        for _ in 0..5 {
+            assert_eq!(vad.push(&loud()), VadEvent::None, "a paused detector swallows frames");
+        }
+        vad.resume();
+        // One more sample is not a window either: the 255 from before the pause are gone.
+        assert_eq!(vad.push(&[12_000; 1]), VadEvent::None);
+        assert_eq!(
+            calls.borrow().sizes.len(),
+            0,
+            "the carry from before the pause must not complete a window: {calls:#?}"
+        );
+        // Three whole windows of the new audio are the first thing scored after the resume.
+        assert_eq!(vad.push(&loud()), VadEvent::None);
+        assert_eq!(vad.push(&loud()), VadEvent::None);
+        assert_eq!(vad.push(&loud()), VadEvent::SpeechStarted);
+        assert!(vad.in_speech());
+        assert_eq!(calls.borrow().sizes.len(), 3, "one score per whole window after the resume");
+        assert!(calls.borrow().sizes.iter().all(|n| *n == FRAME));
     }
 }
