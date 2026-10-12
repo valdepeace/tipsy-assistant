@@ -260,8 +260,11 @@ keeps its own lowercase form, so this is not full Unicode normalization): `andre
 `ANDRÉS`, and it does not match `andresito`; `core` does not match `score`. An entry with several
 keywords needs all of them, and a multi-word keyword such as `"andres del equipo"` has to be said in one
 run. An entry with no usable keyword is ignored, so `enabled = true` with an empty or half-edited
-allowlist shows no screen at all rather than a door nobody can open. The section is hand-edited — there
-is no Login tab — but saving anything else on the configuration screen carries it through untouched.
+allowlist shows no screen at all rather than a door nobody can open. The section is authored by hand in
+this file — there is no Login tab, and the configuration screen carries it through a save untouched —
+and since Plan 3 the same section travels inside `ConfigView`, so a client that presented the token can
+read the allowlist over the socket and send it back changed. The server still does the judging, and
+`server.token` is still the only door.
 
 The screen is one screen: no second one opens while it is up, `Tab` turns the microphone on and off,
 `Enter` sends what you typed — or, with the box empty after a refusal, re-arms the microphone — `Esc`
@@ -575,5 +578,23 @@ what a test cannot hear.
       first run must write a token, show it to the user exactly once, and **showing it must not put
       it in a log** — not in `tipsy-compadre.log`, not in the `--verbose` copy, not in a URL, and not
       in any socket frame the client has not authenticated for.
+- [ ] **The login door in the browser, with the system microphone disabled.** Rebuild the bundle first —
+      the page loads `web/dist`, which is generated and never committed, so
+      `cargo run -p xtask -- dist` comes before the server does — then turn the microphone off
+      in the OS (Windows: Settings → Privacy → Microphone → "Let desktop apps access your
+      microphone"), open `http://127.0.0.1:7070/` with `[login]` configured and `voice = true`, and
+      press the gate. **Expected:** the screen opens *typing-only* — no `● rec` on its top border, no
+      microphone in the OS' own in-use indicator — and its one line reads `Sin micro: escribe, que
+      también vale`. Type an allowed answer and press `Enter`: the door opens, the veil lifts, and the
+      HUD appears. **Do this half first, with the device really taken away**: it is the branch no test
+      can reach. Then turn the microphone back on and repeat; the same screen opens with the red
+      `● rec`. While the door is shut a human must look at three things no test can see: that the veil
+      is unreadable (the HUD is visibly there and visibly out of focus; `Veil::Dim` is the one-constant
+      escape hatch in `render_login.rs` if `▒`/`░` land badly in the browser's font — login spec §7 and
+      §13), that the core inside the widget pulses while you speak, and that the gate's own button was
+      removed from the page once the microphone opened rather than sitting over the canvas. Record
+      which it was, and record whether `Veil::Dim` had to be switched on. The keyboard half is worth
+      the same eye: the door answers `Tab`, `Enter` and `Esc` only, and the HUD behind it answers
+      nothing until the screen is down.
 - [ ] The real microphone and speakers in the browser, and the wake word in Spanish and English,
       once those milestones land.
