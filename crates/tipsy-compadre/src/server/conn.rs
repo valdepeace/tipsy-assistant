@@ -19,13 +19,18 @@
 //! address, no key name, no token) from ever being taken for the whole configuration.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures::stream::StreamExt;
 use tipsy_protocol::{ClientKind, Command, ErrorCode, Event, Frame, ToClient, ToServer};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
+use crate::client::pty::{PtySession, PtySpawner};
 use crate::server::hub::Hub;
 use crate::session::SessionEnds;
 
@@ -351,6 +356,450 @@ where
                 tracing::debug!(?write_timeout, "the peer stopped reading; closing the connection");
                 return;
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The web terminal: `/terminal/ws`, and the pump behind it (spec §5.3, §7.3).
+//
+// This is **not** the protocol socket above. Nothing here is JSON that a session reads, no `Command`
+// or `Event` crosses it, and it shares nothing with the bridge but the crate: the bytes on the wire
+// are the bytes a terminal would have shown, and the session never sees this socket. The child it
+// starts is this same binary in `--connect` mode, so it *is* a client of the protocol socket — one
+// hop away, on the server's own loopback, which is what keeps a browser from needing a token in a
+// URL to reach a session (spec §7.2, W10).
+//
+// **Nothing is filtered, dropped, reordered or coalesced in either direction, and that is the
+// contract rather than a style.** ConPTY's first byte is a device status report request (`ESC[6n`)
+// and it delivers nothing else until the terminal answers with a cursor position report (measured by
+// Task 2.1: four bytes and an empty configuration directory for 9.3 seconds, with the child alive past
+// when it should have exited). xterm.js answers it natively, so the pump must carry it — and must
+// carry every other byte — through unmodified.
+// ---------------------------------------------------------------------------------------------
+
+/// The ceiling this phase accepts on live PTY children: one process and two pipe pairs each, and two
+/// browsers on `/terminal` are two TUI clients fighting for the same microphone anyway (research note
+/// §7, trap 4). One more than this is answered `503 Service Unavailable` **before the upgrade**, so a
+/// refused page fails its handshake instead of getting a socket that closes under it, and nothing is
+/// spawned for it.
+pub const MAX_TERMINAL_CONNECTIONS: usize = 2;
+
+/// The writer queue's depth: 32 chunks of at most 8 KiB, so a connected-but-stalled browser costs
+/// about 256 KiB of server memory before the reader starts dropping chunks instead of growing.
+pub const TERMINAL_WRITE_QUEUE: usize = 32;
+
+/// One read from the PTY master. Chosen inside the 8–64 KiB the research note recommends (§7, trap 3):
+/// small enough that a big repaint never becomes one WebSocket frame, large enough that a normal
+/// screenful is a handful of frames.
+pub const TERMINAL_READ_CHUNK: usize = 8 * 1024;
+
+/// How long a resize waits for the next one before it is applied, in milliseconds. xterm.js's own
+/// `resize` doc says "It's best practice to debounce calls to resize, this will help ensure that the
+/// pty can respond to the resize event before another one occurs" (research note §6.3); 100 ms is the
+/// server's half of that, chosen to match the page's own debounce.
+pub const TERMINAL_RESIZE_DEBOUNCE_MS: u64 = 100;
+
+/// The socket's write-buffer ceiling: 256 KiB, or two of axum's default 128 KiB buffers. axum's
+/// `max_write_buffer_size` is **unlimited** until it is set (research note §7, trap 2), and the only
+/// thing past `write_buffer_size` that grows it is writes that are failing — which is exactly the
+/// browser that stopped reading.
+const TERMINAL_WRITE_CEILING: usize = 256 * 1024;
+
+/// The size a terminal child is spawned with, before the page's first `resize` arrives. xterm.js's
+/// `fit` addon sends one as soon as it has measured, so this is only what the very first paint of a
+/// child that has not been resized yet sees.
+const TERMINAL_COLS: u16 = 80;
+const TERMINAL_ROWS: u16 = 24;
+
+/// How long teardown waits for the OS to confirm that the kill landed. It is a bound rather than a
+/// wait, because the socket must not be held open by a child that will not go; a `wait` is the only
+/// thing that turns "we called kill" into "the OS says it is gone", and `ChildKiller::kill` cannot be
+/// trusted to report (it inverts `TerminateProcess`'s result on Windows — see
+/// [`crate::client::pty::PtySession::killer`]).
+const TERMINAL_REAP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often the pump asks the OS whether the child is still there.
+///
+/// **The pump cannot learn it from the reader, and that is ConPTY's doing**: the pseudoconsole keeps
+/// the console output pipe open after its client exits, so EOF arrives only when the master is
+/// dropped — after the loop. Measured here with a PowerShell child that printed one line and exited
+/// with 7: the reader stayed parked for the twenty seconds the pump waited, and no exit frame was
+/// ever sent. A quarter of a second is a cheap `GetExitCodeProcess`, and the page's "the terminal
+/// ended" line is worth more than that.
+const TERMINAL_EXIT_POLL: Duration = Duration::from_millis(250);
+
+/// The query `/terminal/ws` is reached with. The token is the one `/terminal` itself takes, because a
+/// browser has nowhere else to put it (spec §5.3, §9.2): a WebSocket handshake carries no body and a
+/// browser cannot set a header on it.
+#[derive(serde::Deserialize)]
+pub struct TerminalQuery {
+    token: Option<String>,
+}
+
+/// What the terminal route needs from whatever state the router was built with.
+///
+/// **It is a trait because the route has two callers with different states**: `server::run` passes its
+/// own `ServeState`, and this module's tests pass a two-field value of their own, so the pump is
+/// tested against a real listener and real children without a server, a hub, a provider stack or a
+/// credential store. `server::run`'s state implements it in `server/mod.rs`.
+pub trait TerminalRouteState: Clone + Send + Sync + 'static {
+    /// The token this server requires on both terminal routes, or `None` when it requires none.
+    fn websocket_token(&self) -> Option<String>;
+
+    /// What a connection spawns its child from.
+    fn terminal_spawner(&self) -> Arc<dyn PtySpawner>;
+
+    /// **The cap, and it belongs to a listener rather than to the process.** One `Arc<Semaphore>` per
+    /// server, acquired before the upgrade and held for the connection: a process-wide counter would
+    /// need a check and an increment that two simultaneous upgrades could interleave, and it would
+    /// make one listener's load refuse another's connection.
+    fn terminal_gate(&self) -> Arc<Semaphore>;
+}
+
+/// Registers `/terminal/ws` on a router whose state implements [`TerminalRouteState`]. This is the
+/// one place the route is spelled: `server::mount` merges it into the real router, and this module's
+/// tests build a router of their own with it.
+pub fn router<S: TerminalRouteState>(router: axum::Router<S>) -> axum::Router<S> {
+    router.route("/terminal/ws", axum::routing::get(terminal_ws::<S>))
+}
+
+/// `Ok(())` when the query carries the token this server requires, or when the server requires none.
+/// `Err` is a 401's body and names the rule, never the value — the token never reaches a log line, and
+/// a refusal that echoed it would be a refusal that leaked it (spec §9.6).
+///
+/// **`presented` is the token as the query decoded it**, which is what `Query<TerminalQuery>` hands
+/// the handler; comparing the raw `token=…` text here was the plan's spelling and would never have
+/// matched its own call site.
+pub fn terminal_access(presented: Option<&str>, expected: Option<&str>) -> Result<(), String> {
+    match expected {
+        None => Ok(()),
+        Some(expected) if presented == Some(expected) => Ok(()),
+        Some(_) => Err("this server requires its token on /terminal/ws".to_string()),
+    }
+}
+
+/// `GET /terminal/ws?token=…`, upgrade. The token rule is §5.3's, the same one `/terminal` uses; the
+/// `Origin` rule is the one the fix wave added to `/ws` and the ledger ruled this route needs too.
+pub async fn terminal_ws<S: TerminalRouteState>(
+    State(state): State<S>,
+    Query(query): Query<TerminalQuery>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // **The same check `/ws` makes, on the same reasoning** (`.superpowers/sdd/2026-10-11-plan-3-web-tier/progress.md`,
+    // the scoped re-review of the second fix wave): a WebSocket handshake is not subject to the
+    // same-origin policy, so any page in the user's browser can open this route against a loopback
+    // listener, and the terminal it would get spawns a child that is itself a client of `/ws` — with
+    // `Command::UpdateConfig` in reach, which the hub persists. `403` for the same reason it is `403`
+    // there: no credential would change the answer. Absent is admitted, which is the CLI.
+    if !crate::server::origin_is_this_host(&headers) {
+        return forbidden_origin();
+    }
+    if let Err(message) = terminal_access(query.token.as_deref(), state.websocket_token().as_deref()) {
+        return (StatusCode::UNAUTHORIZED, message).into_response();
+    }
+    // Acquired before the upgrade, so a refusal is an HTTP status the page can read rather than a
+    // socket that closes on its first frame, and so the `503` costs nothing but a comparison.
+    let Ok(permit) = state.terminal_gate().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("this server already has {MAX_TERMINAL_CONNECTIONS} terminals open"),
+        )
+            .into_response();
+    };
+    let ws = ws.max_write_buffer_size(TERMINAL_WRITE_CEILING);
+    ws.on_upgrade(move |socket| handle_terminal(socket, state, permit))
+}
+
+/// A foreign `Origin`, refused before the upgrade. The body names no address, no header and no token,
+/// exactly as `/ws`'s refusal does; `server/mod.rs`'s [`crate::server::origin_is_this_host`] is the
+/// whole rule and is shared rather than copied.
+fn forbidden_origin() -> Response {
+    (StatusCode::FORBIDDEN, "the Origin of this request is not this server's own host").into_response()
+}
+
+/// One terminal's whole life: spawn the child, pump until either side ends, kill and reap, then say
+/// what the child exited with.
+///
+/// `permit` is held for the duration of this function and nothing else, so the connection's slot is
+/// released by the same scope that owned the child.
+async fn handle_terminal<S: TerminalRouteState>(mut socket: WebSocket, state: S, permit: OwnedSemaphorePermit) {
+    let spawner = state.terminal_spawner();
+    // `openpty` and `spawn_command` are both synchronous and can take a moment on this platform, so
+    // they run on the blocking pool rather than on a runtime worker (research note §7, trap 7).
+    let spawned = tokio::task::spawn_blocking(move || spawner.spawn(TERMINAL_COLS, TERMINAL_ROWS)).await;
+    let mut session = match spawned {
+        Ok(Ok(session)) => session,
+        Ok(Err(message)) => {
+            // The one thing a page can act on: no pseudo-terminal is available on this machine (a
+            // Windows older than 10 1809, most likely). The message names the platform's own reason.
+            let _ = socket.send(Message::text(format!("terminal unavailable: {message}"))).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+        // The blocking pool refused the job, or the spawn panicked. Nothing to report but the end.
+        Err(_) => {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let observed = pump(&mut socket, &mut session).await;
+    // The code the pump already read off the OS, if the child ended on its own; otherwise the pump
+    // has killed it and this is where that kill is *confirmed*. `kill` reports neither success nor
+    // failure honestly on Windows, so the only answer that means anything is the OS's, and `wait` is
+    // how it is read. It blocks, so it runs on the blocking pool, and it is bounded so a child that
+    // will not go cannot hold the socket.
+    let exit = reap(session, observed).await;
+    let _ = socket
+        .send(Message::text(serde_json::json!({ "type": "exit", "code": exit }).to_string()))
+        .await;
+    let _ = socket.send(Message::Close(None)).await;
+    drop(permit);
+}
+
+/// The child's own exit code.
+///
+/// `observed` is what the pump's own poll of the OS already saw: when it is `Some`, the child ended by
+/// itself and the code is that answer — there is nothing left to kill, and reaping it twice would be
+/// a second `wait` on a handle that is gone. When it is `None` the socket died first, so this is where
+/// the pump's kill is confirmed by a bounded, blocking `kill_and_wait`. A child that cannot be reaped
+/// inside [`TERMINAL_REAP_TIMEOUT`] is reported as 0 rather than guessed at; the page prints a line
+/// either way.
+async fn reap(mut session: PtySession, observed: Option<u32>) -> u32 {
+    if let Some(code) = observed {
+        return code;
+    }
+    let reaped =
+        tokio::time::timeout(TERMINAL_REAP_TIMEOUT, tokio::task::spawn_blocking(move || session.kill_and_wait())).await;
+    match reaped {
+        Ok(Ok(Ok(status))) => status.exit_code(),
+        Ok(Ok(Err(message))) => {
+            tracing::debug!(%message, "the terminal child could not be reaped");
+            0
+        }
+        Ok(Err(_)) => 0,
+        Err(_) => {
+            tracing::debug!("the terminal child did not go inside the reap window");
+            0
+        }
+    }
+}
+
+/// The pump. Both directions are bounded and both ends of the PTY are serviced on threads of their
+/// own — ConPTY's own guidance is to service each channel on a separate thread, "to prevent race
+/// conditions and deadlocks" (research note §5.3). Every byte goes through untouched.
+///
+/// It returns the exit code the OS reported for a child that ended by itself, or `None` when the
+/// socket ended first. **Only [`PtySession::try_wait`] can produce the `Some`**: the blocking reader
+/// cannot, because ConPTY keeps the console's output pipe open after its client exits, which is
+/// measured and recorded on that method.
+async fn pump(socket: &mut WebSocket, session: &mut PtySession) -> Option<u32> {
+    let mut resize = ResizeDebounce::new(TERMINAL_RESIZE_DEBOUNCE_MS);
+    // An interval rather than a `sleep` inside the branch: a TUI that repaints continuously would make
+    // a re-created `sleep` future start again on every frame, and the exit of its child would never be
+    // noticed. `Interval::tick` is cancel safe, so no tick is lost to another branch winning.
+    let mut exit_poll = tokio::time::interval_at(tokio::time::Instant::now() + TERMINAL_EXIT_POLL, TERMINAL_EXIT_POLL);
+
+    // One bounded queue, two threads: the blocking reader fills it, the socket drains it. `send`
+    // awaits when it is full, which is exactly the backpressure a WebSocket does not have.
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(TERMINAL_WRITE_QUEUE);
+    let reader_task = session.take_reader().map(|mut reader| {
+        tokio::task::spawn_blocking(move || {
+            let mut chunk = vec![0u8; TERMINAL_READ_CHUNK];
+            loop {
+                match std::io::Read::read(&mut reader, &mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if out_tx.blocking_send(chunk[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    // A read error is this console ending; there is no second reader to retry with.
+                    Err(_) => break,
+                }
+            }
+        })
+    });
+
+    // The other direction is a blocking writer fed by a task of its own, so no runtime worker ever
+    // sits in `Box<dyn Write>` (research note §7, trap 7).
+    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(TERMINAL_WRITE_QUEUE);
+    let writer_task = session.take_writer().map(|mut writer| {
+        tokio::task::spawn_blocking(move || {
+            while let Some(bytes) = in_rx.blocking_recv() {
+                if std::io::Write::write_all(&mut writer, &bytes).is_err() {
+                    break;
+                }
+                let _ = std::io::Write::flush(&mut writer);
+            }
+        })
+    });
+
+    // The child's own end, and the only exit this loop can be told about on purpose.
+    let mut observed: Option<u32> = None;
+    loop {
+        // The debounce's deadline is read as a plain value here, so the `select!` holds no borrow of
+        // `resize` while the branches below mutate it. `None` is "no resize is pending", where the
+        // branch's future never completes and can never win.
+        let wake = resize.deadline;
+        tokio::select! {
+            chunk = out_rx.recv() => match chunk {
+                Some(bytes) => {
+                    if socket.send(Message::binary(bytes)).await.is_err() {
+                        break;
+                    }
+                }
+                // The reader reached EOF: this console ended.
+                None => break,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    let (bytes, request) = match serde_json::from_str::<TerminalClientMessage>(&text) {
+                        Ok(message) => (message.bytes(), message.resize()),
+                        // A malformed message is a bug in the page, not a reason to end a session
+                        // someone may be talking to: ignore it and keep the socket open.
+                        Err(_) => (None, None),
+                    };
+                    if let Some(bytes) = bytes {
+                        // A closed writer task is the PTY's input being gone, not the socket's.
+                        let _ = in_tx.send(bytes).await;
+                    }
+                    if let Some((cols, rows)) = request {
+                        resize.request(cols, rows);
+                    }
+                }
+                // The page's `tipsterm-hello-pad` frame, and nothing else, is binary. It exists so a
+                // browser can observe that its own socket is really open at the server; it is not data
+                // for the child's stdin, and writing it there would type 256 characters into the TUI.
+                Some(Ok(Message::Binary(_padding))) => {}
+                // A close frame or a transport error: the tab is gone.
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                // Ping and Pong, which axum answers itself.
+                Some(Ok(_)) => {}
+            },
+            () = sleep_until_or_never(wake) => {
+                // A let chain, because a nested `if let` is the shape clippy's own `collapsible_if`
+                // rejects and the eight-finding baseline is a set this task may not grow.
+                if let Some((cols, rows)) = resize.take()
+                    && let Err(message) = session.resize(cols, rows)
+                {
+                    tracing::debug!(%message, "terminal resize ignored");
+                }
+            },
+            _ = exit_poll.tick() => {
+                if let Ok(Some(status)) = session.try_wait() {
+                    observed = Some(status.exit_code());
+                    // Everything the console already handed the reader goes out before the exit
+                    // frame, so a page's last line is not overtaken by the notice that it ended.
+                    while let Ok(bytes) = out_rx.try_recv() {
+                        if socket.send(Message::binary(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Teardown, in this order and for these reasons (spec §7.3, Review Focus 4): the child is killed,
+    // the writer is dropped — "Dropping the writer will send EOF to the slave end" (research note
+    // §5.1) — and then the master goes, so the blocking reader observes EOF and exits. A TUI that
+    // ignores EOF on stdin would otherwise linger, which is why killing is the first step and not the
+    // last, and why every step here is explicit rather than left to a `Drop`.
+    //
+    // `PtySession::kill` and not `killer().kill()`: the handle `clone_killer` returns inverts
+    // `TerminateProcess`'s result on Windows (Task 2.1 measured `Err(Os { code: 6 })` *after* the
+    // process had died), so it reports the opposite of the truth and is not evidence of anything. The
+    // reaping that confirms this kill is `reap`, after this function returns — and it is skipped
+    // altogether when `observed` is `Some`, because then the OS has already answered.
+    if let Err(message) = session.kill() {
+        tracing::debug!(%message, "the terminal child could not be killed");
+    }
+    // Nothing more is written. Dropping the sender ends the writer task, and with it the writer —
+    // which is what sends EOF to the slave end.
+    drop(in_tx);
+    // Both handles are dropped rather than awaited. Awaited, they would be the one place this socket
+    // could stall: the reader is parked in a blocking `read` until the master goes, and `await`ing a
+    // `spawn_blocking` task does not help a task that is not due to finish. They end on their own —
+    // the writer when its channel closes, the reader when the master is dropped by `reap`.
+    drop(writer_task);
+    drop(reader_task);
+    observed
+}
+
+/// A future that completes when the debounce window ends, or never when no size is pending.
+async fn sleep_until_or_never(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The debounced resize: xterm.js's own doc is the reason (research note §6.3). The last size asked
+/// for inside the window is the one applied, and only when the window has elapsed.
+struct ResizeDebounce {
+    window: Duration,
+    deadline: Option<tokio::time::Instant>,
+    requested: Option<(u16, u16)>,
+}
+
+impl ResizeDebounce {
+    fn new(debounce_ms: u64) -> Self {
+        Self { window: Duration::from_millis(debounce_ms), deadline: None, requested: None }
+    }
+
+    /// A resize arrived: remember it and push the deadline back.
+    fn request(&mut self, cols: u16, rows: u16) {
+        self.requested = Some((cols, rows));
+        self.deadline = Some(tokio::time::Instant::now() + self.window);
+    }
+
+    /// Take the pending size, if the window has elapsed. The `select!` in [`pump`] reads `deadline`
+    /// itself rather than through a future-returning method, so nothing borrows this struct across an
+    /// await.
+    fn take(&mut self) -> Option<(u16, u16)> {
+        self.deadline = None;
+        self.requested.take()
+    }
+}
+
+/// The three control messages the page sends, spelled exactly as `web/terminal/index.html` writes
+/// them (Task 2.4). Everything else on this socket is binary and comes from the PTY.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TerminalClientMessage {
+    /// The page's opening frame, sent as the 256-byte binary padding message rather than as JSON; the
+    /// variant exists so an older page that spells it in text is read rather than treated as garbage.
+    Hello,
+    /// `onData`: escape sequences and UTF-8 text, written to the PTY as UTF-8 bytes.
+    Data { data: String },
+    /// `onBinary`: one byte per JS `charCode`, mouse reports among them. Research note §6.4 is
+    /// explicit that sending these as text is "exactly how mouse reports get corrupted" — a mouse
+    /// report is `0xFF`-prefixed and not UTF-8 — so the page turns them into a latin-1 string and each
+    /// char is truncated back to its low byte here, which is what the page did in reverse.
+    Mouse { data: String },
+    /// A debounced resize, in cells.
+    Resize { cols: u16, rows: u16 },
+}
+
+impl TerminalClientMessage {
+    /// The bytes this message puts on the PTY's input, if any.
+    fn bytes(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Data { data } => Some(data.as_bytes().to_vec()),
+            Self::Mouse { data } => Some(data.chars().map(|c| c as u32 as u8).collect()),
+            Self::Hello | Self::Resize { .. } => None,
+        }
+    }
+
+    /// The size this message asks for, if it asks for one.
+    fn resize(&self) -> Option<(u16, u16)> {
+        match self {
+            Self::Resize { cols, rows } => Some((*cols, *rows)),
+            _ => None,
         }
     }
 }
@@ -1153,5 +1602,58 @@ mod tests {
         let (to_server, mut reached) = mpsc::unbounded_channel();
         assert!(matches!(inbound(text, &to_server, lan, true).await, Inbound::Nothing));
         assert!(matches!(reached.try_recv(), Ok(ToServer::Command(Command::SetKey { .. }))));
+    }
+
+    /// The page's two data shapes become the bytes the PTY has to receive, and nothing else does.
+    /// The `Mouse` half is the one worth pinning: a mouse report is a `0xFF`-prefixed byte sequence
+    /// that is not UTF-8, so the page sends it as a latin-1 string and each char has to come back out
+    /// as its low byte rather than as UTF-8 — sending it as text is "exactly how mouse reports get
+    /// corrupted" (research note §6.4).
+    #[test]
+    fn the_terminal_clients_bytes_are_the_pages_own() {
+        let data: TerminalClientMessage = serde_json::from_str(r#"{"type":"data","data":"ls -la\r"}"#).unwrap();
+        assert_eq!(data.bytes().as_deref(), Some(b"ls -la\r".as_slice()), "`onData` is UTF-8 bytes");
+        assert_eq!(data.resize(), None);
+
+        // `\u{fffb}` and `\u{fffd}` are the two chars a mouse report produces, and both truncate to
+        // `0xFB` and `0xFD` — not to a multi-byte UTF-8 encoding of the char code.
+        let mouse: TerminalClientMessage = serde_json::from_str(r#"{"type":"mouse","data":"\u00ff\u00fb\u00fd"}"#).unwrap();
+        assert_eq!(mouse.bytes().as_deref(), Some([0xffu8, 0xfb, 0xfd].as_slice()), "one byte per char code");
+        assert_eq!(mouse.resize(), None);
+
+        let resize: TerminalClientMessage = serde_json::from_str(r#"{"type":"resize","cols":100,"rows":24}"#).unwrap();
+        assert_eq!(resize.bytes(), None, "a resize writes nothing to the PTY");
+        assert_eq!(resize.resize(), Some((100, 24)));
+
+        let hello: TerminalClientMessage = serde_json::from_str(r#"{"type":"hello"}"#).unwrap();
+        assert_eq!(hello.bytes(), None);
+        assert_eq!(hello.resize(), None);
+
+        // Anything else is the page's bug, and the pump's answer to it is to ignore it rather than to
+        // end a session somebody may be talking to.
+        assert!(serde_json::from_str::<TerminalClientMessage>(r#"{"type":"nonsense"}"#).is_err());
+        assert!(serde_json::from_str::<TerminalClientMessage>(r#"not json at all"#).is_err());
+    }
+
+    /// The debounce's own arithmetic: a size requested is not taken before its window ends, the last
+    /// request inside the window is the one that survives, and a taken size leaves nothing pending.
+    #[tokio::test]
+    async fn the_resize_debounce_holds_a_size_until_its_window_ends() {
+        let mut debounce = ResizeDebounce::new(TERMINAL_RESIZE_DEBOUNCE_MS);
+        assert!(debounce.take().is_none(), "nothing was requested, so nothing is pending");
+
+        debounce.request(100, 24);
+        assert!(debounce.deadline.is_some(), "a request arms the window");
+        // The second request inside the window is the one that counts, and it pushes the deadline on.
+        let first_deadline = debounce.deadline.expect("armed");
+        tokio::time::sleep(Duration::from_millis(TERMINAL_RESIZE_DEBOUNCE_MS / 2)).await;
+        debounce.request(120, 30);
+        assert!(debounce.deadline.expect("still armed") > first_deadline, "the window restarts");
+
+        // Waiting the rest of the window out and then the pump's own `sleep_until` is what applies it.
+        tokio::time::sleep(Duration::from_millis(TERMINAL_RESIZE_DEBOUNCE_MS)).await;
+        assert_eq!(debounce.take(), Some((120, 30)), "only the last size inside the window survives");
+        assert!(debounce.deadline.is_none(), "and taking it disarms the window");
+        assert!(debounce.take().is_none(), "a taken size is not handed out twice");
     }
 }
