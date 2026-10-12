@@ -9,10 +9,12 @@
 //! **What this file deliberately does not have.** The translation itself — Ratzilla's key and mouse
 //! events into `tipsy_ui`'s vocabulary, the click test and the clock's numbering — is [`hud`]'s, where
 //! a host test can reach it; the two callbacks registered below are one line each and hold no decision
-//! of their own. Two `UiAction`s are inert here and named rather than implied: `ToggleLive`, which has
-//! no browser implementation in this phase, and `LoginDone`, which is Task 3.7's. The login door is not
-//! shown at all yet — nobody calls `UiState::show_login` — so a server with `[login] enabled` reaches
-//! this client without its screen, which is the same window Task 3.3 recorded and 3.7 closes.
+//! of their own. One `UiAction` is inert here and named rather than implied: `ToggleLive`, which has no
+//! browser implementation in this phase. The login door is [`login_door`]'s — the screen is
+//! `tipsy_ui`'s and is not reimplemented anywhere — and this file's whole part in it is three call
+//! sites: `route` offers each event to `Door::note_event` after `state.apply`, the frame loop asks
+//! `Door::sync` for the capture's edges and drains the microphone behind `Door::sends_frames`, and
+//! `dispatch`'s `UiAction::LoginDone` arm takes the screen down.
 //!
 //! **The barge-in is [`playback::Playback::on_command`]'s and its call site is [`dispatch`].** The rule
 //! itself is not defined here and is not repeated here — `on_command` calls `tipsy_ui::policy`'s own
@@ -31,6 +33,7 @@
 //! it still reach the HUD, and the audio has nowhere to go.
 
 pub mod hud;
+pub mod login_door;
 pub mod mic;
 pub mod playback;
 pub mod socket;
@@ -88,6 +91,12 @@ pub fn start() -> Result<(), JsValue> {
         outbox,
         capture,
         queue,
+        // **One `Door` per `start()`, and it carries the request in flight and no run-scoped bit at
+        // all**: the once-per-run rule is `UiState::login_seen`, asked of the state by `show_login`
+        // (`crates/tipsy-ui/src/state.rs:212-218`, `:293-314`). A second one would be a second
+        // `started` flag, so the page could send two `LoginStart`s for one capture or miss the
+        // `LoginStop` that belongs to the one it opened — the defect `login_door.rs` exists to prevent.
+        door: login_door::Door::new(),
         quit: false,
     }));
 
@@ -147,7 +156,12 @@ pub fn start() -> Result<(), JsValue> {
         let dt = (now - last).max(0.0) as u64;
         last = now;
 
-        {
+        // The frame's whole borrow of the state, and it answers with the actions the input raised: the
+        // door's reconciliation has to follow `hud::drain` **inside the same frame** — a `Tab` that just
+        // closed the capture is a `LoginStop` now, not on the next one — and `drain_capture` has to be
+        // inside the one `borrow_mut` this frame owns, because a second one is the panic Task 3.5's own
+        // comment warns about. The actions are dispatched after the draw, as they always were.
+        let actions = {
             let mut state = shared.state.borrow_mut();
             state.tick(dt);
             shared.clock = clock_view();
@@ -158,7 +172,7 @@ pub fn start() -> Result<(), JsValue> {
             let audio_now = audio_now(&shared.capture);
             let (welcomed, scheduled) = {
                 let mut queue = shared.queue.borrow_mut();
-                route(&mut queue, &mut shared.playback, &mut state, audio_now)
+                route(&mut queue, &mut shared.playback, &mut shared.door, &mut state, audio_now)
             };
             // The language first: `apply` is what sets it from `Welcome`, and the "connection
             // restored" notice is the one thing this side says, so it is said in the profile's
@@ -170,19 +184,30 @@ pub fn start() -> Result<(), JsValue> {
             if let Some(audio_now) = audio_now {
                 present(&mut shared.playback, &shared.capture, audio_now, &scheduled);
             }
+            // Everything the handlers queued since the last frame, in the order it arrived, tested
+            // against the hits of the frame the user was actually looking at.
+            let actions = hud::drain(&mut state, &shared.hits, &mut shared.queued);
+            // The capture's edges: a screen that just opened with `voice` sends `LoginStart`; `Tab`,
+            // the third refusal, a failed device and a **pass** all close the capture and send
+            // `LoginStop`; and the command goes down the same socket path every other HUD command does
+            // (a `UiAction::Send` reaches the same `Outbox` through `dispatch` below). **One call,
+            // because `sync` consumes the edge**: calling it twice would send nothing the second time.
+            let capture_command = match shared.door.sync(&state) {
+                login_door::MicStep::Start => Some(Command::LoginStart),
+                login_door::MicStep::Stop => Some(Command::LoginStop),
+                login_door::MicStep::None => None,
+            };
+            if let Some(command) = capture_command {
+                send(shared, command);
+            }
             // The microphone, once per frame and inside the one borrow this frame owns: the port's
             // handler only appends what the worklet posted, and this is the only place a captured
-            // frame may reach the socket. No capture means no frames, which is what the gate's
-            // un-pressed state is.
-            drain_microphone(&mut state, &shared.capture, &shared.outbox);
-        }
-
-        // Everything the handlers queued since the last frame, in the order it arrived, tested against
-        // the hits of the frame the user was actually looking at.
-        let actions = {
-            let mut state = shared.state.borrow_mut();
-            hud::drain(&mut state, &shared.hits, &mut shared.queued)
+            // frame may reach the socket — behind [`login_door::Door::sends_frames`] and nothing else.
+            // No capture means no frames, which is what the gate's un-pressed state is.
+            drain_microphone(&shared.door, &mut state, &shared.capture, &shared.outbox);
+            actions
         };
+
         shared.title = {
             let state = shared.state.borrow();
             state.profile.as_ref().map(|profile| profile.name.clone()).unwrap_or_default()
@@ -229,6 +254,10 @@ struct Shared {
     capture: mic::CaptureSlot,
     /// The messages the socket has queued, drained once per frame.
     queue: Rc<RefCell<VecDeque<ToClient>>>,
+    /// Task 3.7's login door: the screen's first-show, the capture's edges and the one predicate a
+    /// captured frame has to pass. One per `start()`, held here because the frame loop, `route` and
+    /// `dispatch` all need it and a second one would be a second `started` flag.
+    door: login_door::Door,
     /// The user pressed `Esc`: the socket is closed and nothing more is drawn.
     quit: bool,
 }
@@ -290,10 +319,17 @@ fn present(
 }
 
 /// The microphone, once per frame: the port's handler only appends what the worklet posted, and this
-/// is the only place a captured frame may reach the socket (Task 3.3's ledger note 2).
-fn drain_microphone(state: &mut UiState, capture: &mic::CaptureSlot, outbox: &socket::Outbox) {
+/// is the only place a captured frame may reach the socket. **The guard is the door's**, and it is
+/// inside [`mic::drain_capture`] rather than here, so the one send site and the one predicate cannot
+/// drift apart.
+fn drain_microphone(
+    door: &login_door::Door,
+    state: &mut UiState,
+    capture: &mic::CaptureSlot,
+    outbox: &socket::Outbox,
+) {
     if let Some(capture) = capture.borrow().as_ref() {
-        mic::drain_capture(capture, state, outbox);
+        mic::drain_capture(capture, door, state, outbox);
     }
 }
 
@@ -404,11 +440,13 @@ fn dispatch(action: UiAction, shared: &mut Shared) {
         // one and nothing for an indicator to report. The arm is inert rather than unreachable — the
         // key is the HUD's, and swallowing it is the honest answer. Recorded in the ledger as a gap.
         UiAction::ToggleLive => {}
-        // Task 3.7's, by its own brief: its whole body is `state.login = None`, and it is the task
-        // that shows the door, reconciles the capture with `LoginState::open` and gates the frames. In
-        // this task nothing can raise it — `show_login` is called by nobody, so `state.login` is always
-        // `None` and `UiState::on_key` never reaches `login_key`.
-        UiAction::LoginDone => {}
+        // The door opened and the user pressed `Enter`: the screen goes down. The capture went down
+        // before it — a pass closes `LoginState::open` in the reducer
+        // (`crates/tipsy-ui/src/state.rs:607`), so the frame loop's `Door::sync` already sent the
+        // `LoginStop`, and a `Door` that tracked the capture itself would be the second copy this
+        // branch removed. Nothing here remembers the pass: `login_seen` was set when `show_login`
+        // showed the screen, which is what keeps a re-sent `Welcome` from putting the veil back.
+        UiAction::LoginDone => shared.door.admitted(&mut state),
     }
 }
 
@@ -427,6 +465,12 @@ fn dispatch(action: UiAction, shared: &mut Shared) {
 /// until the press would start the reply mid-turn against a `seq` numbering that has moved on. That is
 /// Task 3.3's ledger note 1, as code.
 ///
+/// **The door is offered every event, after the reducer has had it** (Task 3.7): `Door::note_event`
+/// acts on `Welcome.login` alone and declines the rest, and the two login events that carry data —
+/// `LoginHeard` and `LoginVerdict` — are `apply`'s, not the door's. There is no `LoginLevel` event in
+/// this build, and the login's events have **no** equivalent of the gap Task 3.5 found in the
+/// configuration pair: `state.rs` handles all three of them.
+///
 /// The order inside one message is the native client's `on_message`: the announced rate first, then the
 /// audio it belongs to, and the turn boundaries where its own bookkeeping sits.
 ///
@@ -440,6 +484,7 @@ fn dispatch(action: UiAction, shared: &mut Shared) {
 fn route(
     queue: &mut VecDeque<ToClient>,
     playback: &mut playback::Playback,
+    door: &mut login_door::Door,
     state: &mut UiState,
     audio_now: Option<f64>,
 ) -> (bool, Vec<playback::Scheduled>) {
@@ -450,7 +495,7 @@ fn route(
             ToClient::Event(event) => {
                 // `policy::speech_rate` is the native client's own rule and the reason it lives in
                 // `tipsy-ui` at all: the rate is set *before* the audio it belongs to, and this is the
-                // browser's half of that order (`client.rs:363`).
+                // browser's half of that order.
                 if let Some(rate) = policy::speech_rate(&event) {
                     playback.set_rate(rate);
                 }
@@ -463,7 +508,14 @@ fn route(
                 // The screen's two answers, exactly as the native client's `on_message` renders them.
                 apply_screen_answer(state, &event);
                 welcomed |= matches!(event, Event::Welcome { .. });
+                // **The reducer first, the door second.** `state.apply` is what moves every phase,
+                // refusal and verdict — its `LoginHeard` and `LoginVerdict` arms are its own
+                // (`crates/tipsy-ui/src/state.rs:590-629`) — and the one thing it deliberately does
+                // not do is show the screen: its `Welcome` arm destructures `login` away (`:475`), so
+                // `Door::note_event` is the only thing that can put one up, and `show_login` is itself
+                // the once-per-run rule (`:293-314`) rather than a flag out here.
                 state.apply(&event);
+                door.note_event(state, &event);
             }
             ToClient::Audio(Frame::Speech { seq, samples }) => {
                 let Some(audio_now) = audio_now else {
@@ -580,6 +632,13 @@ mod tests {
         }
     }
 
+    /// A door no event has reached, for the tests below that are about the timeline, the header and
+    /// the configuration screen: Task 3.7's door is offered every event by `route`, and a `Welcome`
+    /// without a login screen must leave it exactly where it was.
+    fn closed_door() -> login_door::Door {
+        login_door::Door::new()
+    }
+
     /// The decision the whole file exists for, on the side that has no browser: **the events reach the
     /// HUD before the microphone is open and the audio does not.**
     ///
@@ -601,7 +660,7 @@ mod tests {
         let mut playback = playback::Playback::new();
         let mut state = tipsy_ui::UiState::new();
 
-        let (welcomed, play) = route(&mut queue, &mut playback, &mut state, None);
+        let (welcomed, play) = route(&mut queue, &mut playback, &mut closed_door(), &mut state, None);
 
         assert!(welcomed, "the caller has to be told, in the language `apply` just set");
         assert!(state.profile.is_some(), "the `Welcome` reached the HUD with no context in sight");
@@ -623,7 +682,7 @@ mod tests {
             ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 16_000 }),
             ToClient::Audio(Frame::Speech { seq: 0, samples: vec![0i16; 16_000] }),
         ]);
-        let (_, play) = route(&mut first, &mut playback, &mut state, Some(0.0));
+        let (_, play) = route(&mut first, &mut playback, &mut closed_door(), &mut state, Some(0.0));
         assert_eq!(play.len(), 1);
         assert_eq!(play[0].rate, 16_000, "the buffer is created at the announced rate");
         assert_eq!(play[0].at, playback::CUSHION_S);
@@ -633,7 +692,7 @@ mod tests {
             // 8 000 samples = half a second at 16 kHz.
             ToClient::Audio(Frame::Speech { seq: 1, samples: vec![0i16; 8_000] }),
         ]);
-        let (_, play) = route(&mut second, &mut playback, &mut state, Some(0.0));
+        let (_, play) = route(&mut second, &mut playback, &mut closed_door(), &mut state, Some(0.0));
         assert_eq!(
             play[0].at,
             1.0 + playback::CUSHION_S,
@@ -649,7 +708,7 @@ mod tests {
         let mut playback = playback::Playback::new();
         let mut state = tipsy_ui::UiState::new();
 
-        let (_, play) = route(&mut queue, &mut playback, &mut state, Some(5.0));
+        let (_, play) = route(&mut queue, &mut playback, &mut closed_door(), &mut state, Some(5.0));
 
         assert_eq!(play.len(), 1);
         assert!(state.voice_level() > 0.0, "`start_voice` was handed an envelope with a level in it");
@@ -691,7 +750,7 @@ mod tests {
             queue.push_back(ToClient::Audio(Frame::Speech { seq: 5, samples: vec![0i16; 2_400] }));
             let mut playback = playback::Playback::new();
             let mut state = tipsy_ui::UiState::new();
-            let (_, scheduled) = route(&mut queue, &mut playback, &mut state, Some(0.0));
+            let (_, scheduled) = route(&mut queue, &mut playback, &mut closed_door(), &mut state, Some(0.0));
             (scheduled.len(), playback.gaps())
         };
         assert_eq!(
@@ -935,7 +994,7 @@ mod tests {
         let mut playback = playback::Playback::new();
         let mut queue = VecDeque::from(vec![ToClient::Event(event)]);
         // The call the frame loop makes, with no audio context: the events reach the HUD either way.
-        let (welcomed, scheduled) = route(&mut queue, &mut playback, &mut state, None);
+        let (welcomed, scheduled) = route(&mut queue, &mut playback, &mut closed_door(), &mut state, None);
         assert!(welcomed, "`route` reports the `Welcome` the restored-connection notice is said on");
         assert!(scheduled.is_empty() && queue.is_empty(), "and nothing is scheduled before a press");
 
@@ -966,6 +1025,163 @@ mod tests {
         let mut queued = vec![hud::Input::Click { col: gear.area.x, row: 0 }];
         assert_eq!(hud::drain(&mut state, &hits, &mut queued), vec![UiAction::OpenConfig]);
         assert!(state.config_form.is_some(), "the door is open on the real profile's header");
+    }
+
+    /// One frame `.target-sandbox/live-37.ps1` captured, or a printed reason and `None`.
+    ///
+    /// **It asks about the file and not about a directory holding it** — the Phase 2 lesson, where
+    /// `.is_dir()` was true in a fresh clone because a `README.md` was committed and the skip became
+    /// dead code. Every path it hands back is a message a real server sent over a real socket.
+    fn live_37(name: &str) -> Option<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.target-sandbox/live-37")
+            .join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(_) => {
+                println!(
+                    "skipping `{}`: it is not there. Run `.target-sandbox/live-37.ps1` (a real `serve` \
+                     with `[login] enabled` and an allowed entry, a stub provider and a real WebSocket) \
+                     to produce it — the assertions below need the login frames a real server sent.",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
+
+    /// **The login door a real server asked for, opened and closed on this client.**
+    ///
+    /// `.target-sandbox/live-37.ps1` captures the `Welcome` a real `serve` sends with `[login] enabled`
+    /// and an allowed entry (`live-37/welcome.json`) and the `LoginVerdict` it answers a typed
+    /// `LoginAnswer` with (`live-37/verdict.json`). Both are decoded with the client's own
+    /// `wire::event_from_text` and routed through the same `route` the frame loop calls, with a real
+    /// [`login_door::Door`] — so the screen, the capture's two edges and the frame gate are exercised on
+    /// an announcement **this client did not compose**. It is the whole host-side lifecycle of the door
+    /// minus Ratzilla and the DOM, and it is what a hand-written fixture cannot pin: that the server's
+    /// own `voice` flag is what opens the capture, and that its own verdict is what closes it.
+    #[test]
+    fn the_login_door_a_real_server_asked_for_opens_and_closes_on_this_client() {
+        let (Some(announced), Some(ruling)) = (live_37("welcome.json"), live_37("verdict.json")) else {
+            return;
+        };
+
+        let welcome = wire::event_from_text(announced.trim()).expect("the live `Welcome` decodes");
+        let view = match &welcome {
+            Event::Welcome { login: Some(view), .. } => view.clone(),
+            other => panic!("the live check captured {other:?}, not a `Welcome` with a login screen"),
+        };
+        assert!(view.voice, "the live check's `[login] voice = true` is what the server announces");
+
+        let mut state = UiState::new();
+        let mut door = login_door::Door::new();
+        let mut playback = playback::Playback::new();
+        let mut queue = VecDeque::from(vec![ToClient::Event(welcome)]);
+        let (welcomed, scheduled) = route(&mut queue, &mut playback, &mut door, &mut state, None);
+        assert!(welcomed, "`route` reports the `Welcome` the restored-connection notice is said on");
+        assert!(scheduled.is_empty() && queue.is_empty(), "and nothing is scheduled before a press");
+
+        // The screen, from the server's own announcement.
+        let screen = state.login.as_ref().expect("the server asked for a login screen");
+        assert!(screen.voice, "the switch is the server's, not this client's opinion of it");
+        assert!(screen.open, "and with the voice on the capture opens with the screen");
+        assert_eq!(screen.phase, tipsy_ui::LoginPhase::Listening, "which is the phase the keys read");
+        assert!(door.sends_frames(&state), "so a frame may leave the page");
+        assert_eq!(door.sync(&state), login_door::MicStep::Start, "and the server is told, once");
+        assert_eq!(door.sync(&state), login_door::MicStep::None, "and never twice");
+
+        // The ruling a real server sent for a typed answer: the door opens, the capture closes.
+        let verdict = wire::event_from_text(ruling.trim()).expect("the live `LoginVerdict` decodes");
+        assert!(
+            matches!(verdict, Event::LoginVerdict { ok: true, .. }),
+            "the live answer carried the configured keywords: {verdict:?}"
+        );
+        let mut queue = VecDeque::from(vec![ToClient::Event(verdict)]);
+        route(&mut queue, &mut playback, &mut door, &mut state, None);
+
+        let screen = state.login.as_ref().expect("the screen stays until `Enter`, spec §6.2");
+        assert_eq!(screen.phase, tipsy_ui::LoginPhase::Passed, "the verdict is what opens the door");
+        assert!(!screen.open, "and the reducer closed the capture the moment it did");
+        assert!(!door.sends_frames(&state), "so no frame may leave the page any more");
+        assert!(!door.capture_open(&state), "and the `● rec` badge is gone with it");
+        assert_eq!(door.sync(&state), login_door::MicStep::Stop, "which is the `LoginStop` §6.2 asks for");
+
+        // `Enter`, then the screen goes — and the run remembers, so a re-sent `Welcome` cannot put the
+        // veil back over a HUD the user is already inside.
+        assert_eq!(
+            state.on_key(tipsy_ui::KeyInput::Enter),
+            vec![UiAction::LoginDone],
+            "the screen the server asked for is entered with the key the state table names"
+        );
+        door.admitted(&mut state);
+        assert!(state.login.is_none() && state.login_seen, "the door is behind us and stays behind us");
+        assert!(!door.note_event(&mut state, &welcome_like()), "and a later announcement opens nothing");
+    }
+
+    /// A `Welcome` with a login screen, for the one assertion above that needs a second announcement.
+    fn welcome_like() -> Event {
+        Event::Welcome {
+            session_id: 2,
+            profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
+            ui_language: UiLanguage::Es,
+            listening_mode: ListeningMode::Push,
+            web_bundle: true,
+            login: Some(tipsy_protocol::LoginView { voice: true }),
+        }
+    }
+
+    /// A [`Shared`] for the host: every field but the socket is buildable in a test, and the socket is
+    /// a handle with nothing behind it ([`socket::Outbox::for_tests`]). It exists for the one
+    /// `dispatch` arm that is otherwise unreachable without a browser.
+    fn shared_for_tests() -> Shared {
+        Shared {
+            state: Rc::new(RefCell::new(UiState::new())),
+            hits: Vec::new(),
+            queued: Vec::new(),
+            clock: hud::clock_from(0, 0, 0, 0, 0, 0),
+            title: String::new(),
+            playback: playback::Playback::new(),
+            outbox: socket::Outbox::for_tests(),
+            capture: Rc::new(RefCell::new(None)),
+            queue: Rc::new(RefCell::new(VecDeque::new())),
+            door: login_door::Door::new(),
+            quit: false,
+        }
+    }
+
+    /// **`Enter` on a passed screen is `UiAction::LoginDone`, and this drives the arm that answers it.**
+    ///
+    /// The live-fixture test above drives `Door::admitted` directly; this goes through [`dispatch`],
+    /// which is what the frame loop actually calls — and that arm is the one line in this file nothing
+    /// else could see. It is measured rather than asserted: with the arm's body emptied, this test is
+    /// the only one in the crate that goes red (the ledger's M7, which was void before this test
+    /// existed and is the reason `Outbox::for_tests` does).
+    #[test]
+    fn enter_on_a_passed_screen_takes_the_screen_down_through_dispatch() {
+        let mut shared = shared_for_tests();
+        let announced = welcome_like();
+        let view = match &announced {
+            Event::Welcome { login: Some(view), .. } => view.clone(),
+            other => panic!("the fixture is a `Welcome` with a login screen: {other:?}"),
+        };
+        // The screen, exactly as `route` puts it up: the reducer first, the door second.
+        shared.state.borrow_mut().apply(&announced);
+        {
+            let mut state = shared.state.borrow_mut();
+            assert!(shared.door.open_screen(&mut state, Some(&view)));
+        }
+
+        let pass = Event::LoginVerdict { ok: true, name: Some("Andrés".into()) };
+        shared.state.borrow_mut().apply(&pass);
+        assert_eq!(
+            shared.state.borrow_mut().on_key(tipsy_ui::KeyInput::Enter),
+            vec![UiAction::LoginDone],
+            "the key the screen's own table maps once the door is open"
+        );
+
+        dispatch(UiAction::LoginDone, &mut shared);
+        assert!(shared.state.borrow().login.is_none(), "the arm takes the screen down");
+        assert!(shared.state.borrow().login_seen, "and the run still remembers it was asked");
     }
 
     /// An HTML document with its HTML comments and its CSS block comments removed.

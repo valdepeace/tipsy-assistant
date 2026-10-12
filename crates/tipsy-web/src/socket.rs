@@ -169,6 +169,18 @@ impl Outbox {
         }
     }
 
+    /// A handle with **no socket behind it**, for a test that needs an `Outbox` without a browser.
+    ///
+    /// [`spawn_connection`] is the only production constructor and it opens a real `WebSocket` through
+    /// `spawn_local` — neither of which exists on the host — so this seam is what lets
+    /// [`crate::dispatch`]'s `UiAction::LoginDone` arm (Task 3.7's) be tested at all. It is
+    /// `#[cfg(test)]` and it is the same shape `close`/`is_quitting` already have here: a small,
+    /// explicit door for the tests rather than a public constructor.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self::new()
+    }
+
     /// Closes the socket for good: the user quit, so nothing reconnects and nothing may be sent again.
     ///
     /// **This is Task 3.5's one addition to this file, and it exists because the socket's cell is

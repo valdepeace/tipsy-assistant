@@ -27,20 +27,16 @@
 //! the same 320-sample output — and **a repeated input cannot retrigger**, because there are no
 //! sequence numbers and no timers here: the assembler appends and emits.
 //!
-//! **Which gate is whose, because there are two and only one of them is this file's.** This task's
+//! **Which gate is whose, because there are two and only one of them is this file's.** This file's
 //! gate is the *capability and gesture* gate: the page finds out whether it can record at all before
 //! it offers to, and the one click that opens the capture is the user gesture both `getUserMedia` and
 //! the `AudioContext` need. The **login door** — "nothing reaches the provider until the local
-//! detector confirms speech", which is the gate the client inherits from the login screen — is **not
-//! here and is not duplicated here**: the plan gives it to Task 3.7, in its own
-//! `login_door.rs`, whose `Door::sends_frames` reads `LoginState { voice, open }` and whose
-//! `drain_capture` is the same call this file's [`drain_capture`] is with that predicate passed in.
-//! What this file does about it is what made that possible: **the port handler sends nothing**, it
-//! only appends assembled frames to [`Capture`]'s queue, and the one function that may reach
-//! `Outbox::send` is [`drain_capture`], whose guard is a single boolean the caller owns. Task 3.3's
-//! caller passes the user's own microphone switch (`UiState::mic_open`, the field the HUD's `VOZ`
-//! panel and `Tab` already read); Task 3.7's passes the door. There is one send site, so there is one
-//! place for the second gate to land.
+//! detector confirms speech", which is the gate the client inherits from the login screen — is
+//! `login_door.rs`'s: `Door::sends_frames` reads `LoginState { voice, open }`, and [`drain_capture`]
+//! takes the door and calls `Outbox::send` behind it and behind nothing else. **The port handler
+//! sends nothing**: it downmixes, resamples, assembles and appends to [`Capture`]'s queue, and the one
+//! function that may reach the socket is [`drain_capture`], called once per frame. There is one send
+//! site, and the door's predicate is what guards it.
 //!
 //! **What only a browser can check, named rather than implied.** Whether `getUserMedia` is reachable
 //! on this origin, whether the worklet module loads, whether the context really runs at the rate it
@@ -323,12 +319,12 @@ pub struct Drained {
 
 /// Empties the capture's queue: what may leave the page, and what the HUD has to draw.
 ///
-/// **`sending` is the whole gate, and it is passed in rather than read here**, because the two
-/// callers answer it from two different places: this task's from the user's own microphone switch,
-/// Task 3.7's from the login screen's capture state. **A frame the gate refuses is dropped, not
-/// kept**: keeping it would send it the moment the gate opened, and the server would transcribe a
-/// sentence said to a closed door as the user's answer — the native client's "a frame belongs to a
-/// *stream*" (`client.rs`'s `mic_route`), on this side of the wire.
+/// **`sending` is the whole gate, and it is passed in rather than read here**, because this is the
+/// pure half: [`drain_capture`] answers it with `login_door::Door::sends_frames`, and that function's
+/// own tests answer it directly. **A frame the gate refuses is dropped, not kept**: keeping it would
+/// send it the moment the gate opened, and the server would transcribe a sentence said to a closed
+/// door as the user's answer — the native client's "a frame belongs to a *stream*" (`mic_route` in
+/// `tipsy_ui::policy`), on this side of the wire.
 pub fn drain_frames(queue: &mut VecDeque<Vec<i16>>, sending: bool) -> Drained {
     let mut drained = Drained::default();
     while let Some(samples) = queue.pop_front() {
@@ -375,26 +371,60 @@ impl Capture {
 /// capture running".
 pub type CaptureSlot = Rc<RefCell<Option<Capture>>>;
 
+/// How much of the live capture the widget's core pulses on, in frames.
+///
+/// Twelve 320-sample frames are ≈ 240 ms of history — three of the HUD's own
+/// `ENVELOPE_HOP_MS = 50` windows (`crates/tipsy-ui/src/state.rs:16`), which is the unit
+/// `UiState::voice_level` indexes an envelope in (`:800-803`). Short enough that the core reads as
+/// following the voice rather than the room.
+pub const LOGIN_ENVELOPE_POINTS: usize = 12;
+
 /// The one place a captured frame may reach the socket, called once per frame from the render loop.
 ///
 /// It takes `&mut UiState` rather than the `Rc<RefCell<UiState>>` the rest of the client passes
 /// around, and that is not a style choice: the render loop already holds the state's mutable borrow
 /// for the whole frame, so a second `borrow_mut()` from inside it would panic.
 ///
-/// **A frame that reaches here while the microphone is not wanted is dropped, and the socket is not
-/// asked to take it.** The gate is `state.mic_open` — the user's own switch, which is what the
-/// press-to-start click turned on and what `Tab` turns off (`crates/tipsy-ui/src/state.rs:695-696`,
-/// where the key toggles the field and raises the `ListenStart`/`ListenStop` the session's own
-/// `listening` flag follows). A send that fails because the socket is down is dropped too: the
-/// session has no use for a second-old word, and a queue here would be a delay disguised as
-/// reliability.
-pub fn drain_capture(capture: &Capture, state: &mut tipsy_ui::UiState, outbox: &Outbox) {
-    let drained = drain_frames(&mut capture.frames.borrow_mut(), state.mic_open);
+/// **The gate is the login door's predicate, and it is the only one.** `door.sends_frames(state)` is
+/// `LoginState { voice, open }` — the screen's own fields, read here and never cached — so a frame is
+/// refused whenever the door is shut: no screen yet, a `voice = false` screen, `Tab` off, the third
+/// refusal, a failed device, a pass, and the whole of the time after the door. **A refused frame is
+/// dropped, not kept**: keeping it would send it the moment the door opened and the server would
+/// transcribe a sentence said to a closed door as the user's answer (the login plan's review finding
+/// 1, on this client). Until Task 3.7 this boolean was `state.mic_open`, which the "press to start"
+/// click sets before `Welcome` even arrives — so a `voice = false` page uploaded room tone to `/ws`
+/// from the press on. That is the window this predicate closes.
+///
+/// A send that fails because the socket is down is dropped too: the session has no use for a
+/// second-old word, and a queue here would be a delay disguised as reliability.
+pub fn drain_capture(
+    capture: &Capture,
+    door: &crate::login_door::Door,
+    state: &mut tipsy_ui::UiState,
+    outbox: &Outbox,
+) {
+    // Read once, before the queue is emptied: the door's answer is a function of the state's login
+    // fields, which nothing below touches.
+    let sending = door.sends_frames(state);
+    let capturing = door.capture_open(state);
+    let drained = drain_frames(&mut capture.frames.borrow_mut(), sending);
     for level in drained.levels {
         state.push_mic_level(level);
     }
     for samples in drained.send {
         let _ = outbox.send(ToServer::Audio(Frame::Mic(samples)));
+    }
+    // The core's pulse, for as long as the capture runs. Login spec §6 wants it to follow the voice
+    // "while the door is shut", and the widget draws it with the HUD's own `draw_core`, whose whole
+    // amplitude is `UiState::voice_level()` — which reads `voice_envelope` and not `mic_levels`
+    // (`crates/tipsy-ui/src/state.rs:800-803`). Without this the core stands still for the whole of
+    // the door, which is exactly the feedback §6 says the screen needs. A reply's own envelope is
+    // left alone: nothing is spoken behind the veil — the greeting is withheld until the verdict
+    // (login spec §10).
+    if capturing {
+        let points = state.mic_levels.len().min(LOGIN_ENVELOPE_POINTS);
+        let envelope = state.mic_levels[state.mic_levels.len() - points..].to_vec();
+        state.start_voice(envelope);
     }
 }
 
@@ -474,11 +504,15 @@ pub fn press_to_start(state: Rc<RefCell<tipsy_ui::UiState>>, slot: CaptureSlot) 
                             let granted = {
                                 let mut state = state.borrow_mut();
                                 // The press is the user's own yes. `mic_open` is the HUD's microphone
-                                // switch — what the `VOZ` panel reads and what the frame gate reads —
-                                // and a click on "press to start" is the same statement `Tab` makes,
-                                // made with the pointer. Without it the capture would run and draw
-                                // nothing, which is why the plan's own Step 8 check ("the HUD's red
-                                // oscilloscope moves when you speak") could not pass as written.
+                                // switch — what the `VOZ` panel reads — and a click on "press to start"
+                                // is the same statement `Tab` makes, made with the pointer. Without it
+                                // the HUD's red oscilloscope would never come on, which is why the
+                                // plan's own Step 8 check ("the HUD's red oscilloscope moves when you
+                                // speak") could not pass as written. **It is not the frame gate**: since
+                                // Task 3.7 that is `login_door::Door::sends_frames`, which reads the
+                                // login screen's own `voice` and `open` and knows nothing about this
+                                // flag — see `drain_capture`'s doc for why the two are not the same
+                                // question.
                                 state.mic_open = true;
                                 state.strings().mic_granted
                             };
