@@ -1656,4 +1656,135 @@ mod tests {
         assert!(debounce.deadline.is_none(), "and taking it disarms the window");
         assert!(debounce.take().is_none(), "a taken size is not handed out twice");
     }
+
+    // ---------- Task 2.4: the page, the assets it names, and the token rule they share ----------
+
+    /// Every string the page owes, named once so a rewrite that drops one fails loudly instead of
+    /// leaving a blank screen for a person to find. Each entry is a behaviour Task 2.2 measured and
+    /// the other half of which this page implements: the token's one legal transport, the three
+    /// vendored files, the Blob/ArrayBuffer switch, the raw-byte write, the socket route, the host it
+    /// must connect back to, the two input channels, focus, the padding frame and the four shapes.
+    const PAGE_REQUIRED: [&str; 17] = [
+        // The token comes from the query parameter the server sent the browser to (spec §9.2).
+        "new URLSearchParams(location.search).get(\"token\")",
+        // xterm.js and its stylesheet are separate files, and neither is optional: without the
+        // stylesheet the terminal renders with no layout at all.
+        "/assets/vendor/xterm.mjs",
+        "/assets/vendor/xterm.css",
+        "/assets/vendor/addon-fit.mjs",
+        // Binary frames arrive as Blob unless this is set (research note §6.4).
+        "binaryType = \"arraybuffer\"",
+        // Raw PTY bytes are UTF-8 and there is no JSON envelope over this socket.
+        "term.write(new Uint8Array(",
+        // The raw-bytes socket, not the protocol one — and the host it was served from, because the
+        // server's `Origin` check compares against the `Host` the request arrived on, which makes
+        // `127.0.0.1:PORT` and `localhost:PORT` two different authorities.
+        "/terminal/ws",
+        "location.host",
+        // Mouse reports are the non-UTF-8 channel and must be forwarded as bytes, not as text.
+        "term.onBinary",
+        // Keystrokes.
+        "term.onData",
+        // A full-screen TUI needs the keyboard, and a canvas without a focusable element silently
+        // swallows every key.
+        "term.focus()",
+        "tabindex=\"0\"",
+        // The padding frame Task 2.2's wire table names, and the three messages the page sends.
+        "tipsterm-hello-pad",
+        "{ type: \"data\", data }",
+        "{ type: \"mouse\", data }",
+        "{ type: \"resize\", cols, rows }",
+        // The only text frame the server ever sends, and the only one the page reads.
+        "message.type === \"exit\"",
+    ];
+
+    /// The page the bundle serves, and what it must contain.
+    ///
+    /// **A page's real test is a browser's, and this harness has none**; what is checkable here is
+    /// that the file this binary serves is the page Task 2.2's wire describes, and that it names the
+    /// behaviours above. Nothing about rendering, `onData`, `onBinary`, `FitAddon` or
+    /// `ResizeObserver` is verified by this or by any other test in this repository — the manual
+    /// check in the README is where those live.
+    ///
+    /// **The page is demanded rather than skipped, and the plan's version of this test could not have
+    /// failed the way the plan expected.** It gated on `asset(PAGE_TERMINAL)` being `Some` and
+    /// returned early when it was not — which is precisely the state Step 2 predicted a failure in, so
+    /// the plan's own red state was unreachable through the plan's own test. `web/terminal/index.html`
+    /// is a **committed source file**, and since `rust-embed`'s debug build reads its folder from disk
+    /// at the compile-time path, "the page is in the bundle" is exactly "the page is in the tree" for
+    /// every `cargo test` this repository runs. Its absence is a failure, not a skip.
+    #[test]
+    fn the_terminal_page_is_the_one_the_bundle_embeds_and_it_is_html() {
+        let path = crate::server::assets::PAGE_TERMINAL;
+        // `(content type, bytes)` in that order, which is what the tree's `asset` returns and what
+        // the plan's copy of this test had backwards.
+        let (content_type, bytes) = crate::server::assets::asset(path).unwrap_or_else(|| {
+            panic!("{path} is not in this bundle: the embed reads the repository's web/, so the page belongs at web/{path}")
+        });
+        let page = String::from_utf8(bytes).expect("the page is UTF-8");
+        assert!(content_type.starts_with("text/html"), "a page must be served as HTML, got {content_type}");
+        for required in PAGE_REQUIRED {
+            assert!(page.contains(required), "the terminal page must contain {required:?}");
+        }
+        assert!(
+            !page.contains("not available in this build"),
+            "the terminal route must serve the page, not the explanation page"
+        );
+    }
+
+    /// Every asset the page references has to resolve inside the bundle: a page that points at a file
+    /// the fetch never kept is a blank screen with a 404 in the console, which is the first failure a
+    /// person meets and the last one a unit test can see.
+    ///
+    /// **The gate is the fetched directory and not the page, which is the difference between this
+    /// test and the plan's.** `web/vendor/` is fetched from the network by `cargo run -p xtask -- dist`
+    /// and is git-ignored, so a checkout that has never run it has no xterm.js at all; that state
+    /// skips and says so, because no test may demand the network. A checkout that *has* the assets
+    /// and a page that names something else **fails** — a version bump that renames a file, or a
+    /// mistyped extension, is exactly what that looks like. The one state this cannot see is a page
+    /// whose three references were all renamed at once, because then nothing was fetched to gate on;
+    /// the manual check's blank-black-rectangle step is what catches that.
+    #[test]
+    fn every_asset_the_page_references_is_embedded() {
+        const VENDOR: [&str; 3] = ["vendor/xterm.mjs", "vendor/xterm.css", "vendor/addon-fit.mjs"];
+        let fetched = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/vendor").is_dir();
+        if !fetched && !VENDOR.iter().any(|path| crate::server::assets::asset(path).is_some()) {
+            eprintln!(
+                "web/vendor is neither in this checkout nor in this binary: run `{}` and read this \
+                 test's assertions again",
+                crate::server::assets::DIST_COMMAND
+            );
+            return;
+        }
+
+        let page = String::from_utf8(
+            crate::server::assets::asset(crate::server::assets::PAGE_TERMINAL)
+                .expect("the page is committed, so a bundle without it is a broken bundle")
+                .1,
+        )
+        .expect("the page is UTF-8");
+        for path in VENDOR {
+            assert!(page.contains(path), "the page must reference {path}");
+            assert!(
+                crate::server::assets::asset(path).is_some(),
+                "the page references {path} and the bundle does not embed it: web/vendor is incomplete"
+            );
+        }
+    }
+
+    /// The two pages share one token rule, and it is the one Task 2.2 already tests; this pins that
+    /// the terminal page is on that path and not behind a second, weaker check.
+    ///
+    /// **`presented` is the decoded token**, which is what `Query<TerminalQuery>` hands `terminal_ws`
+    /// and what the page's `?token=` arrives as. The plan's copy of this test passed the raw
+    /// `"token=abc"` text, which pinned a rule that every real request would have failed.
+    #[test]
+    fn the_terminal_page_and_the_terminal_socket_share_the_token_rule() {
+        assert!(terminal_access(None, None).is_ok(), "loopback with no token is open");
+        assert!(terminal_access(Some("abc"), Some("abc")).is_ok(), "the page's own token opens it");
+        assert!(terminal_access(None, Some("abc")).is_err(), "a tokenised server refuses an anonymous page");
+        assert!(terminal_access(Some("wrong"), Some("abc")).is_err(), "and a wrong one");
+        assert!(terminal_access(Some(""), None).is_ok(), "a server with no token admits any query");
+        assert!(terminal_access(Some("abc"), None).is_ok(), "and an extra token is not a refusal");
+    }
 }

@@ -60,9 +60,26 @@ design trade-off arises, the terminal wins.
 | Transport | WebSocket carrying the protocol | WebSocket carrying raw PTY bytes |
 
 The web terminal is built into the executable: the server serves an embedded xterm.js page and,
-per connection, spawns the native TUI in a pseudo-terminal (`portable-pty`, ConPTY on Windows)
-connected to the server through the in-process channel. Keyboard, mouse and resize events are
-forwarded. Users who prefer an external tool can also run the binary under `ttyd`.
+per connection, spawns **its own binary in `--connect` mode** in a pseudo-terminal (`portable-pty`,
+ConPTY on Windows 10 1809 and later), pointed at the server's own loopback `/ws`. The child is the
+running executable's own path (`std::env::current_exe()`), never a name searched for in `PATH`, so a
+planted binary in the working directory or in a `PATH` entry cannot become the terminal. It is a
+client, exactly like a user on another machine — it starts no server, builds no provider and reads no
+credential store — so there is one code path for "a TUI that is not in the server process", which is
+why it can also be moved to another machine later. Keyboard, mouse and resize events are forwarded,
+and resize reaches the child through the pseudo-terminal itself. Users who prefer an external tool can
+also run the binary under `ttyd`.
+
+**The bundle is the repository's `web/` directory, and that is one directory rather than three.**
+`cargo run -p xtask -- dist` fetches the pinned xterm.js into `web/vendor/` and (from Phase 3's Task
+3.6) builds the WebAssembly client into `web/dist/`; the binary embeds that whole tree, so both host
+pages (`web/terminal/index.html` and `web/client/index.html`), the vendored `vendor/` files and the
+generated output under `dist/` are served from memory as `/assets/terminal/…`, `/assets/vendor/…` and
+`/assets/dist/…`. The folder attribute that names it is spelled `../../web/` in
+`crates/tipsy-compadre/src/server/assets.rs`, because `rust-embed` resolves a *relative* folder
+against the crate's own `CARGO_MANIFEST_DIR` and not against the repository root: the short spelling
+`web/dist/` names `crates/tipsy-compadre/web/dist/`, which nothing builds. Whatever directory
+`dist` writes to must therefore stay **inside** `web/`.
 
 ## Workspace layout
 
@@ -76,7 +93,7 @@ WebAssembly. Native-only dependencies (multi-threaded tokio, `cpal`, `rodio`, `k
 | `tipsy-ui` | library | The front end's shared, wasm-safe half: the ratatui HUD (widgets, state and es/en strings), backend-agnostic, **and the decisions a client makes with no device, socket or clock in reach (`policy`)** | yes |
 | `tipsy-web` | `.wasm` bundle | Web client: Ratzilla backend, browser audio, WebSocket transport | yes (target) — **arrives in Phase 3 of `2026-10-11-plan-3-web-tier.md`; it does not exist yet** |
 | `tipsy-compadre` | **binary** | The server (brain, providers, config, axum, the WebSocket door) plus the native TUI client | no |
-| `xtask` | binary | `cargo xtask dist`: fetch and verify xterm.js, build the bundle, build the binary that embeds it — **arrives in Phase 2 of the same plan** | no |
+| `xtask` | binary | `cargo run -p xtask -- dist`: fetch and verify xterm.js, build the bundle, build the binary that embeds it — **Phase 2 lands the fetch and Phase 3's Task 3.6 the two builds** | no |
 
 A client's turn, microphone and playback policy — which command starts a turn or quiets the device,
 when the microphone is wanted and where one captured frame goes, which cell a click landed on — lives in
@@ -99,9 +116,13 @@ There is **a single executable**. The `tipsy-web` bundle is embedded into the `t
 binary at build time and served from memory, so users download one file.
 
 Building the full distribution takes two steps (the WASM bundle first, then the binary that
-embeds it), wrapped in a single project command (`cargo xtask dist`). A plain `cargo build`
-produces a binary without the web client; both page routes then answer with a page that says the web
-UI is not available in this build and names `cargo xtask dist`.
+embeds it), wrapped in a single project command — `cargo run -p xtask -- dist`. **It is not
+`cargo xtask dist`**: cargo resolves `cargo <name>` from `PATH`, and this workspace's binary target is
+not there, so the short form answers `error: no such command: 'xtask'`. A `.cargo/config.toml`
+`[alias]` would make the short form work but that directory is git-ignored and does not ship. A plain
+`cargo build` embeds whatever `web/` holds at that moment, so it serves the checked-in
+`web/terminal/index.html` and, once Phase 3 lands it, `/` answers with a page that says the web UI is
+not available in this build and names the command above.
 
 The server's HTTP and WebSocket layer is `axum` 0.8.9 with its `ws` feature, and TLS is
 `axum-server` 0.8.0 (`tls-rustls`). One consequence is worth writing down rather than discovering:
