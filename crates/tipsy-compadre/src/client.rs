@@ -11,7 +11,7 @@ use ratatui::crossterm::event::{
     self, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use tipsy_protocol::{Capability, Command, ConfigView, Event, Frame, ToClient, ToServer};
+use tipsy_protocol::{Capability, ClientKind, Command, ConfigView, Event, Frame, PROTOCOL_VERSION, ToClient, ToServer};
 use tipsy_ui::{
     ClockView, ConfigEffect, ConfigForm, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw,
 };
@@ -58,8 +58,29 @@ pub fn run(config_path: PathBuf) -> Result<(), String> {
         client.keys.clone().unwrap_or_else(KeyResolver::system),
         client.providers.clone().expect("`Client::new` is built with a provider stack"),
     );
-    let ends = hub.spawn(SessionPolicy::local());
+    let ends = open_in_process(&hub);
     client.terminal(ends, Some(hub), loaded.warning)
+}
+
+/// The handshake every client sends first (spec §4.1), built in one place so a socket attach and an
+/// in-process one cannot drift apart. The `--connect` path calls this too (`client/bridge.rs`), which
+/// is also what keeps the two from ever both sending one.
+fn hello(token: Option<String>) -> Command {
+    Command::Hello { token, client: ClientKind::Tui, protocol_version: PROTOCOL_VERSION }
+}
+
+/// Starts the in-process session and says `Hello` to it **before the terminal is entered**.
+///
+/// This is not optional and it is not a formality: a session is silent until it has judged its first
+/// message, and `SessionPolicy::admits` answers `ProtocolVersion` to anything that is not a `Hello`
+/// (`session.rs`'s prelude). Without this line the bare run gets no `Welcome`, no greeting, and the
+/// user's first keypress — an `Ask`, or a `LoginStart` — is read as a failed handshake and closes
+/// the session for the rest of the run. Task 1.2's ruling ("every real client must send `Hello`
+/// first") is what this line is, and the `--connect` path's bridge has always done it.
+fn open_in_process(hub: &Hub) -> SessionEnds {
+    let ends = hub.spawn(SessionPolicy::local());
+    let _ = ends.to_server.send(ToServer::Command(hello(None)));
+    ends
 }
 
 /// The `--connect` run: the same TUI, whose two channels come from a socket instead of this process.
@@ -1676,6 +1697,62 @@ mod tests {
             ),
             "{sent:?}"
         );
+    }
+
+    /// B1, and the property that was missing: a session is silent until its first message and
+    /// refuses anything that is not a `Hello` (`session.rs`'s prelude), so `client::run` says hello
+    /// **before** `terminal()` is entered. Without it the bare run got no `Welcome`, no greeting, and
+    /// the user's first keypress ended the session — the review reproduced exactly that
+    /// (`Error { code: ProtocolVersion, recoverable: false }`, zero chat calls).
+    ///
+    /// Nothing in this test sends anything by itself, so the `Welcome` it waits for can only arrive
+    /// because `open_in_process` put a `Hello` on the channel first. The second half is the same
+    /// session **without** that handshake, kept so the assertion above cannot pass because a session
+    /// serves whatever it is sent first.
+    #[tokio::test]
+    async fn the_bare_run_says_hello_before_the_terminal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hola\"}}]}\n\ndata: [DONE]\n\n",
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+        let config = mock_config(&server.uri());
+        let keys = resolver();
+        let slot = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        store::save(&path, &config).unwrap();
+        let hub = Hub::new(config, path, keys, slot);
+
+        let mut ends = open_in_process(&hub);
+        let first = tokio::time::timeout(Duration::from_secs(5), ends.from_server.recv())
+            .await
+            .expect("a session with no `Hello` says nothing at all, so the handshake must have been sent")
+            .expect("the session's channel must stay open");
+        assert!(
+            matches!(first, ToClient::Event(Event::Welcome { .. })),
+            "the bare run's first answer is the `Welcome`, got {first:?}"
+        );
+
+        // The other half of the same rule, which is the defect: a session nobody greeted refuses the
+        // first thing a user does, and ends rather than serving it.
+        let mut refused = hub.spawn(SessionPolicy::local());
+        refused.to_server.send(ToServer::Command(Command::Ask { text: "¿qué pasa?".into() })).unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(5), refused.from_server.recv())
+            .await
+            .expect("a session refuses a first message that is not a `Hello`")
+            .expect("the refusal is an event on the channel");
+        match answer {
+            ToClient::Event(Event::Error { code, recoverable, .. }) => {
+                assert_eq!(code, tipsy_protocol::ErrorCode::ProtocolVersion);
+                assert!(!recoverable, "and the refusal is not recoverable: the session is over");
+            }
+            other => panic!("a first `Ask` on an ungreeted session is refused, got {other:?}"),
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use tipsy_protocol::{ClientKind, Command, ErrorCode, Event, Frame, PROTOCOL_VERSION, ToClient, ToServer};
+use tipsy_protocol::{ErrorCode, Event, Frame, ToClient, ToServer};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -75,13 +75,12 @@ type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStre
 
 /// Sends `Hello` and waits for the first answer. `Welcome` is the only acceptable one and is
 /// returned rather than dropped; an `Error` is the server's refusal, quoted as it came.
+///
+/// The command itself comes from [`super::hello`], the one place it is built: the in-process client
+/// sends the same one, and a second copy here is exactly where the two paths would drift apart.
 async fn say_hello(socket: &mut Socket, token: Option<&str>, url: &str) -> Result<Event, BridgeError> {
-    let hello = Command::Hello {
-        token: token.map(str::to_string),
-        client: ClientKind::Tui,
-        protocol_version: PROTOCOL_VERSION,
-    };
-    let text = serde_json::to_string(&hello).expect("a `Command` always serialises");
+    let text = serde_json::to_string(&super::hello(token.map(str::to_string)))
+        .expect("a `Command` always serialises");
     socket
         .send(Message::text(text))
         .await
