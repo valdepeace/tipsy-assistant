@@ -337,7 +337,16 @@ pub async fn run(settings: Settings, bound: tokio::sync::oneshot::Sender<SocketA
     let handle = axum_server::Handle::<SocketAddr>::new();
     let outcome = match tls_config {
         Some(config) => {
-            axum_server::tls_rustls::bind_rustls(local, config)
+            // **The socket this function already bound, and not a second `bind`.** `bind_rustls`
+            // binds the address itself, and the `std` listener above is still holding that address —
+            // so `serve --tls` reported `listening` and then died on Windows with
+            // `WSAEADDRINUSE (10048)`, having generated a certificate for a server that was never
+            // reachable. `from_tcp_rustls` takes the one socket, which `guard_post_bind` has already
+            // checked and which is already non-blocking (`from_tcp` needs that, as Task 1.8's ledger
+            // records for the plaintext arm). Found by the phase's first live `serve --tls` run; every
+            // test waited only for the `bound` message, which is sent before this branch.
+            axum_server::tls_rustls::from_tcp_rustls(listener, config)
+                .map_err(ServerError::Io)?
                 .handle(handle)
                 .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
@@ -725,6 +734,46 @@ mod tests {
         let loopback = start(settings("127.0.0.1:0", "correct-horse")).await.expect("a loopback bind needs no token to be legal");
         let local = attach(loopback.port(), None).await;
         assert!(local.contains(r#""type":"welcome""#), "a loopback listener asks for no token: {local}");
+    }
+
+    /// **The first thing the phase's live check caught.** `serve --tls` called
+    /// `bind_rustls(local, …)`, which binds the address a *second* time while the `std` listener from
+    /// `run` still holds it: on Windows that is `WSAEADDRINUSE (10048)`, so a run logged
+    /// `listening … tls=true` and then stopped with nothing serving at all. Every TLS test waited only
+    /// for the `bound` message, which `run` sends before this branch, so none of them could see it.
+    /// This one speaks HTTPS to the port the run reported.
+    ///
+    /// The client accepts the self-signed certificate on purpose: what is under test is that something
+    /// is listening and terminating TLS, not the trust chain (§9.5 covers that part).
+    #[tokio::test]
+    async fn a_tls_listener_really_serves_https() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = crate::config::store::load_or_create(&path).unwrap().config;
+        let mut settings = settings("127.0.0.1:0", "correct-horse");
+        settings.config = config;
+        settings.config_path = path.clone();
+        settings.tls = Some(TlsFiles::Generated);
+        let addr = start(settings).await.expect("a loopback bind needs no token, with TLS or without");
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("a test client");
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.get(format!("https://{addr}/?token=correct-horse")).send(),
+        )
+        .await
+        .expect("the TLS listener must answer inside the patience window")
+        .expect("the TLS listener must be there to answer");
+        assert_eq!(response.status().as_u16(), 200, "a TLS listener serves the same pages as the plain one");
+        assert_eq!(
+            response.headers().get("referrer-policy").and_then(|v| v.to_str().ok()),
+            Some("no-referrer"),
+            "and carries the same page headers"
+        );
+        assert!(path.with_file_name("serve-cert.pem").exists(), "the generated pair sits beside the config");
     }
 
     #[tokio::test]
