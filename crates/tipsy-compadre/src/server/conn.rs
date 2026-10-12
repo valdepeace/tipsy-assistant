@@ -660,7 +660,22 @@ async fn pump(socket: &mut WebSocket, session: &mut PtySession) -> Option<u32> {
                         Ok(message) => (message.bytes(), message.resize()),
                         // A malformed message is a bug in the page, not a reason to end a session
                         // someone may be talking to: ignore it and keep the socket open.
-                        Err(_) => (None, None),
+                        //
+                        // **And say so.** This arm is the one place on this route where a dropped
+                        // frame leaves no trace at all: the screen simply stops responding, the
+                        // socket stays open, and a reader had nothing to go on but a terminal that
+                        // did not answer. The error names the shape and `bytes` names the size; the
+                        // frame's own text is deliberately **not** logged, exactly as the protocol
+                        // socket's unparseable-text arm does not log it — a payload is not something
+                        // this project prints.
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                bytes = text.len(),
+                                "a terminal text frame that is not a page message"
+                            );
+                            (None, None)
+                        }
                     };
                     if let Some(bytes) = bytes {
                         // A closed writer task is the PTY's input being gone, not the socket's.
@@ -673,6 +688,13 @@ async fn pump(socket: &mut WebSocket, session: &mut PtySession) -> Option<u32> {
                 // The page's `tipsterm-hello-pad` frame, and nothing else, is binary. It exists so a
                 // browser can observe that its own socket is really open at the server; it is not data
                 // for the child's stdin, and writing it there would type 256 characters into the TUI.
+                //
+                // **This is the arm the page's own `onopen` lands on, and it has to be.** The page
+                // sends `new TextEncoder().encode(…)`, which is a `Uint8Array` and therefore a
+                // **binary** frame; the same string sent bare would be a text frame, which this route
+                // drops as unparseable JSON — a pad that never reached the PTY by accident rather than
+                // by this arm. The integration test sends the page's own bytes here for the same
+                // reason: a shape the page does not send is not a shape this route pins.
                 Some(Ok(Message::Binary(_padding))) => {}
                 // A close frame or a transport error: the tab is gone.
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -768,12 +790,17 @@ impl ResizeDebounce {
 
 /// The three control messages the page sends, spelled exactly as `web/terminal/index.html` writes
 /// them (Task 2.4). Everything else on this socket is binary and comes from the PTY.
+///
+/// **There is no `Hello` variant, and its absence is deliberate.** An earlier shape of this enum had
+/// one, on the belief that the page's opening padding frame might be spelled as JSON — but the page's
+/// opening frame is the 256-byte **binary** padding message (the wire table's own row), this route
+/// ignores binary frames without parsing them, and so no frame any page sends could ever have produced
+/// a `Hello`. A variant whose only producer was its own unit test is a wire shape that does not exist,
+/// which is the one thing this phase's terminal route may not have: the padded frame is sent as bytes
+/// and every JSON shape here is one the page actually writes.
 #[derive(serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TerminalClientMessage {
-    /// The page's opening frame, sent as the 256-byte binary padding message rather than as JSON; the
-    /// variant exists so an older page that spells it in text is read rather than treated as garbage.
-    Hello,
     /// `onData`: escape sequences and UTF-8 text, written to the PTY as UTF-8 bytes.
     Data { data: String },
     /// `onBinary`: one byte per JS `charCode`, mouse reports among them. Research note §6.4 is
@@ -791,7 +818,7 @@ impl TerminalClientMessage {
         match self {
             Self::Data { data } => Some(data.as_bytes().to_vec()),
             Self::Mouse { data } => Some(data.chars().map(|c| c as u32 as u8).collect()),
-            Self::Hello | Self::Resize { .. } => None,
+            Self::Resize { .. } => None,
         }
     }
 
@@ -1625,9 +1652,15 @@ mod tests {
         assert_eq!(resize.bytes(), None, "a resize writes nothing to the PTY");
         assert_eq!(resize.resize(), Some((100, 24)));
 
-        let hello: TerminalClientMessage = serde_json::from_str(r#"{"type":"hello"}"#).unwrap();
-        assert_eq!(hello.bytes(), None);
-        assert_eq!(hello.resize(), None);
+        // **`hello` is not one of the page's shapes, and the enum no longer has a variant for it.**
+        // The page's opening frame is the 256-byte *binary* padding message, which this route ignores
+        // without ever parsing it, so a `{"type":"hello"}` text frame is a wire shape with no producer
+        // — and a variant whose only producer is the unit test below is exactly the drift this fix
+        // wave closed. Asserted as the negative it is, rather than left out silently.
+        assert!(
+            serde_json::from_str::<TerminalClientMessage>(r#"{"type":"hello"}"#).is_err(),
+            "no frame the page sends spells `hello`, so the enum must not accept one"
+        );
 
         // Anything else is the page's bug, and the pump's answer to it is to ignore it rather than to
         // end a session somebody may be talking to.
@@ -1689,8 +1722,13 @@ mod tests {
         // swallows every key.
         "term.focus()",
         "tabindex=\"0\"",
-        // The padding frame Task 2.2's wire table names, and the three messages the page sends.
-        "tipsterm-hello-pad",
+        // The padding frame Task 2.2's wire table names, pinned as the **whole expression** the page
+        // writes, because here the encoding *is* the frame's type: `TextEncoder().encode(…)` yields a
+        // `Uint8Array`, and `ws.send` sends that as a **binary** frame, where the bare string it
+        // replaced was sent as a **text** frame and arrived on the route's unparseable-JSON arm
+        // instead of the binary arm that ignores it. The entry used to be `"tipsterm-hello-pad"`,
+        // which both spellings satisfy — so it pinned the bytes and not the shape.
+        "new TextEncoder().encode(\"tipsterm-hello-pad\".padEnd(256, \"-\"))",
         "{ type: \"data\", data }",
         "{ type: \"mouse\", data }",
         "{ type: \"resize\", cols, rows }",

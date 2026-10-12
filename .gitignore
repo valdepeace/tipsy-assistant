@@ -1,6 +1,9 @@
 .env
 target/
 out/
+# The wasm-bindgen output `cargo run -p xtask -- dist` writes: a build artifact, never committed.
+# Root-anchored on purpose, so a `git add -A` can never commit a wasm bundle.
+/web/dist/
 .venv/
 __pycache__/
 *.log

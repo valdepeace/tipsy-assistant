@@ -64,7 +64,7 @@ and adds only the messages a *remote* client needs and cannot get today.
   connection that is neither loopback nor TLS.
 - **An account system.** There is one machine owner, one token, and no users, roles or sessions
   that outlive a connection.
-- **CI, release packaging and the full `cargo xtask dist` of milestone 11.** Phase 3 builds only the
+- **CI, release packaging and the full `cargo run -p xtask -- dist` of milestone 11.** Phase 3 builds only the
   `xtask` needed to produce a bundle-embedded binary; `.github/`, artefacts and the README's
   release section stay out.
 - **A ratatui upgrade.** Ratzilla 0.3.1 needs `ratatui ^0.30.1` and the workspace is on `0.30`
@@ -82,7 +82,7 @@ should check has been paid.
 | W2 | **The server generates a self-signed certificate on first use** (`rcgen`), stored in the config directory, and `--tls-cert`/`--tls-key` override it with a pair the user supplies | Generating nothing and accepting only a user-supplied pair (works with `mkcert`) | The browser will not treat an untrusted self-signed certificate as a secure context, so **generating one does not by itself unlock `getUserMedia`** for a browser on another machine (§9.5 records the evidence and the unverified part). The feature is therefore documented as *confidentiality* — it encrypts the token and the API keys a remote client sends — and the microphone-from-another-device case is documented as needing a certificate the browser already trusts |
 | W3 | **The configuration travels over the wire**: `GetConfig`, `UpdateConfig`, `SetKey` and `Event::Config`, with a `ConfigView` that redacts API keys and carries the real `server.token` only to a client that already presented it | Keeping the configuration screen native-only, so `--connect` and the web client hide `F9` and point at the server machine | The configuration screen stops being a native-only feature and its save path moves behind the protocol, which is the largest single chunk of Phase 1. It also needs §9.4's rule — `SetKey` over loopback or TLS only — or an API key would cross a plaintext LAN socket, breaking the v1 spec §11 promise |
 | W4 | **`Event::ProfileChanged` and `Event::ConfigChanged` exist**, broadcast to every connected session, as the v1 spec §4.2 and §5.4 promise | Re-sending `Welcome` to every session on a change, which needs no new variants | Two more protocol variants and their HUD handling; every session that receives `ConfigChanged` must re-derive what it shows, and the browser clients must not drop the event on the floor |
-| W5 | **xterm.js is fetched at build time** by `cargo xtask dist` from the npm registry, at a pinned version, with a **sha256 pinned in the source** and verified before the files enter the bundle | Vendoring the prebuilt files into the repository, or loading them from a CDN | The build needs the network once per clean checkout, and the plan must obtain and record the real hash rather than invent one. In exchange the executable stays self-contained and the committed tree grows by no third-party JavaScript |
+| W5 | **xterm.js is fetched at build time** by `cargo run -p xtask -- dist` from the npm registry, at a pinned version, with a **sha256 pinned in the source** and verified before the files enter the bundle | Vendoring the prebuilt files into the repository, or loading them from a CDN | The build needs the network once per clean checkout, and the plan must obtain and record the real hash rather than invent one. In exchange the executable stays self-contained and the committed tree grows by no third-party JavaScript |
 | W6 | **There is no new `Transport` trait.** The in-process channel is the protocol, so a socket peer is a *bridge* that produces or consumes the same `SessionEnds` the client already uses | Introducing a trait the client drives, and refactoring `client.rs`'s loop onto it | Two bridge modules instead of one abstraction, and `SessionEnds`' fields stay `pub` as they are. The gain is that `client.rs`'s 33 ms poll loop is untouched and the native path is unchanged by construction |
 | W7 | **`Hello` becomes real**: every client sends it first, and the session validates the protocol version and, when the server is exposed, the token | Leaving `Hello` ignored, as `session.rs:353` does today | `session.rs:353`'s `Command::Hello { .. } => {}` arm becomes the only place a connection can be refused, so it needs its own tests for the three refusals (bad version, bad token, missing token on a LAN bind) |
 | W8 | **The token is 128 bits of OS entropy as 32 lowercase hex characters, and a first-run generation is owed** — generated again only by the Server tab's Regenerate row | Leaving it 16 bytes and generating it only from the screen, which is what the code does today | The v1 spec §11 and `architecture.md:158` both promise "generated on first run" while the example file's comment (`spec:250`) says "empty until the Server tab generates one". **The size half landed** (16 bytes, 32 hex characters, `TOKEN_BYTES`); **the generation half did not**, and the whole-branch review found the documents claiming it did: `load_or_create` writes an empty token and `new_token`'s only caller is the Regenerate row. Ruled: the documents are corrected and "generate a first-run token and show it once — without putting it in a log" is a release-checklist item, not work for this phase |
@@ -102,7 +102,7 @@ should check has been paid.
 | `crates/tipsy-compadre/src/client/pty.rs` | module | The PTY that owns a web terminal's child process |
 | `crates/tipsy-protocol/src/lib.rs` | modify | W3's commands and `ConfigView`, W4's two events. Nothing else changes shape |
 | `crates/tipsy-web/` | new cdylib | The WASM client: Ratzilla backend, `web-sys` WebSocket, browser audio |
-| `xtask/` | new bin | `cargo xtask dist`: fetch xterm.js, build `tipsy-web`, build the binary that embeds `web/` |
+| `xtask/` | new bin | `cargo run -p xtask -- dist`: fetch xterm.js, build `tipsy-web`, build the binary that embeds `web/` |
 | `web/` | assets | `client/index.html`, `terminal/index.html`, `vendor/` (fetched, git-ignored except its README) |
 
 `tipsy-protocol` and `tipsy-ui` keep their rules: no `tokio`, `cpal`, `rodio`, `keyring`,
@@ -287,7 +287,7 @@ pages may not.
 
 `rust-embed`'s `#[allow_missing = true]` is what makes the optional bundle work: with the directory
 absent the embed is empty and the lookup returns `None`, so **no `build.rs` gate is needed** and
-§5.3's two page routes fall back to a page that says which command builds it (`cargo xtask dist`).
+§5.3's two page routes fall back to a page that says which command builds it (`cargo run -p xtask -- dist`).
 
 `Welcome.web_bundle` stops being the hard-coded `false` of `session.rs:249` and becomes the truth for
 the running binary. `UiState` gains the flag — today `state.rs:291` destructures `Welcome` with `..`
@@ -457,7 +457,7 @@ quoting `pet/src/core/pet-audio.ts:10-12`). Applied here:
 
 ### 8.3 The build
 
-`cargo xtask dist`, in this order: fetch and verify xterm.js (W5), `cargo build --target
+`cargo run -p xtask -- dist`, in this order: fetch and verify xterm.js (W5), `cargo build --target
 wasm32-unknown-unknown -p tipsy-web --release`, `wasm-bindgen --target web` (CLI version pinned to
 the locked crate, because a schema mismatch is enforced), then the host binary with `web/` embedded.
 `wasm-pack` and `trunk` are not used: `trunk` has no library API and could not be driven from an
@@ -602,7 +602,7 @@ and `CARGO_TARGET_DIR` off the `G:` default, for the reasons the ledger records.
 | `crates/tipsy-ui/src/state.rs` | `web_bundle`, `ProfileChanged`, `ConfigChanged` |
 | `crates/tipsy-ui/src/strings.rs` | The new copy, es and en |
 | `crates/tipsy-web/` | New crate: the Ratzilla backend, `web-sys` WebSocket, browser audio |
-| `xtask/` | New crate: `cargo xtask dist` |
+| `xtask/` | New crate: `cargo run -p xtask -- dist` |
 | `web/client/index.html`, `web/terminal/index.html`, `web/vendor/README.md` | New assets |
 | `docs/architecture.md` | W1's `axum` claim becomes true and stays; W2's certificate paragraph; W8's token; W10's PTY child; the crate table gains `tipsy-web` and `xtask` |
 | `README.md` | `serve` and `--connect` instructions; the TLS and microphone truth; what to do without a bundle |
@@ -629,7 +629,7 @@ and `CARGO_TARGET_DIR` off the `G:` default, for the reasons the ledger records.
    `ListenStart` (`tipsy-ui/src/state.rs:412-422`) and the client's `starts_turn` answers `false` for
    it (`client.rs:632`), so **the native client does not flush on that key** — the browser mirrors the
    code, because terminal first means the code is the truth and the spec is the aspiration; the
-   `tracing`/`--verbose` pair arrives here rather than in milestone 11 (W12); `cargo xtask dist`
+   `tracing`/`--verbose` pair arrives here rather than in milestone 11 (W12); `cargo run -p xtask -- dist`
    arrives here in the minimal form of §8.3 rather than the release form of milestone 11; and the
    glyph-width hazard §8.1 used to carry was **withdrawn after measurement** — the spike found one
    column per glyph and a structural reason for it — while Ratzilla's other DOM-backend issues (#186,

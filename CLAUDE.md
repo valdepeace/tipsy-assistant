@@ -83,7 +83,26 @@ clippy at the same seven pre-existing findings, wasm clean. Its ledger is
 beside it in `global-constraints.md`. **Read the two review reports in that same directory**
 (`review-phase-1-security.md`, `review-phase-1-correctness.md`) — not
 `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`, which the ledger records as superseded and
-wrong in three ways. Phases 2 and 3 have not started.
+wrong in three ways.
+
+**Phase 2 of that plan — the web terminal — is complete on branch `web-tier-phase-2`, head `e93b193`,
+and is not yet merged.** Four commits on a branch cut from `master` at `a548cea`: `f548207` (a
+terminal's child in a real pty, `client/pty.rs` over `portable-pty` 0.9.0),
+`ba2387c` (the raw-bytes socket and the pump), `59e211d` (the xtask fetch, verify and extract of the
+pinned xterm.js) and `e93b193` (the page, `/terminal` served end to end, and the embed it lives in). It
+was **reviewed once as a whole phase** — no blockers, five findings and seven nits, all closed in one
+fix wave: the page now sends its 256-byte padding frame as a **binary** frame, which is the shape the
+route ignores and the shape the test always sent (the string it used to send was a *text* frame, so
+the route's binary branch was production-dead and `TerminalClientMessage::Hello` was never sent at
+all — it is removed); the ledger and this file no longer say the phase has not started; the plan's
+Task 3.6 no longer lists the phantom `web/vendor/xterm.js`, which made its bundle permanently
+"incomplete"; `xtask dist` resolves `web/vendor/` from the crate's own location instead of the
+shell's, so running it from another directory no longer reports success into a directory nothing
+reads; and the fetched files are now checked against the extracted sha256 `web/vendor/README.md`
+records, so "already fetched and verified" is true rather than an existence check. It closes at
+**542 entries / 540 distinct, 0 failures** (from the phase's own **514/512** baseline), clippy at
+exactly the seven, wasm clean. Its record is the same ledger, whose Task 2.1 section now exists and
+whose Task 2.4 section carries the live check. **Phase 3 has not started.**
 
 **The client's files are split, and the client's decision policy is shared** — spec
 `docs/superpowers/specs/2026-10-12-client-modularity-design.md`. **Merged into `master` at `0de11e0`**
@@ -109,10 +128,12 @@ lines" target for `client.rs` was wrong and is not met**: the four moves shed 48
 the ~730 its arithmetic assumed, because `client.rs` keeps `frame_loop`, `on_message`, `on_action`
 (both settings arms included), `key_input` and `clock_view`. `session.rs` was **not** split — that task
 was dropped deliberately (nothing outside the server needs it) — and `key_input` and `clock_view`
-deliberately did **not** move, because `tipsy-ui` may never gain `crossterm`. **What Phase 2 and
-Phase 3 still owe: every `file:line` the web-tier plan and its tasks carry for `client.rs` is stale —
-the line is in `client/settings.rs`, `client/call.rs`, `client/mic.rs` or `client/audio.rs` now — and
-must be re-measured rather than trusted.** The tree is stable, so one re-measurement holds.
+deliberately did **not** move, because `tipsy-ui` may never gain `crossterm`. **What Phase 3 still
+owes: every `file:line` the web-tier plan and its tasks carry for `client.rs` is stale — the line is in
+`client/settings.rs`, `client/call.rs`, `client/mic.rs` or `client/audio.rs` now — and must be
+re-measured rather than trusted.** The tree is stable, so one re-measurement holds. (Phase 2 owed the
+same and paid it: its own tasks re-measured what they touched, and the ledger records each drift it
+found with the tree's truth beside it.)
 
 **Both throwaway spikes are done, and the second one shapes `hands_free`.** They live in scratch
 directories outside the repo and nothing of them is committed. **Ratzilla: PASS on all four gate

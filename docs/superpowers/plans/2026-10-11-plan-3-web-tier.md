@@ -199,7 +199,7 @@ web/
 ├── client/mic-worklet.js                 NEW (3.3): the AudioWorkletProcessor, which must be a real file
 ├── terminal/index.html                   NEW (2.4): the xterm.js page
 ├── vendor/README.md                      NEW (2.3): what the build fetches, from where, under what licence
-└── dist/                                 GENERATED (3.6): wasm-bindgen's `--out-dir`, git-ignored, what rust-embed reads
+└── dist/                                 GENERATED (3.6): wasm-bindgen's `--out-dir`, git-ignored, a subdirectory of the `web/` the embed reads
 ```
 
 **Two files have more than one owner and the plan says so rather than leaving it to be discovered.**
@@ -321,7 +321,7 @@ Bodies follow this index in order. Each body carries its own `Files` and `Interf
   - Task 3.3: The browser microphone `[mid]`
   - Task 3.4: Playback, the jitter buffer and barge-in `[mid]`
   - Task 3.5: The HUD glue, Ratzilla's input and the host page `[mid]`
-  - Task 3.6: `cargo xtask dist` and the flag that turns true `[small]`
+  - Task 3.6: `cargo run -p xtask -- dist` and the flag that turns true `[small]`
   - Task 3.7: The login door in the browser — the engine, not the screen `[mid]` *(added after the login plan landed on `master`: the login spec's §13 names it as one of the two things Plan 3 owes that feature, and no earlier task covers it)*
 
 ---
@@ -3351,7 +3351,7 @@ Task 1.4 does not create `server/tls.rs`: 1.8 adds that file with the loading th
 **`resolve` and `fallback` are not the names an earlier draft of this task pinned, and the change is deliberate.** Task 1.4 could not compile without a `server/assets.rs` — its router and its six tests call `assets::resolve(path) -> Option<(&'static str, Vec<u8>)>` and `assets::fallback() -> (&'static str, Vec<u8>)`, and `server/mod.rs`'s `page_of`/`page_response` are the callers — so Task 1.4 created that file as a loudly-commented placeholder with exactly those two signatures and registered `/` and `/terminal` against them. **Fill those two bodies; do not rename them** to the `page`/`page_missing` this document used to say, because a rename breaks Task 1.4's six tests. `asset`, `web_bundle`, `DIST_COMMAND`, `PAGE_CLIENT` and `PAGE_TERMINAL` are new and entirely this task's; `/assets/{*path}` is yours to register, since Task 1.4 deliberately left it out.
 
 ```rust
-pub const DIST_COMMAND: &str = "cargo xtask dist";
+pub const DIST_COMMAND: &str = "cargo run -p xtask -- dist";
 pub const PAGE_CLIENT: &str = "client/index.html";
 pub const PAGE_TERMINAL: &str = "terminal/index.html";
 pub fn resolve(path: &str) -> Option<(&'static str, Vec<u8>)>;       // bytes + content type, or None
@@ -3360,7 +3360,7 @@ pub fn asset(path: &str) -> Option<(&'static str, Vec<u8>)>;
 pub fn web_bundle() -> bool;
 ```
 
-**What this task can and cannot serve, said plainly so nobody thinks a page is missing.** The bundle's real contents do not exist yet: Phase 2's Task 2.4 fills `web/terminal/index.html` and Phase 3's Task 3.6 fills `web/client/index.html`, and `cargo xtask dist` (spec §8.3) is what puts them in the embed. Until then `web/` is absent, the embed is empty, and **both** page routes answer the explanation page that names `cargo xtask dist` — which is exactly the behaviour spec §10's "The bundle is not embedded" row requires and spec §5.4 describes, not a shortfall. `rust-embed`'s `#[allow_missing = true]` is the whole mechanism; quote of the crate README from the research note: "You can add `#[allow_missing = true]` to the `RustEmbed` struct to allow the embedded folder to be missing. In that case, RustEmbed will be empty." (`web-transport-and-terminal.md:369-372`), and the note's conclusion: "the derivation does **not** need to be conditionally compiled away, and no `build.rs` gate is strictly required" (`:374`). The embed folder path resolves relative to `crates/tipsy-compadre/Cargo.toml` in release and relative to where the binary runs in debug (`:353-358`), which is why the tests below assert what the routes answer rather than pinning the constants.
+**What this task can and cannot serve, said plainly so nobody thinks a page is missing.** The bundle's real contents do not exist yet: Phase 2's Task 2.4 fills `web/terminal/index.html` and Phase 3's Task 3.6 fills `web/client/index.html`, and `cargo run -p xtask -- dist` (spec §8.3) is what puts them in the embed. Until then `web/` is absent, the embed is empty, and **both** page routes answer the explanation page that names `cargo run -p xtask -- dist` — which is exactly the behaviour spec §10's "The bundle is not embedded" row requires and spec §5.4 describes, not a shortfall. `rust-embed`'s `#[allow_missing = true]` is the whole mechanism; quote of the crate README from the research note: "You can add `#[allow_missing = true]` to the `RustEmbed` struct to allow the embedded folder to be missing. In that case, RustEmbed will be empty." (`web-transport-and-terminal.md:369-372`), and the note's conclusion: "the derivation does **not** need to be conditionally compiled away, and no `build.rs` gate is strictly required" (`:374`). The embed folder path resolves relative to `crates/tipsy-compadre/Cargo.toml` in release and relative to where the binary runs in debug (`:353-358`), which is why the tests below assert what the routes answer rather than pinning the constants.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3395,7 +3395,7 @@ mod tests {
 
     /// With the folder absent, `web_bundle()` is `false`, which is what `Welcome.web_bundle`
     /// reports and what the HUD's message is for (spec §5.4). The assertion is the property, so it
-    /// holds in a `cargo xtask dist` tree too.
+    /// holds in a `cargo run -p xtask -- dist` tree too.
     #[test]
     fn the_bundle_flag_agrees_with_the_embed() {
         assert_eq!(web_bundle(), embedding(PAGE_CLIENT).is_some_and(|bytes| !bytes.is_empty()));
@@ -3499,14 +3499,25 @@ Expected: FAIL to compile with `error[E0609]: no field web_bundle on type UiStat
 
 use rust_embed::RustEmbed;
 
-/// What `cargo xtask dist` produces. Hashed filenames may be cached; the two pages may not.
+/// What `cargo run -p xtask -- dist` produces. Hashed filenames may be cached; the two pages may not.
+///
+/// **`../../web/` and not `web/dist/`, and the difference is the whole bundle.** `rust-embed` bases a
+/// *relative* `folder` on `CARGO_MANIFEST_DIR` (`rust-embed-impl` 8.13.0, `src/lib.rs:466-471`), so
+/// `"web/dist/"` names `crates/tipsy-compadre/web/dist/` — a directory no task builds. The embed reads
+/// the repository's own `web/`, which is where the pages (`terminal/index.html`,
+/// `client/index.html`), the vendored `vendor/` and the generated `dist/` all live; Task 3.6's
+/// `--out-dir web/dist` writes *inside* that folder rather than standing in for it. Task 2.4's ledger
+/// records the measurement that settled it, and the tree's `assets.rs` carries this spelling.
 #[derive(RustEmbed)]
-#[folder = "web/dist/"]
+#[folder = "../../web/"]
 #[allow_missing = true]
 struct Bundle;
 
-/// What a user runs to build the bundle this binary does not carry.
-pub const DIST_COMMAND: &str = "cargo xtask dist";
+/// What a user runs to build the bundle this binary does not carry. **`cargo run -p xtask -- dist`, and
+/// never the short `cargo xtask dist`**: cargo resolves `cargo <name>` by looking for a `cargo-<name>`
+/// binary on `PATH`, so the short form answers ``error: no such command: `xtask` `` — and this constant
+/// is rendered by the missing-bundle page, the one moment the command has to be right.
+pub const DIST_COMMAND: &str = "cargo run -p xtask -- dist";
 
 /// The web client's host page. Phase 3's Task 3.6 fills it.
 pub const PAGE_CLIENT: &str = "client/index.html";
@@ -3517,7 +3528,7 @@ const HTML: &str = "text/html; charset=utf-8";
 const OCTET: &str = "application/octet-stream";
 
 /// Whether this binary carries a bundle at all — the truth `Welcome.web_bundle` reports
-/// (spec §5.4), so a plain `cargo build` and a `cargo xtask dist` differ.
+/// (spec §5.4), so a plain `cargo build` and a `cargo run -p xtask -- dist` differ.
 pub fn web_bundle() -> bool {
     embedding(PAGE_CLIENT).is_some_and(|bytes| !bytes.is_empty())
 }
@@ -3616,7 +3627,7 @@ Then `welcome` in `crates/tipsy-compadre/src/session.rs:241-258` stops lying abo
                 ui_language: self.ui_language,
                 listening_mode: self.listening_mode,
                 // The truth for the binary that is running, not the constant `false` this used to
-                // be: `cargo xtask dist` embeds the bundle and a plain `cargo build` does not
+                // be: `cargo run -p xtask -- dist` embeds the bundle and a plain `cargo build` does not
                 // (spec §5.4; `architecture.md:83-86`).
                 web_bundle: crate::server::assets::web_bundle(),
                 login: None,
@@ -6928,7 +6939,7 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   the URL; both pages therefore answer with `Referrer-Policy: no-referrer` and `Cache-Control:
   no-store`, so the token is not in a `Referer` and not in a cache.
 - `/` is the web client and `/terminal` the web terminal. A plain `cargo build` embeds no bundle:
-  both routes then answer with a page that says to build it with `cargo xtask dist`.
+  both routes then answer with a page that says to build it with `cargo run -p xtask -- dist`.
 - `--connect` runs the TUI and nothing else: it starts no server, builds no provider and reads no
   API key, because every provider call happens in the server process.
 - `--verbose` also writes the log to stderr. The log file is `tipsy-compadre.log`, beside
@@ -6957,7 +6968,7 @@ address — through `--tls-cert`/`--tls-key`.
 | `tipsy-ui` | library | The ratatui HUD: widgets, state and es/en strings, backend-agnostic | yes |
 | `tipsy-web` | `.wasm` bundle | Web client: Ratzilla backend, browser audio, WebSocket transport | yes (target) — **arrives in Phase 3 of `2026-10-11-plan-3-web-tier.md`; it does not exist yet** |
 | `tipsy-compadre` | **binary** | The server (brain, providers, config, axum, the WebSocket door) plus the native TUI client | no |
-| `xtask` | binary | `cargo xtask dist`: fetch and verify xterm.js, build the bundle, build the binary that embeds it — **arrives in Phase 2 of the same plan** | no |
+| `xtask` | binary | `cargo run -p xtask -- dist`: fetch and verify xterm.js, build the bundle, build the binary that embeds it — **arrives in Phase 2 of the same plan** | no |
 
 <!-- docs/architecture.md:80-90 (the build paragraph): one sentence on what is true today, and one on
      the cost of the stack the plan chose. -->
@@ -6965,7 +6976,7 @@ The server's HTTP and WebSocket layer is `axum` 0.8.9 with its `ws` feature, and
 `axum-server` 0.8.0 (`tls-rustls`). One consequence is worth writing down rather than discovering:
 `axum` pins `tokio-tungstenite` **0.29** while the native `--connect` client keeps **0.30**, so two
 copies of `tungstenite` are compiled into the one executable (spec W1). A full `cargo build` today
-produces a binary with no web bundle; the web client is served once `cargo xtask dist` has built it,
+produces a binary with no web bundle; the web client is served once `cargo run -p xtask -- dist` has built it,
 and until then `/` and `/terminal` answer with the page that says so.
 
 <!-- docs/architecture.md:153-164 (security): the token and the TLS paragraph. -->
@@ -8846,7 +8857,7 @@ pub fn have_assets(vendor: &std::path::Path) -> Result<(), String>;
 /// JavaScript (spec §2 W5).
 pub fn fetch(component: &Component, vendor: &std::path::Path) -> Result<(), String>;
 
-/// The one job `cargo xtask dist` starts with, before the wasm build and the embedding (spec §8.3).
+/// The one job `cargo run -p xtask -- dist` starts with, before the wasm build and the embedding (spec §8.3).
 pub fn fetch_all(vendor: &std::path::Path) -> Result<(), String>;
 
 /// Every `url(...)` the fetched CSS names, so the extraction step can be checked against it.
@@ -9073,7 +9084,7 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
         None => {
-            eprintln!("xtask: which task? `cargo xtask dist`");
+            eprintln!("xtask: which task? `cargo run -p xtask -- dist`");
             ExitCode::FAILURE
         }
     }
@@ -9358,7 +9369,7 @@ pub fn css_references(css: &str) -> Vec<String> {
 # Vendored browser assets
 
 Nothing in this directory is committed (`.gitignore` ignores `web/vendor/`); it is fetched by
-`cargo xtask dist` and embedded into the binary by `rust-embed`. This file is the record of what the
+`cargo run -p xtask -- dist` and embedded into the binary by `rust-embed`. This file is the record of what the
 build downloads, from where, and under what licence.
 
 | Package | Version | Fetched from | sha256 | Licence |
@@ -9419,7 +9430,7 @@ $env:TEMP="$PWD\.target-sandbox\tmp"; $env:TMP=$env:TEMP; $env:CARGO_TARGET_DIR=
 git add xtask/Cargo.toml xtask/src/main.rs xtask/src/assets.rs web/vendor/README.md Cargo.toml .gitignore
 git commit -m "feat(xtask): fetch and verify the browser assets xterm.js needs
 
-cargo xtask dist now begins by downloading the pinned @xterm/xterm 6.0.0 and
+cargo run -p xtask -- dist now begins by downloading the pinned @xterm/xterm 6.0.0 and
 @xterm/addon-fit 0.11.0 tarballs from the npm registry, checking each against a
 sha256 recorded in the source, and extracting only the two files the terminal
 page loads plus the CSS, which is a separate file in the package. A hash
@@ -9480,7 +9491,7 @@ mod tests {
         let Some((bytes, content_type)) = crate::server::assets::asset("terminal/index.html") else {
             // The bundle is optional by design (`rust-embed`'s `#[allow_missing]`), and a test that
             // demands it would make a plain `cargo test` a lie on a checkout that has not run
-            // `cargo xtask dist`. The page's own assertions are skipped, and the fallback page's
+            // `cargo run -p xtask -- dist`. The page's own assertions are skipped, and the fallback page's
             // behaviour is Task 1.5's test.
             eprintln!("terminal/index.html is not embedded in this build; skipping the page assertions");
             return;
@@ -9520,12 +9531,12 @@ mod tests {
 
     /// Every asset the page references has to resolve inside the bundle: a page that points at a file
     /// the fetch never kept is a blank screen with a 404 in the console. The gate is on the page
-    /// itself and it happens once — a checkout that has not run `cargo xtask dist` skips, and a
+    /// itself and it happens once — a checkout that has not run `cargo run -p xtask -- dist` skips, and a
     /// checkout that has a page but not its assets **fails**, which is the case that matters.
     #[test]
     fn every_asset_the_page_references_is_embedded() {
         let Some((bytes, _)) = crate::server::assets::asset("terminal/index.html") else {
-            eprintln!("no web bundle in this build; run `cargo xtask dist` to check the page's assets");
+            eprintln!("no web bundle in this build; run `cargo run -p xtask -- dist` to check the page's assets");
             return;
         };
         let page = String::from_utf8(bytes).unwrap();
@@ -9564,13 +9575,13 @@ thread 'server::conn::tests::every_asset_the_page_references_is_embedded' panick
 the page must reference vendor/xterm.mjs
 ```
 
-**This task's checkout has run `cargo xtask dist` in Task 2.3, so `web/vendor/` is there and
+**This task's checkout has run `cargo run -p xtask -- dist` in Task 2.3, so `web/vendor/` is there and
 `web/terminal/index.html` is not.** The bundle is therefore *not* empty, `asset("terminal/index.html")`
 returns `None`, and the failure is the assertion above — the page is not in the embed, so nothing
 contains `vendor/xterm.mjs`.
 
 If a checkout genuinely has no `web/vendor/` either, `asset("terminal/index.html")` is `None` and the
-test prints `no web bundle in this build; run \`cargo xtask dist\` to check the page's assets` and
+test prints `no web bundle in this build; run \`cargo run -p xtask -- dist\` to check the page's assets` and
 passes — which proves nothing. Run `cargo run -p xtask -- dist` first, and only then read the failure.
 
 - [ ] **Step 3: Write the page, and correct the document**
@@ -9636,8 +9647,18 @@ passes — which proves nothing. Run `cargo run -p xtask -- dist` first, and onl
 
     ws.onopen = () => {
       // The first frame tells the server this connection is real; a browser cannot ask whether its
-      // own socket is open at the other end. The payload is a padding frame and nothing else.
-      ws.send("tipsterm-hello-pad-".repeat(16));
+      // own socket is open at the other end. The payload is a padding frame and nothing else: it is
+      // **exactly 256 ASCII bytes** — the wire table's own number, where this body's first draft said
+      // `"tipsterm-hello-pad-".repeat(16)`, which is 304 (19 bytes a copy, not 256) — and it goes as a
+      // **binary** frame.
+      //
+      // **`new TextEncoder().encode(…)` and not the bare string, and that one call is the whole
+      // frame's type.** `WebSocket.send` sends a *string* as a **text** frame: as a string this frame
+      // arrived on the route's unparseable-JSON arm, which drops it, instead of the binary arm that
+      // ignores it — so the route's binary branch was production-dead code and the test that exists to
+      // pin "the pad never reaches the TUI" was sending a shape this page never sent. The wire table
+      // above spells this frame **Binary**; this is what that means in JavaScript.
+      ws.send(new TextEncoder().encode("tipsterm-hello-pad".padEnd(256, "-")));
     };
 
     ws.onmessage = (event) => {
@@ -9895,7 +9916,7 @@ So this task's deliverable is **a verdict, not code you keep**.
   - **A recorded PASS/FAIL verdict** in `progress.md`, in the exact form of Step 8, naming the
     backend, the Ratzilla version, and the open-issue numbers that remain a risk.
   - `wasm32-unknown-unknown` installed for the pinned 1.96.1 toolchain, and `wasm-bindgen-cli` 0.2.129
-    on `PATH`. Both are prerequisites of 3.2's wasm compile and 3.6's `cargo xtask dist` (§8.3).
+    on `PATH`. Both are prerequisites of 3.2's wasm compile and 3.6's `cargo run -p xtask -- dist` (§8.3).
   - The build route 3.2 and 3.6 copy verbatim:
     `cargo build -j 1 --target wasm32-unknown-unknown -p <crate> --release` then
     `wasm-bindgen --target web --out-dir <dir> <crate>.wasm`.
@@ -13106,9 +13127,9 @@ Expected: the finding set of `.superpowers/sdd/2026-10-11-plan-3-web-tier/global
 
 - [ ] **Step 8: Manual check — the audible half (recorded here, run after Task 3.6)**
 
-There is no browser in this harness and no test above pretends there is one. This check needs the built bundle, which is Task 3.6's `cargo xtask dist`; it is written here because the playback path is this task's deliverable. Run it once 3.6's first `dist` has passed, and record the outcome in the ledger.
+There is no browser in this harness and no test above pretends there is one. This check needs the built bundle, which is Task 3.6's `cargo run -p xtask -- dist`; it is written here because the playback path is this task's deliverable. Run it once 3.6's first `dist` has passed, and record the outcome in the ledger.
 
-1. `cargo xtask dist`, then start the server: `cargo run --release -p tipsy-compadre -- serve` (or the release binary `target/release/tipsy-compadre.exe serve`).
+1. `cargo run -p xtask -- dist`, then start the server: `cargo run --release -p tipsy-compadre -- serve` (or the release binary `target/release/tipsy-compadre.exe serve`).
 2. Open `http://127.0.0.1:7070/` in Chrome or Firefox on this machine, click **press to start**, grant the microphone.
 3. Type `hola, ¿qué tal?` and press `Enter`.
    **Expected:** the reply is audible and **gapless** — sentences follow one another with no silence between them and no stutter at the join, which is what the cursor is for. If the sentences overlap or the reply sounds like one burst, `at` collapsed to `now` (Step 3's `max`); if the *first* word is clipped, the cushion is not being applied.
@@ -13795,7 +13816,7 @@ There is no browser in this harness, so this is a documented check with exact ob
 
 **After Task 3.6's `dist`:**
 
-3. `cargo xtask dist`, then `target/release/tipsy-compadre.exe serve`, then open `http://127.0.0.1:7070/`.
+3. `cargo run -p xtask -- dist`, then `target/release/tipsy-compadre.exe serve`, then open `http://127.0.0.1:7070/`.
    **Expected:** the same gate screen; the console has no errors and one `tipsy_web_bg.wasm` request answering 200 with `application/wasm`.
 4. Click **press to start** and grant the microphone.
    **Expected:** the overlay disappears; the header shows `◉ EL COMPAE` (the profile's title), the mode word (`push` by default) and the red `ESCUCHANDO` status once the mic is open; the three rings rotate and pulse, and the oscilloscope draws a cyan wave.
@@ -13832,7 +13853,7 @@ the press-to-start gate and the bundle's entry.
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
 
-### Task 3.6: `cargo xtask dist` and the flag that turns true `[small]`
+### Task 3.6: `cargo run -p xtask -- dist` and the flag that turns true `[small]`
 
 **Files:**
 - Create: `xtask/src/dist.rs` (the four steps, the version pin and the asset check), with its own `#[cfg(test)] mod tests`
@@ -13851,21 +13872,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 1. `xtask/src/main.rs` (Task 2.3's): the subcommand dispatch and the name of its fetch-and-verify entry point. This task calls that function first and does not re-implement the fetch or the hash: the pinned xterm.js version and its sha256 are Task 2.3's and are never invented here.
 2. `crates/tipsy-compadre/src/server/assets.rs` (Task 1.5's): the folder its `#[derive(Embed)]` covers, and the path `asset()` takes. **This task's output directory, the page's import path and the embed must be one directory.** The body below writes `web/dist/` and `/assets/dist/…`; if 1.5 chose another name, substitute it in exactly three places — the `--out-dir`, `missing_assets`' required list, and `web/client/index.html`'s import.
-3. `.cargo/config.toml` (read today, 5 lines: `[build] target-dir = "G:/cargo-targets/tipsy-compadre/target"`, and its own comment says it "stays out of git"): there is **no** `[alias]` section, so `cargo xtask dist` cannot work yet. Add the alias locally and do not commit it:
-
-```toml
-[alias]
-xtask = "run --package xtask --"
-```
-
-The README below therefore documents `cargo xtask dist` (the spec's own spelling: `spec:76-77`, `architecture.md:84`) **and** `cargo run -p xtask -- dist` as the form that works without the alias. `.cargo/config.toml` is machine-local here (`.git/info/exclude`), so `git add` must not name it.
+3. `.cargo/config.toml` (read today, 5 lines: `[build] target-dir = "G:/cargo-targets/tipsy-compadre/target"`, and its own comment says it "stays out of git"): **there is nothing to add here, and the `[alias]` this step used to demand is gone.** `cargo xtask dist` — the short form this task's first drafts documented — cannot work on any machine that has not aliased it: cargo resolves `cargo <name>` by looking for a `cargo-<name>` binary on `PATH`, and this workspace's own binary target is not there, so it answers ``error: no such command: `xtask` ``. **Task 2.4 corrected `server/assets.rs`'s `DIST_COMMAND` to `cargo run -p xtask -- dist` for exactly that reason, and `README.md` and `docs/architecture.md` were corrected with it** (Task 2.4's ledger section, decision 2, and Task 2.3's report before it). The long form is therefore the one this task documents and the one `DIST_COMMAND` renders on the missing-bundle page. An alias would work locally but `.cargo/` is git-ignored in this checkout and never ships, so it is not a spelling any document may rely on; if you add one anyway for your own shells, `git add` must not name `.cargo/config.toml` (`.git/info/exclude` already covers it here).
 
 - [ ] **Step 2: Write the failing tests and watch them fail**
 
 Create `xtask/src/dist.rs` with the shapes, `todo!()` bodies and this test module, and add `mod dist;` plus the `dist` arm to Task 2.3's dispatch in `xtask/src/main.rs`.
 
 ```rust
-//! `cargo xtask dist`: the WebAssembly bundle first, then the binary that embeds it.
+//! `cargo run -p xtask -- dist`: the WebAssembly bundle first, then the binary that embeds it.
 //!
 //! The order is spec §8.3's, verbatim: "fetch and verify xterm.js (W5), `cargo build --target
 //! wasm32-unknown-unknown -p tipsy-web --release`, `wasm-bindgen --target web` (CLI version pinned to
@@ -13984,8 +13998,7 @@ version = "0.2.129"
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let bundle = root.join("web").join("dist");
-        std::fs::create_dir_all(bundle.join("vendor")).unwrap();
-        std::fs::write(root.join("web").join("client").join("index.html"), b"").ok();
+        std::fs::create_dir_all(&bundle).unwrap();
         std::fs::create_dir_all(root.join("web").join("client")).unwrap();
         std::fs::write(root.join("web").join("client").join("index.html"), b"").unwrap();
         std::fs::create_dir_all(root.join("web").join("terminal")).unwrap();
@@ -13993,10 +14006,26 @@ version = "0.2.129"
         std::fs::write(bundle.join("tipsy_web.js"), b"").unwrap();
         std::fs::write(bundle.join("tipsy_web_bg.wasm"), b"").unwrap();
 
-        let missing = missing_assets(root, &bundle);
-        assert_eq!(missing, vec!["vendor/xterm.js".to_string()], "the fetched asset is the one that is absent");
+        // The three files the terminal page actually loads, and the entries are the paths `REQUIRED`
+        // spells them with: `web/vendor/…` — the directory the embed reads — and `xterm.mjs`, not the
+        // `xterm.js` of the package's `"main"` that was never fetched. The old version of this test
+        // expected `vec!["vendor/xterm.js"]`, which is wrong twice over, and then wrote
+        // `web/vendor/xterm.js` into a `web/vendor/` it had never created, so it panicked on the
+        // unwrap before it could assert anything.
+        assert_eq!(
+            missing_assets(root, &bundle),
+            vec![
+                "web/vendor/xterm.mjs".to_string(),
+                "web/vendor/xterm.css".to_string(),
+                "web/vendor/addon-fit.mjs".to_string(),
+            ],
+            "the three fetched assets are the ones that are absent"
+        );
 
-        std::fs::write(root.join("web").join("vendor").join("xterm.js"), b"").unwrap();
+        std::fs::create_dir_all(root.join("web").join("vendor")).unwrap();
+        for name in ["xterm.mjs", "xterm.css", "addon-fit.mjs"] {
+            std::fs::write(root.join("web").join("vendor").join(name), b"").unwrap();
+        }
         assert!(missing_assets(root, &bundle).is_empty(), "nothing is missing once the fetch has run");
     }
 }
@@ -14070,15 +14099,23 @@ pub fn locked_wasm_bindgen(lock: &str) -> Option<String> {
     None
 }
 
-/// The pages' own assets plus the bundle's two files. `tipsy_web.js` and `tipsy_web_bg.wasm` are the
-/// names `wasm-bindgen` derives from the input file's stem — INFERRED, and `run` re-reads the directory
-/// after the command and reports a mismatch rather than trusting this list.
-pub const REQUIRED: [&str; 5] = [
+/// The pages' own assets plus the bundle's two files, and the vendored files are named **as
+/// `web/terminal/index.html` loads them**: `/assets/vendor/xterm.js` is the *package*'s `"main"`, which
+/// no task fetches — Task 2.3 pins the `"module"` build `xterm.mjs`, the separate stylesheet
+/// `xterm.css` (without it the terminal has no layout at all) and `addon-fit.mjs`. A `REQUIRED` list
+/// naming `xterm.js` made this check fail forever, and because `Step::BuildHost` refuses the host build
+/// when anything is missing, the bundle could never be called complete. `tipsy_web.js` and
+/// `tipsy_web_bg.wasm` are the names `wasm-bindgen` derives from the input file's stem — INFERRED, and
+/// `run` re-reads the directory after the command and reports a mismatch rather than trusting this
+/// list.
+pub const REQUIRED: [&str; 7] = [
     "web/client/index.html",
     "web/terminal/index.html",
     "web/dist/tipsy_web.js",
     "web/dist/tipsy_web_bg.wasm",
-    "web/vendor/xterm.js",
+    "web/vendor/xterm.mjs",
+    "web/vendor/xterm.css",
+    "web/vendor/addon-fit.mjs",
 ];
 
 pub fn missing_assets(root: &Path, _bundle: &Path) -> Vec<String> {
@@ -14206,14 +14243,15 @@ Expected: two files. **If they are not `tipsy_web.js` and `tipsy_web_bg.wasm`**,
 
 - [ ] **Step 6: Add the generated directory to `.gitignore`**
 
-`.gitignore` is 6 lines (read today: `.env`, `target/`, `out/`, `.venv/`, `__pycache__/`, `*.log`). The generated bundle is a build artifact and the fetched third-party files are Task 2.3's business — add the one line this task owns, after `out/`:
+`.gitignore` was 6 lines when this body was written (`.env`, `target/`, `out/`, `.venv/`, `__pycache__/`, `*.log`) and the phase-2 fix wave already added the rule this step owns, **root-anchored**, beside `out/` — so the work here is to confirm it rather than to add it twice:
 
 ```
-# The wasm-bindgen output `cargo xtask dist` writes: a build artifact, never committed.
-web/dist/
+# The wasm-bindgen output `cargo run -p xtask -- dist` writes: a build artifact, never committed.
+# Root-anchored on purpose, so a `git add -A` can never commit a wasm bundle.
+/web/dist/
 ```
 
-Do not touch `web/vendor/`'s rules: Task 2.3 owns them and its `README.md` is the one file under `web/vendor/` that is committed (spec §12).
+**`/web/dist/` and not `web/dist/`**, which is what this body spelled: an unanchored rule matches that path at any depth, and the whole point is that a `git add -A` cannot reach the generated bundle. Do not touch `web/vendor/`'s rules: Task 2.3 owns them and its `README.md` is the one file under `web/vendor/` that is committed (spec §12).
 
 - [ ] **Step 7: Run the whole test suite and clippy**
 
@@ -14243,10 +14281,10 @@ This needs the network once (the xterm.js fetch) and several minutes; there is n
 
 ```
 Remove-Item -Recurse -Force web\dist -ErrorAction SilentlyContinue
-$env:TEMP="$PWD\.target-sandbox\tmp"; $env:TMP=$env:TEMP; $env:CARGO_TARGET_DIR="$PWD\.target-sandbox"; cargo xtask dist
+$env:TEMP="$PWD\.target-sandbox\tmp"; $env:TMP=$env:TEMP; $env:CARGO_TARGET_DIR="$PWD\.target-sandbox"; cargo run -p xtask -- dist
 ```
 
-**Expected:** four steps, in this order: the xterm.js fetch with its hash verified (Task 2.3's own output), `cargo build --target wasm32-unknown-unknown -p tipsy-web --release`, `wasm-bindgen --target web --out-dir …`, `cargo build -p tipsy-compadre --release`. Then `web/dist/tipsy_web.js` and `web/dist/tipsy_web_bg.wasm` exist, and so does `web/vendor/xterm.js`.
+**Expected:** four steps, in this order: the xterm.js fetch with its hash verified (Task 2.3's own output), `cargo build --target wasm32-unknown-unknown -p tipsy-web --release`, `wasm-bindgen --target web --out-dir …`, `cargo build -p tipsy-compadre --release`. Then `web/dist/tipsy_web.js` and `web/dist/tipsy_web_bg.wasm` exist, and so do the three fetched files `web/vendor/xterm.mjs`, `web/vendor/xterm.css` and `web/vendor/addon-fit.mjs` — the names `REQUIRED` lists, because those are the ones `web/terminal/index.html` loads.
 
 2. **The failure this step exists for.** Delete the artifact and run the *host* build alone:
 
@@ -14255,7 +14293,7 @@ Remove-Item web\dist\tipsy_web.wasm, web\dist\tipsy_web_bg.wasm -ErrorAction Sil
 $env:CARGO_TARGET_DIR="$PWD\.target-sandbox"; cargo build -p tipsy-compadre --release
 ```
 
-**Expected:** this *succeeds* — `#[allow_missing = true]` is what makes the embed optional and no `build.rs` gate is needed ("In that case, RustEmbed will be empty", research note §2.2) — and the binary it produces is the honest no-bundle build, which is the state criterion 4 of Step 3's check describes. `dist` is the command that must refuse to get there: rerun `cargo xtask dist` with the artifact missing and confirm `ensure_wasm_built`'s message appears instead of a bundleless binary.
+**Expected:** this *succeeds* — `#[allow_missing = true]` is what makes the embed optional and no `build.rs` gate is needed ("In that case, RustEmbed will be empty", research note §2.2) — and the binary it produces is the honest no-bundle build, which is the state criterion 4 of Step 3's check describes. `dist` is the command that must refuse to get there: rerun `cargo run -p xtask -- dist` with the artifact missing and confirm `ensure_wasm_built`'s message appears instead of a bundleless binary.
 
 3. Build the plain binary and look at the page it serves:
 
@@ -14270,12 +14308,12 @@ Open `http://127.0.0.1:7070/`.
 4. The loop the plan was written to close:
 
 ```
-$env:TEMP="$PWD\.target-sandbox\tmp"; $env:TMP=$env:TEMP; $env:CARGO_TARGET_DIR="$PWD\.target-sandbox"; cargo xtask dist
+$env:TEMP="$PWD\.target-sandbox\tmp"; $env:TMP=$env:TEMP; $env:CARGO_TARGET_DIR="$PWD\.target-sandbox"; cargo run -p xtask -- dist
 & "$env:CARGO_TARGET_DIR\release\tipsy-compadre.exe" serve
 ```
 
 Open `http://127.0.0.1:7070/` in the browser and watch the first WebSocket frame in DevTools → Network → WS → Messages.
-**Expected:** `{"type":"welcome", …, "web_bundle":true, …}` and **no** "the web UI is not available in this build" anywhere in the HUD. That is the v1 spec §10 sentence ("Both bundles are embedded in the executable … when built with `cargo xtask dist`", `spec:386`) and `architecture.md:83-86` made true, and it is exactly the assertion Task 1.5 made `Welcome.web_bundle` capable of carrying (spec §5.4). If it reads `false`, stop and report: Task 1.5's plumb to `session.rs:249` is the missing half and it is not this task's to add.
+**Expected:** `{"type":"welcome", …, "web_bundle":true, …}` and **no** "the web UI is not available in this build" anywhere in the HUD. That is the v1 spec §10 sentence ("Both bundles are embedded in the executable … when built with `cargo run -p xtask -- dist`", `spec:386`) and `architecture.md:83-86` made true, and it is exactly the assertion Task 1.5 made `Welcome.web_bundle` capable of carrying (spec §5.4). If it reads `false`, stop and report: Task 1.5's plumb to `session.rs:249` is the missing half and it is not this task's to add.
 
 5. `http://127.0.0.1:7070/terminal` — the other bundle, unchanged by this task but built by the same command: the xterm.js page loads and the TUI runs in the PTY (Task 2.4's check).
 
@@ -14293,7 +14331,7 @@ and shows `cargo build` / `cargo test`, with no mention of the wasm target or th
 Two steps, wrapped in one command: the WebAssembly bundle first, then the binary that embeds it.
 
 ```sh
-cargo xtask dist
+cargo run -p xtask -- dist
 ```
 
 It needs the network once per clean checkout (it fetches the pinned xterm.js for the web terminal) and
@@ -14306,13 +14344,17 @@ rustup target add wasm32-unknown-unknown
 The command runs `cargo build --target wasm32-unknown-unknown -p tipsy-web --release`,
 `wasm-bindgen --target web` (the CLI's version must be the one `Cargo.lock` pins — `cargo install -f
 wasm-bindgen-cli --version <that version>`), and finally `cargo build -p tipsy-compadre --release` with
-the bundle embedded. If `cargo xtask` is not set up on your machine, `cargo run -p xtask -- dist` is the
-same command; the alias lives in `.cargo/config.toml`:
+the bundle embedded. Run it from somewhere inside the repository — its root or any crate directory:
+`dist` resolves `web/vendor/` from the `xtask` crate's own location rather than from your shell's
+working directory, so the fetched assets land where the embed reads them, and it prints the absolute
+path it wrote.
 
-```toml
-[alias]
-xtask = "run --package xtask --"
-```
+**There is no short form.** `cargo xtask dist` is not a working spelling and no document may carry it:
+cargo resolves `cargo <name>` by looking for a `cargo-<name>` binary on `PATH`, and this workspace's own
+binary target is not there, so it answers ``error: no such command: `xtask` ``. Task 2.4 corrected
+`server/assets.rs`'s `DIST_COMMAND` (the string the missing-bundle page renders) to the long form, and
+this README section must spell the same thing. An `[alias]` in `.cargo/config.toml` would work on your
+own machine, but `.cargo/` is git-ignored here and never ships, so nothing documented may depend on it.
 
 **A plain `cargo build` produces a binary without the web client.** The server still runs and `/` answers
 with a page that says how to build the bundle. A *debug* build reads `web/` from the directory you run
@@ -14340,7 +14382,7 @@ Replace the `tipsy-web` row and add the `xtask` row (Task 1.9 has already touche
 
 ```
 | `tipsy-web` | cdylib | Web client: the Ratzilla backend, the browser's microphone and speakers, the WebSocket transport | yes |
-| `xtask` | **binary** | The build's own tool: `cargo xtask dist` fetches and verifies the terminal assets, builds the wasm bundle, then builds the binary that embeds it | no |
+| `xtask` | **binary** | The build's own tool: `cargo run -p xtask -- dist` fetches and verifies the terminal assets, builds the wasm bundle, then builds the binary that embeds it | no |
 ```
 
 The paragraph below the table (`:80-86`) already describes the two-step build and the bundle-less binary correctly — it was written as a promise and this task makes it true, so it needs no edit. The `session` row's "either through an in-process channel or a WebSocket" (`:122`) and the transport line in the diagram (`:37`) become true in Phase 1; that is 1.9's.
@@ -14351,7 +14393,7 @@ The paragraph below the table (`:80-86`) already describes the two-step build an
 git add xtask/src/main.rs xtask/src/dist.rs .gitignore web/client/index.html README.md docs/architecture.md
 git commit -m "feat(xtask): build the wasm bundle and the binary that embeds it
 
-cargo xtask dist in spec 8.3's order: the xterm.js fetch Task 2.3 owns, the
+cargo run -p xtask -- dist in spec 8.3's order: the xterm.js fetch Task 2.3 owns, the
 tipsy-web release build for wasm32-unknown-unknown, wasm-bindgen --target web
 with the CLI pinned to the locked crate, then the host binary with web/ embedded.
 trunk and wasm-pack are deliberately not used, and a missing wasm artifact is a

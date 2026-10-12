@@ -73,7 +73,7 @@ See [`docs/architecture.md`](../../architecture.md) for the diagrams. Summary:
 | `tipsy-web` | cdylib | Ratzilla backend, browser mic (`getUserMedia`) and playback (WebAudio), WebSocket transport | target |
 | `tipsy-compadre` | bin | Server, native TUI client, web terminal, embedded web bundle | no |
 
-Plus an `xtask` crate providing `cargo xtask dist` (build the WASM bundle, then the binary that
+Plus an `xtask` crate providing `cargo run -p xtask -- dist` (build the WASM bundle, then the binary that
 embeds it).
 
 Dependency rules:
@@ -384,7 +384,7 @@ panel, CHAT/NETWORK tabs (CHAT/RED in Spanish) and question box. Changes:
   native TUI in a pseudo-terminal (`portable-pty`, ConPTY on Windows) connected through the
   in-process channel. Keyboard, mouse and resize are forwarded. Audio uses the server machine's
   devices.
-- Both bundles are embedded in the executable (`rust-embed`) when built with `cargo xtask dist`.
+- Both bundles are embedded in the executable (`rust-embed`) when built with `cargo run -p xtask -- dist`.
   Without them, those routes return a page explaining how to build them.
 
 **Risk:** Ratzilla is young. Before the plan is finalised, a spike must confirm Braille canvas
@@ -439,7 +439,7 @@ Logging: `tracing` to a file in the user data directory; `--verbose` also logs t
 | Live providers | Real latency and audio | `#[ignore]` tests, keys from the environment, never in default CI |
 
 CI (GitHub Actions): `cargo fmt --check`, `cargo clippy -D warnings`, tests on Windows, Linux and
-macOS, `tipsy-web` built for `wasm32-unknown-unknown`, release artefacts via `cargo xtask dist`.
+macOS, `tipsy-web` built for `wasm32-unknown-unknown`, release artefacts via `cargo run -p xtask -- dist`.
 
 Manual check before each release: real mic and speakers in the terminal (first) and in the
 browser, wake word in Spanish and English.
@@ -456,7 +456,7 @@ browser, wake word in Spanish and English.
 8. Web terminal.
 9. Web client (WASM), after the Ratzilla spike.
 10. `hands_free` mode (wake word).
-11. CI, `cargo xtask dist`, README, `CONTRIBUTING.md`, first release.
+11. CI, `cargo run -p xtask -- dist`, README, `CONTRIBUTING.md`, first release.
 
 ## 15. Open questions and risks
 
