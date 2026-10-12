@@ -219,7 +219,9 @@ device does not change what is recorded — at this launch or the next one.
 
 The Server tab — `bind`, the LAN switch and the token — configures the WebSocket server. `serve`
 reads those three values; the token is the password every remote client presents, and `Ctrl+R`'s
-fresh value is written when you save. [Running a server, and attaching to
+fresh value is written when you save. Over a socket the token row is **native-only**: a client's save
+never carries `server.token`, so the row says where the token belongs instead of showing one the
+server would not learn. [Running a server, and attaching to
 one](#running-a-server-and-attaching-to-one) is what those three values mean.
 
 ### The login screen
@@ -282,21 +284,33 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
 - `serve` records where it is listening — the address it was asked for and the one it bound, which
   differ whenever `--bind` names port `0` — in `tipsy-compadre.log`. `--verbose` prints the bound
   address as well. `--bind` overrides `bind` for one run and never writes the file back.
-- `lan = true` with an empty token **refuses to start**, naming `lan`: an exposed server with no
-  token is open to anything on the network. The same is true of any `bind` that is not a loopback
-  address, and a hostname is refused by name rather than resolved.
-- The token is 128 bits of OS entropy rendered as 32 lowercase hex characters, generated on the first
-  run and stored in `config.toml`. It travels in `Hello` for a protocol client and as `?token=…` on
-  the two pages, which a browser can only send in the URL; both pages therefore answer with
-  `Referrer-Policy: no-referrer` and `Cache-Control: no-store`, so the token is not in a `Referer`
-  and not in a cache.
+- **The bind rule is about the address, not the switch.** An address that is not loopback is refused
+  without a token, and `lan = true` on `127.0.0.1` is perfectly legal: `lan` is the operator's
+  intent and nothing reads it but the log line that records it. A hostname is refused by name rather
+  than resolved, because a name may resolve somewhere off this machine.
+- The token is 128 bits of OS entropy rendered as 32 lowercase hex characters. It travels in `Hello`
+  for a protocol client — **never in the socket's URL** — and as `?token=…` on the two pages, which a
+  browser can only send in the URL; both pages therefore answer with `Referrer-Policy: no-referrer`
+  and `Cache-Control: no-store`, so the token is not in a `Referer` and not in a cache.
+- **Nothing generates a first-run token yet.** A new `config.toml` carries `token = ""`, and the one
+  thing that mints one is the Server tab's `Ctrl+R`, which fills the row and writes it when you save.
+  With an empty token `serve` is loopback-only, which is what the bind rule enforces; a first-run
+  token is on the release checklist below, together with the requirement that showing it once must
+  not put it in the log. `TIPSY_CONFIG_DIR` moves `config.toml`, `tipsy-compadre.log` and a generated
+  certificate somewhere else for one run, so the checks below never touch your own configuration.
+- A client's save **cannot move a provider's `base_url` or `key_name`, or `server.token`**: those
+  three are not in the message a client sends (`Command::UpdateConfig` carries `ClientConfigView`),
+  and the server keeps its own values. Everything else on the screen — the bind address, the
+  listening settings, the profiles, each connector's kind and model — does cross.
 - `/` is the web client and `/terminal` the web terminal. A plain `cargo build` embeds no bundle:
   both routes then answer with a page that says to build it with `cargo xtask dist`.
 - `--connect` runs the TUI and nothing else: it starts no server, builds no provider and reads no
   API key, because every provider call happens in the server process.
 - `--verbose` also writes the log to stderr. The log file is `tipsy-compadre.log`, beside
   `config.toml`, and it never contains the token, a key or audio: every complete line is scrubbed on
-  its way out, and both copies go through the same scrubber.
+  its way out, and both copies go through the same scrubber. A `--connect` URL is printed without its
+  query string, so a token somebody pasted into the URL stays out of the terminal, the log and the
+  bug report.
 
 ### TLS, and what it does and does not do
 
@@ -437,5 +451,26 @@ what a test cannot hear.
       value this process resolved and any sample dump cannot reach the file or the `--verbose` copy.
       The same invariant sits beside `RealtimeSocket` in
       `crates/tipsy-compadre/src/realtime/socket.rs`.
+- [ ] **A live `serve` and a `--connect` attach.** Point `TIPSY_CONFIG_DIR` at a scratch directory so
+      none of this touches your own `%APPDATA%\tipsy-compadre`, start `tipsy-compadre serve` on a
+      loopback port, attach with `tipsy-compadre --connect ws://127.0.0.1:<port>/ws`, and type. Then
+      over the LAN: `serve --bind 0.0.0.0:7070` with a token, and attach from the other machine with
+      `--token`. **The refusal path matters as much as the attach**: with no token, or a wrong one,
+      the client must print `the server refused the connection: token_required` (or `token_invalid`)
+      on an ordinary terminal *before* the alternate screen appears, and no line may contain the
+      token itself — not the refusal, not the log, not the `--verbose` banner.
+- [ ] **`serve --tls` really serves.** Start `serve --tls` on a loopback port and fetch
+      `https://127.0.0.1:<port>/?token=…` — or point a browser at it — then repeat with
+      `--tls-cert`/`--tls-key` and a certificate the client already trusts. The generated pair sits
+      beside `config.toml` and the run that minted it writes the SHA-256 fingerprint to
+      `tipsy-compadre.log`, which `--verbose` also prints: compare it with the browser's certificate
+      viewer. **This item is why the check exists — the phase's first live run found that the TLS
+      listener never started at all**, because `run` bound the port and then asked the TLS server to
+      bind it a second time; the fix wave takes the socket that was already bound and checked.
+- [ ] **Generate a first-run token, and show it once.** *Not implemented today*: a fresh
+      `config.toml` has `token = ""` and only the Server tab's `Ctrl+R` mints one. When it lands, a
+      first run must write a token, show it to the user exactly once, and **showing it must not put
+      it in a log** — not in `tipsy-compadre.log`, not in the `--verbose` copy, not in a URL, and not
+      in any socket frame the client has not authenticated for.
 - [ ] The real microphone and speakers in the browser, and the wake word in Spanish and English,
       once those milestones land.

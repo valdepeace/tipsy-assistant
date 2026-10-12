@@ -85,7 +85,7 @@ should check has been paid.
 | W5 | **xterm.js is fetched at build time** by `cargo xtask dist` from the npm registry, at a pinned version, with a **sha256 pinned in the source** and verified before the files enter the bundle | Vendoring the prebuilt files into the repository, or loading them from a CDN | The build needs the network once per clean checkout, and the plan must obtain and record the real hash rather than invent one. In exchange the executable stays self-contained and the committed tree grows by no third-party JavaScript |
 | W6 | **There is no new `Transport` trait.** The in-process channel is the protocol, so a socket peer is a *bridge* that produces or consumes the same `SessionEnds` the client already uses | Introducing a trait the client drives, and refactoring `client.rs`'s loop onto it | Two bridge modules instead of one abstraction, and `SessionEnds`' fields stay `pub` as they are. The gain is that `client.rs`'s 33 ms poll loop is untouched and the native path is unchanged by construction |
 | W7 | **`Hello` becomes real**: every client sends it first, and the session validates the protocol version and, when the server is exposed, the token | Leaving `Hello` ignored, as `session.rs:353` does today | `session.rs:353`'s `Command::Hello { .. } => {}` arm becomes the only place a connection can be refused, so it needs its own tests for the three refusals (bad version, bad token, missing token on a LAN bind) |
-| W8 | **The token is 32 bytes (64 hex characters) and is generated on first run**, generated again only by the Server tab's Regenerate row | Leaving it 16 bytes and generating it only from the screen, which is what the code does today | The v1 spec §11 and `architecture.md:158` both promise "generated on first run" while the example file's comment (`spec:250`) says "empty until the Server tab generates one"; this spec rules for §11, which means fixing the existing tests that pin a 32-character token and correcting that comment |
+| W8 | **The token is 128 bits of OS entropy as 32 lowercase hex characters, and a first-run generation is owed** — generated again only by the Server tab's Regenerate row | Leaving it 16 bytes and generating it only from the screen, which is what the code does today | The v1 spec §11 and `architecture.md:158` both promise "generated on first run" while the example file's comment (`spec:250`) says "empty until the Server tab generates one". **The size half landed** (16 bytes, 32 hex characters, `TOKEN_BYTES`); **the generation half did not**, and the whole-branch review found the documents claiming it did: `load_or_create` writes an empty token and `new_token`'s only caller is the Regenerate row. Ruled: the documents are corrected and "generate a first-run token and show it once — without putting it in a log" is a release-checklist item, not work for this phase |
 | W9 | **One session per connection**, with a unique `session_id`, and a server-side registry (`Hub`) that owns every session's event sender | One shared session for all connections | Session ids stop being the constant `1` (`session.rs:23`) and the two concurrent sessions the ledger's tests already spawn stop reporting the same id. The registry is what makes W4 possible |
 | W10 | **The web terminal's PTY child is the project's own binary in `--connect` mode**, pointed at the parent's own loopback `/ws` | Giving the child the server's in-process channel, as `architecture.md:63-64`'s wording says | One code path instead of two, and the child needs no new mode. The deviation is real and `architecture.md` is corrected by Phase 2's documentation task: the child is *not* in-process, it is a loopback socket client, which is why it can also be moved to another machine later |
 | W11 | **The server's stats for a remote peer are produced by the server.** `sysmon` is already spawned by the client today (`client.rs:125`), so in `--connect` mode the client keeps its own and the server's connection bridge does **not** spawn one | Both sides sending `Stats` | Two sources of `Stats` on the same channel would double the traffic and fight in the HUD. The rule is: whoever owns the process the user is looking at owns `Stats` — the client in-process, the server for a remote or web peer |
@@ -165,7 +165,7 @@ socket.
 | Command | JSON | Fields | Effect |
 |---|---|---|---|
 | `GetConfig` | `{"type":"get_config"}` | — | The session answers `Event::Config` |
-| `UpdateConfig` | `{"type":"update_config","config":{…}}` | `config: ConfigView` | The server replaces the editable configuration, persists it, re-derives every session's brain and broadcasts `ConfigChanged` |
+| `UpdateConfig` | `{"type":"update_config","config":{…}}` | `config: ClientConfigView` (a `ConfigView` with no provider `base_url`, no provider `key_name` and no `server.token` — §4.3) | The server replaces the editable configuration, persists it, re-derives every session's brain and broadcasts `ConfigChanged` |
 | `SetKey` | `{"type":"set_key","name":"openrouter","value":"…"}` | `name: String`, `value: String` | Stores the key in the **server's** credential store under `keys::SERVICE` and broadcasts `ConfigChanged`. **Refused unless the connection is loopback or TLS** (§9.4) |
 
 `Event::Config { config: ConfigView }` is the answer to `GetConfig`.
@@ -196,6 +196,18 @@ Two fields do not cross unchanged, and both are load-bearing:
   that client* — it is what the client sent — and the Server tab's whole purpose is to display and
   regenerate it. A client that presented no token on a loopback connection receives the token as
   the file holds it. No other connection ever receives it.
+
+**Two shapes, because a direction is not a permission** (the whole-branch review's F3). `ConfigView`
+is what the server *tells* a client; the shape a client may *send* is `ClientConfigView`, which is
+`ConfigView` with three fields missing: each provider's `base_url`, each provider's `key_name`, and
+`server.token`. The reason is the server's own behaviour rather than taste — it attaches its
+resolved key to whatever address the configuration names, so a client that could send an address
+could redirect that key to a host of its choosing without ever reading the value, and a client that
+could send a key *name* could choose which of the server's secrets it spends. A token a client could
+write is a takeover rather than an edit. `ClientConfigView::merged_into` is the one way back, and it
+takes those three from the server's configuration; a client's save can still move the bind address,
+the listening mode, the profiles, and each connector's kind and model. The local configuration
+screen is unaffected: it edits `ConfigForm` and saves through `config_from`, never through a view.
 
 ### 4.4 Events this tier adds
 
@@ -457,7 +469,17 @@ the locked crate, because a schema mismatch is enforced), then the host binary w
 
 Loopback needs nothing. Anything else needs the token, on the upgrade request for the pages and in
 `Hello` for the protocol. The comparand is the configuration's `server.token` (W8: 32 bytes), and a
-mismatch is a refusal, never a retry.
+mismatch is a refusal, never a retry. On a **loopback** listener the session requires no token at
+all — `SessionPolicy` is built from the bound address, which is the design's only fact about
+exposure — so a token configured there gates the two pages and nothing else, and the pages do gate
+on it.
+
+**The protocol socket takes no query parameter at all**, and this is the correction the whole-branch
+review's F1/F2 asked for: `/ws` used to demand `?token=…` *before* the upgrade while the client sent
+the token only in `Hello`, so the documented remote attach answered `HTTP 401` and the only form
+that worked was the URL — which is where the token leaked into shell history, a `Referer` and every
+log that prints an address. The route's check is gone, `Hello` is the socket's only door, and a
+connection that never says anything is bounded by the session's own handshake deadline.
 
 ### 9.2 The token in a query string, and what that costs
 
@@ -595,9 +617,13 @@ and `CARGO_TARGET_DIR` off the `G:` default, for the reasons the ledger records.
    missing `GetConfig`/`UpdateConfig`/`SetKey`, `ConfigView`, `ProfileChanged`/`ConfigChanged` — is
    what W3 and W4 close.
 6. **The Server tab's Regenerate-token row stays inert over the wire, by design, and this is a
-   decision rather than an omission.** §4.2 adds three commands and none of them mints a token;
-   `store::new_token` (`config/store.rs:28-48`) is server-side and `ConfigEffect::RegenerateToken`
-   (`tipsy-ui/src/config_form.rs:55`) has no remote path. **No spec ever promised one** — the v1
+   decision rather than an omission — now enforced by the shape of the message and not only by this
+   paragraph.** §4.2 adds three commands and none of them mints a token; `store::new_token`
+   (`config/store.rs`) is server-side, and the payload a client sends (`ClientConfigView`, §4.3) has
+   **no `server.token` field**, so a client's save cannot move the door password at all — the same
+   property that keeps a provider's `base_url` and `key_name` on the server. A client that presses
+   the row is told where the token belongs instead of being shown one the server would never learn.
+   **No spec ever promised a remote mint** — the v1
    spec's §4.1 command list does not include it either — and a remote client rotating the token it
    authenticated with is a self-lockout footgun: the new token would have to come back through
    `GetConfig`, which §4.3 permits only to a client that presented the old one, so a client that

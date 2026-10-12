@@ -393,9 +393,11 @@ postponed and the web terminal remains the browser option for v1.
 
 ## 11. Security
 
-- Binds to `127.0.0.1` by default. LAN exposure (`lan = true`) is opt-in and requires a 32-byte
-  random token generated on first run, sent in `Hello` and as a query parameter for `/` and
-  `/terminal`.
+- Binds to `127.0.0.1` by default. Exposure is the **bound address**: any address that is not loopback
+  requires a token — 128 bits of OS entropy as 32 lowercase hex characters — sent in `Hello` for the
+  protocol and as a query parameter for `/` and `/terminal`. **Minting one on the first run is not
+  implemented yet**: a new `config.toml` carries an empty token and the Server tab's Regenerate row is
+  what mints one, so a first-run token is on the README's release checklist.
 - The web terminal grants full control of the application; it is never reachable without the token
   outside localhost.
 - API keys, configuration and history never leave the server; `ConfigView` redacts keys.

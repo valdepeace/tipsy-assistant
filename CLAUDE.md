@@ -53,16 +53,22 @@ docs or comments claims otherwise. Its record is `.superpowers/sdd/2026-10-11-pl
 (`docs/superpowers/plans/2026-10-11-plan-3-web-tier.md`, spec
 `docs/superpowers/specs/2026-10-11-web-tier-design.md`) — **20 tasks in three phases** (9 server and
 remote client, 4 web terminal, 7 web client), whose Ratzilla gate is answered `PASS`. **Tasks 1.1–1.9
-are executed on branch `plan-3-phase-1` and not merged, and not yet reviewed**, at **490 tests, 0
-failures**: the token-guarded WebSocket server (`serve`, the `Hub`, one session per connection, the
-bind rule), the embedded bundle with its honest fallback pages, TLS with a certificate generated once
-beside `config.toml` and the `insecure_transport` rule, the native `--connect` client, and the
-`tracing` bootstrap whose three redaction rules keep the token, every key value this process resolved
-and audio out of the log. Its ledger is
+are executed on branch `plan-3-phase-1` and not merged; the whole branch has been reviewed twice**
+(security and the wire, then correctness and the tests) **and one fix wave has closed their blockers**:
+the bare run now says `Hello` before the terminal (it used to greet nothing and die on the user's first
+keypress), the attach token travels only in `Hello` and no URL that can carry one is printed anywhere,
+a handshake deadline bounds a socket that says nothing, a client's `UpdateConfig` is *shaped* so it
+cannot move a provider's `base_url`, a provider's `key_name` or `server.token` and is applied only
+after admission, the read side has an explicit ceiling and the session's audio buffers are capped,
+three vacuous tests were made falsifiable, and `TIPSY_CONFIG_DIR` made the phase's **first live
+`serve` + `--connect` + `serve --tls` check possible — which then found that `serve --tls` had never
+served at all** (it bound the port twice and died with `WSAEADDRINUSE`). **505 tests, 0 failures**,
+clippy at the same seven pre-existing findings, wasm clean. Its ledger is
 `.superpowers/sdd/2026-10-11-plan-3-web-tier/progress.md` and the constraints every task inherits are
-beside it in `global-constraints.md`; Phases 2 and 3 have not started. Start from
-`docs/superpowers/plans/2026-10-11-plan-3-start-here.md`: it names which of its tasks can begin without
-touching a file another task owns, the order the compiler imposes, and the environment traps.
+beside it in `global-constraints.md`. **Read the two review reports in that same directory**
+(`review-phase-1-security.md`, `review-phase-1-correctness.md`) — not
+`docs/superpowers/plans/2026-10-11-plan-3-start-here.md`, which the ledger records as superseded and
+wrong in three ways. Phases 2 and 3 have not started.
 
 **Both throwaway spikes are done, and the second one shapes `hands_free`.** They live in scratch
 directories outside the repo and nothing of them is committed. **Ratzilla: PASS on all four gate

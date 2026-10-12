@@ -171,12 +171,17 @@ boundary: `server.token` below remains the only real requirement.
 The server spends the user's API keys and listens to their microphone, so:
 
 - It binds to `127.0.0.1` by default, `serve` refuses to start on any other address without a token,
-  and the token is 128 bits of OS entropy as 32 lowercase hex characters, generated on the first run.
+  and the token is 128 bits of OS entropy as 32 lowercase hex characters. **Nothing generates one on
+  the first run yet** — a new `config.toml` carries an empty token and the Server tab's Regenerate
+  row is what mints one; a first-run token is on the README's release checklist.
 - API keys, configuration and conversation history never leave the server; clients never see a key.
   The one case where a secret travels *towards* the server is setting a new key, and `SetKey` is
   refused with `insecure_transport` unless that connection is loopback or TLS.
-- Both web routes (`/` and `/terminal`) require the token when the server is exposed to the LAN.
-  The web terminal grants full control of the application, so it is never reachable without it.
+- Both web routes (`/` and `/terminal`) require the token when one is configured, and the protocol
+  socket takes it in `Hello` and in no other place: `/ws` has no query parameter to put one in. On a
+  loopback listener the socket asks for nothing at all — the bound address is what decides exposure
+  — so the pages are the half a token gates there. The web terminal grants full control of the
+  application, so it is never reachable without it.
 - `serve --tls` encrypts the connection: that is what makes the token and a new key safe on a LAN.
   It does **not** by itself unlock `getUserMedia` on another machine — loopback over plain HTTP is
   already a secure context, and a certificate the browser has not been told to trust is not one. The
