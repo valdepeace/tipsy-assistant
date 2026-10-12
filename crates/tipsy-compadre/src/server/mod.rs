@@ -7,8 +7,9 @@ pub mod tls;
 
 pub use hub::Hub;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
@@ -19,7 +20,9 @@ use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
 use tipsy_protocol::ClientKind;
+use tokio::sync::Semaphore;
 
+use crate::client::pty::{PtySpawner, TerminalSpawner};
 use crate::config::Config;
 use crate::keys::KeyResolver;
 use crate::providers::ProviderSlot;
@@ -214,6 +217,78 @@ pub(crate) struct ServeState {
     /// a socket cannot read off itself: the `SetKey` guard is `tls || peer.ip().is_loopback()`, and
     /// the peer comes from the connection while this comes from `Settings.tls`.
     pub(crate) tls: bool,
+    /// What a `/terminal/ws` connection spawns its child from: **this binary in `--connect` mode,
+    /// pointed at this process's own `/ws`** (spec §7.2, W10). Built once, by `run`, from the address
+    /// the listener actually bound — which is why it cannot live on `Settings`, whose `bind` is what
+    /// was *asked* for.
+    pub(crate) spawner: Arc<dyn PtySpawner>,
+    /// The terminal connection cap, shared by this listener's `/terminal/ws` handler and nothing
+    /// else. `Arc` because a request is served by a clone of this state; the permit it hands out is
+    /// what bounds live PTY children (`conn::MAX_TERMINAL_CONNECTIONS`).
+    pub(crate) terminals: Arc<Semaphore>,
+}
+
+/// The `/ws` URL a terminal child attaches to (spec §7.2, W10).
+///
+/// **Not always the bound address, because a wildcard is not an address.** A listener on `0.0.0.0:7070`
+/// or `[::]:7070` answers on loopback too, and `ws://0.0.0.0:7070/ws` is not something a client can
+/// reach — on Windows it is a refused connection rather than a lucky one — so the wildcard is spelled
+/// as the loopback address of its own family. A listener bound to one specific address is that
+/// address: if it is `192.168.1.5:7070`, nothing is listening on `127.0.0.1` at all, and the child —
+/// which is a local process like any other — has to use the address that is really there. IPv6 needs
+/// its brackets, or the port becomes part of the host.
+fn terminal_child_url(bound: SocketAddr) -> String {
+    let host = match bound.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    match host {
+        IpAddr::V4(ip) => format!("ws://{ip}:{}/ws", bound.port()),
+        IpAddr::V6(ip) => format!("ws://[{ip}]:{}/ws", bound.port()),
+    }
+}
+
+/// The argument vector a terminal child is started with: the `--connect` URL above, and `--token`
+/// **only when this server has one**. An empty `--token` would be a token presented as the empty
+/// string, which is a different claim from presenting none; and on loopback there is no door to open
+/// with one (spec §5.3, §9.1).
+fn terminal_args(bound: SocketAddr, token: Option<&str>) -> Vec<String> {
+    let mut args = vec!["--connect".to_string(), terminal_child_url(bound)];
+    if let Some(token) = token {
+        args.push("--token".to_string());
+        args.push(token.to_string());
+    }
+    args
+}
+
+/// The spawner every `/terminal/ws` connection on this listener uses.
+///
+/// `program` is [`std::env::current_exe`] and never a name: `portable-pty` searches `PATH` for a name
+/// with no path in it, and a `PATH` entry that is empty, relative or points into a checked-out
+/// workspace must not be able to plant the child that then runs with the user's authority (Task 2.1's
+/// security test, and the prior art its comment quotes). This is the one variant of `ServerError`
+/// that can carry the refusal.
+fn terminal_spawner(bound: SocketAddr, token: Option<&str>) -> Result<Arc<dyn PtySpawner>, ServerError> {
+    let program = std::env::current_exe()
+        .map_err(|e| ServerError::Message(format!("no current executable for the web terminal: {e}")))?;
+    Ok(Arc::new(TerminalSpawner { program, args: terminal_args(bound, token), env: Vec::new() }))
+}
+
+impl conn::TerminalRouteState for ServeState {
+    fn websocket_token(&self) -> Option<String> {
+        // The same value `/terminal`'s own `?token=` is compared against, and trimmed the same way.
+        // Never logged.
+        self.token.clone()
+    }
+
+    fn terminal_spawner(&self) -> Arc<dyn PtySpawner> {
+        Arc::clone(&self.spawner)
+    }
+
+    fn terminal_gate(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.terminals)
+    }
 }
 
 /// The token as the routes compare it. `has_token` (`config/model.rs:59-61`) trims, so a
@@ -227,8 +302,24 @@ fn token_of(token: &str) -> Option<String> {
 /// the hub by the time this runs, which is why `run` builds the hub first and passes both in. There
 /// is no provider stack here either — the hub holds it, and a connection gets a session from
 /// `Hub::spawn`.
-pub(crate) fn state(settings: &Settings, hub: Hub, policy: SessionPolicy, tls: bool) -> ServeState {
-    ServeState { token: token_of(&settings.token), hub, policy, tls }
+///
+/// `spawner` is built by `run` from the address it really bound, because the terminal child has to
+/// attach to this very listener and `Settings.bind` is only what was asked for.
+pub(crate) fn state(
+    settings: &Settings,
+    hub: Hub,
+    policy: SessionPolicy,
+    tls: bool,
+    spawner: Arc<dyn PtySpawner>,
+) -> ServeState {
+    ServeState {
+        token: token_of(&settings.token),
+        hub,
+        policy,
+        tls,
+        spawner,
+        terminals: Arc::new(Semaphore::new(conn::MAX_TERMINAL_CONNECTIONS)),
+    }
 }
 
 /// Spec §5.1 steps 1 and 2, before the bind: the user-facing refusal.
@@ -346,7 +437,11 @@ pub async fn run(settings: Settings, bound: tokio::sync::oneshot::Sender<SocketA
         settings.keys.clone(),
         settings.providers.clone(),
     );
-    let app = mount(state(&settings, hub, policy, tls_config.is_some()));
+    // The terminal child is this binary in `--connect` mode, pointed at the address this listener
+    // really bound (spec §7.2, W10) — built here rather than on `Settings`, which carries the address
+    // that was *asked* for and so knows nothing about a port the kernel chose.
+    let spawner = terminal_spawner(local, token.as_deref())?;
+    let app = mount(state(&settings, hub, policy, tls_config.is_some(), spawner));
     // **The same `app` value in both arms**, which is what makes "a TLS listener serves the same
     // routes as the plain one" true by construction rather than by two routers being kept in step.
     // `into_make_service_with_connect_info::<SocketAddr>()` is what gives the `/ws` handler the peer
@@ -392,8 +487,11 @@ pub(crate) fn mount(state: ServeState) -> Router {
         // until Task 1.5 — and the handler answers 404 for anything the embed does not hold.
         .route("/assets/{*path}", get(asset_of))
         .route("/ws", get(ws))
-        // `/terminal/ws` belongs to Task 2.2 and is deliberately not registered here: it is a raw
-        // PTY byte socket with its own handshake, and it is a 404 until Phase 2 lands.
+        // The raw PTY byte socket (Task 2.2). It is merged in rather than spelled here because
+        // `conn::router` is the one place the route's own state bound is declared — `ServeState`
+        // implements `conn::TerminalRouteState` above, and Task 2.2's tests merge the same function
+        // into a router of their own, so the route under test and the route that ships cannot drift.
+        .merge(conn::router(Router::<ServeState>::new()))
         .with_state(state)
 }
 
@@ -570,7 +668,12 @@ fn forbidden() -> Response {
 ///   whatever they resolve to.
 /// - Host names are compared case-insensitively, and a port omitted on both sides — or named on one
 ///   side and equal to the other's scheme default — is the same authority.
-fn origin_is_this_host(headers: &HeaderMap) -> bool {
+///
+/// `/ws` and `/terminal/ws` both call this, and that is the point of it being one function: the
+/// ledger's ruling after the second fix wave is that the terminal route needs the same check on the
+/// same reasoning — the child it spawns is itself a client of `/ws` (`conn.rs`'s own comment records
+/// why, and `progress.md` the wave that found it).
+pub(crate) fn origin_is_this_host(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return true;
     };
@@ -1198,5 +1301,51 @@ mod tests {
         assert!(written.contains("does not unlock the browser microphone"), "{written}");
         assert!(written.contains("lan=true"), "the log says which mode the operator asked for: {written}");
         assert!(written.contains("tls=true"), "and that this listener is encrypted: {written}");
+    }
+
+    /// The address the terminal child attaches to, which is **not** always the address this listener
+    /// was handed. A wildcard bind answers on loopback but cannot be *reached* as `0.0.0.0`, and a
+    /// listener on one specific interface is not listening on loopback at all — so both halves have a
+    /// way to be wrong, and this is the test that says which one wins.
+    #[test]
+    fn a_terminal_child_attaches_to_the_address_that_is_really_there() {
+        assert_eq!(terminal_child_url("127.0.0.1:7070".parse().unwrap()), "ws://127.0.0.1:7070/ws");
+        assert_eq!(
+            terminal_child_url("0.0.0.0:7070".parse().unwrap()),
+            "ws://127.0.0.1:7070/ws",
+            "the wildcard answers on loopback, and `0.0.0.0` is not a host a client can reach"
+        );
+        assert_eq!(
+            terminal_child_url("192.168.1.5:7070".parse().unwrap()),
+            "ws://192.168.1.5:7070/ws",
+            "one interface means nothing is listening on loopback, so that address is the only one"
+        );
+        assert_eq!(
+            terminal_child_url("[::1]:7070".parse().unwrap()),
+            "ws://[::1]:7070/ws",
+            "an IPv6 literal needs its brackets or the port becomes part of the host"
+        );
+        assert_eq!(terminal_child_url("[::]:7070".parse().unwrap()), "ws://[::1]:7070/ws", "the same for `::`");
+        assert_eq!(terminal_child_url("[2001:db8::1]:7070".parse().unwrap()), "ws://[2001:db8::1]:7070/ws");
+    }
+
+    /// The child's argument vector: the URL above, and `--token` only when this server holds one.
+    /// Presenting an empty token is a different claim from presenting none, and on loopback there is
+    /// no door for one to open (spec §5.3, §9.1).
+    #[test]
+    fn a_terminal_child_is_handed_the_token_only_when_there_is_one() {
+        // A fixture, not a secret: it reaches a child this test never starts, and nothing resolves a
+        // key from it. The workspace rule is that a real key appears by name and never in a fixture.
+        let token = "fixture-token-0123456789abcdef";
+        let bound = "127.0.0.1:7070".parse().unwrap();
+
+        let with = terminal_args(bound, Some(token));
+        assert_eq!(with[0], "--connect");
+        assert_eq!(with[1], "ws://127.0.0.1:7070/ws");
+        assert_eq!(&with[2..], ["--token", token], "an exposed listener's child has to present the token in Hello");
+
+        let without = terminal_args(bound, None);
+        assert_eq!(without, vec!["--connect".to_string(), "ws://127.0.0.1:7070/ws".to_string()]);
+        assert!(!without.iter().any(|arg| arg == "--token"), "no token means no `--token` argument at all");
     }
 }

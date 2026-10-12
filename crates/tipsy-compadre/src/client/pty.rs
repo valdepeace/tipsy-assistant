@@ -137,6 +137,26 @@ impl PtySession {
         child.as_ref().and_then(|child| child.process_id())
     }
 
+    /// Whether the child has ended, without blocking on it. `None` means it is still running.
+    ///
+    /// **This is the only way a pump can learn that a web terminal's child exited**, and ConPTY is
+    /// why: the pseudoconsole keeps the console's output pipe open after its client exits, so the
+    /// blocking reader parked on the master observes EOF only when the **master** is dropped — which
+    /// the pump does after its loop, not before it. Measured on this machine with a PowerShell child
+    /// that printed one line and exited: the pump's own reader stayed parked for the whole twenty
+    /// seconds it waited, so a page would have shown a dead terminal for ever.
+    ///
+    /// It is safe to poll: on Windows it is a `GetExitCodeProcess`, and on Unix it is a
+    /// `waitpid(…, WNOHANG)`, whose status `std::process::Child` caches — so it neither blocks nor
+    /// steals the status a later [`PtySession::wait`] needs.
+    pub fn try_wait(&self) -> Result<Option<portable_pty::ExitStatus>, String> {
+        let mut guard = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            Some(child) => child.try_wait().map_err(|e| format!("the terminal child's status could not be read: {e}")),
+            None => Ok(None),
+        }
+    }
+
     /// An independent handle to the child's `kill`, so the pump can terminate the child from a
     /// `&self` borrow instead of taking the whole session apart. `portable-pty` provides it "in order
     /// to send it signals independently from a thread that may be blocked in `.wait`"
