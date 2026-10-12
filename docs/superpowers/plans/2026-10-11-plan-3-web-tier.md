@@ -26,6 +26,25 @@
 > **513 test entries / 511 distinct names** (`509 / 507` at `2f25c20`, the four new ones Task 1's
 > `policy::tests::*`, and two leaf names duplicated across modules).
 
+> **And Phase 3 is merged: the plan is complete.** Phase 3 landed on `master` at `766ead0`, after Phase 1
+> at `2f25c20` and Phase 2 at `0ff2e62`; `dd02353` then added the tone documents. Its **six commits** on
+> a branch in a worktree that is now gone are `a3b82a6` (`tipsy-web` and its protocol socket), `1c533d9`
+> (the browser microphone), `cc5c7ea` (playback, the jitter buffer and barge-in), `2407f5d` (the HUD
+> glue, Ratzilla's input and the host page), `662b2fb` (`cargo run -p xtask -- dist` and the bundle the
+> binary embeds) and `a8b1dc8` (the login door), then the **whole-phase review**, one fix wave
+> (`6e589de`) and a scoped re-review that answered *"correct and sufficient, merge is fine"*. The phase
+> closes at **649 entries / 647 distinct names, 0 failures**, clippy at exactly the seven documented
+> findings and the wasm gate clean, and `tipsy-web` draws the same `tipsy-ui` HUD through Ratzilla into
+> a canvas, with the browser's own microphone and playback and the login door: the client's turn,
+> microphone and playback rules are **imported from `tipsy_ui::policy`, never cloned**. Its eight
+> residuals are in
+> [`follow-ups.md`](../../../.superpowers/sdd/2026-10-11-plan-3-web-tier/follow-ups.md), and its record
+> is [`progress.md`](../../../.superpowers/sdd/2026-10-11-plan-3-web-tier/progress.md): the per-task
+> "Plan drift this task found" tables there hold the re-measured lines the notice above warns about, and
+> its `State` block still lists tasks 3.5–3.7 as not started, so take the phase's numbers from the task
+> sections and from the fix wave's own section at the end rather than from that block. **The task bodies
+> below were not rewritten.**
+
 **Goal:** Make the assistant reachable from outside the one terminal that owns it: a token-guarded
 WebSocket server (`tipsy-compadre serve`), a native TUI that attaches to a remote one
 (`--connect`), a full-screen TUI in the browser through a real pseudo-terminal (`/terminal`), and the

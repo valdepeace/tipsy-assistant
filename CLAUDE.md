@@ -22,12 +22,13 @@ while it is open (a cost of drawing the header over the full-screen form, and un
 `client.rs` that overclaims where a read error is shown, one mangled test line `cargo fmt` would fix,
 and the help text that lost the true half of the toggle key (`Enter` still toggles a switch row).
 
-**Two requests from the user, recorded in that workspace's `follow-ups.md` (2026-10-12):** reloading
+**Three requests from the user, recorded in that workspace's `follow-ups.md` (2026-10-12):** reloading
 `config.toml` **in place** — a save from the screen already applies without a restart, but a
 hand-edited file is read only at startup — and a panel **beside the HUD's others** showing each
-request's state, how long it took and the message it returned. Both come with the design questions the
-plan will have to answer (what counts as one request; where the record comes from; the error text is a
-new sink for the redaction rules). And a profile switch mid-run **used to leave the greeting behind**,
+request's state, how long it took and the message it returned. Those two come with the design questions
+the plan will have to answer (what counts as one request; where the record comes from; the error text is
+a new sink for the redaction rules). The third — **choosing a profile in the screen must apply at once**,
+not on `F4` — is queue item 2 below. And a profile switch mid-run **used to leave the greeting behind**,
 fixed in `4a6bab9` with the test that pins it.
 
 **Integrated on `master` too: Plan 2C**
@@ -54,7 +55,9 @@ finding, the worst of them being that the client could forward login audio befor
 had been opened. The merge was a fast-forward. Since then a separate three-commit fix, whole-branch
 reviewed and then re-reviewed, found that a *pass* verdict left the login capture open and that `Passed`
 was not terminal for the phase — a later `Tab`, a stale refusal or an error could put the user back
-outside a door they had walked through. Both are fixed, and **master is at 425 tests, 0 failures**. It
+outside a door they had walked through. Both are fixed, and that merge closed at **425 tests, 0
+failures** — a historical count: `master` moved on with every plan below, and stands at **649 tests,
+0 failures** after Plan 3. It
 is a **ritual, not authentication**: `server.token` is still the only door, and nothing in its code,
 docs or comments claims otherwise. Its record is `.superpowers/sdd/2026-10-11-plan-login-screen/` — read
 `coordinator-rulings.md` there, not `progress.md`, which another session overwrote. **Its one open
@@ -82,8 +85,9 @@ that removing the route's token check had left **a web page able to reach a loop
 on — and `--connect` sends none, which is why it is unaffected. **509 tests, 0 failures**,
 clippy at the same seven pre-existing findings, wasm clean. Its ledger is
 `.superpowers/sdd/2026-10-11-plan-3-web-tier/progress.md` and the constraints every task inherits are
-beside it in `global-constraints.md`. **Read the two review reports in that same directory**
-(`review-phase-1-security.md`, `review-phase-1-correctness.md`) — not
+beside it in `global-constraints.md`. **Read the review reports in that same directory**
+(`review-phase-1-security.md`, `review-phase-1-correctness.md`, then Phase 2's and Phase 3's
+`review-once-per-run.md` and `review-fix-wave*.md`) — not
 `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`, which the ledger records as superseded and
 wrong in three ways.
 
@@ -117,8 +121,40 @@ was always true and the skip was **dead code**: the assertions under it ran in a
 fetched nothing, so the suite was **red on `master` and green in the one worktree where `xtask dist`
 had been run** — and that worktree is where every review had run. Fixed by asking about the three
 fetched **files** rather than the directory (`0ff2e62`), and verified on both sides: the assertions run
-where the files exist, and the test skips with its explanation where they do not. **Phase 3 has not
-started.**
+where the files exist, and the test skips with its explanation where they do not.
+
+**Integrated on `master`: Phase 3 of Plan 3 — the web client — and with it the plan is complete**
+(merged at `766ead0`, after Phase 1 at `2f25c20` and Phase 2 at `0ff2e62`; `dd02353` then added the tone
+documents). **Six commits** on a branch in its own worktree, now gone: `a3b82a6` (`tipsy-web` and its
+protocol socket), `1c533d9` (the browser microphone), `cc5c7ea` (playback, the jitter buffer and
+barge-in), `2407f5d` (the HUD glue, Ratzilla's input and the host page), `662b2fb`
+(`cargo run -p xtask -- dist` and the bundle the binary embeds) and `a8b1dc8` (the login door), then the
+**whole-phase review**, one fix wave (`6e589de`) and a scoped re-review that answered *"correct and
+sufficient, merge is fine"*. **What it achieved:** `tipsy-web` draws the same `tipsy-ui` HUD through
+Ratzilla into a canvas, with the browser's own microphone and playback and the login door, and **the
+client's turn, microphone and playback rules are imported from `tipsy_ui::policy`, never cloned** —
+which is why the client's files were split before this phase — and the review proved the import by
+mutating the shared functions and watching two crates go red. It ends at **649 entries / 647 distinct
+names, 0 failures**, clippy at exactly the seven documented findings and the wasm gate clean. **The
+review's two blockers are closed:** the browser's push-to-talk was **dead in every configuration** — the
+login door's predicate `login.is_some() && voice && open` was the sole guard on the sole send site, and
+`state.login` is `None` except during an open login capture, so `Tab` moved the HUD's switch and nothing
+followed (the fix is a two-case match, and **the test that pinned the defect had encoded it**); and a
+microphone that would not open left the page behind an opaque full-viewport overlay with its explanation
+out of sight. The one `AudioContext` is now the press's, so a refused microphone still hears the
+greeting and every reply.
+
+**The defects the user's own browser found after Phase 2 merged, and the lesson they carry.** The
+terminal page asked for `Consolas` first, which does not carry the HUD's box-drawing, block and
+geometric glyphs, so xterm.js fell back **per glyph**, the fallback's advance differed from the cell
+width measured from the primary font, and every frame came out misaligned; fixed by putting
+`DejaVu Sans Mono` first, with `Cascadia Mono` behind it (`8c2a719`, `407eebd`). And the page **dropped
+its own size before the socket opened** — `send` writes only while `OPEN`, and the first `resize` comes
+from the `fit()` at load, before the socket exists — so the child kept the size the PTY was born with
+until a human dragged the window; fixed by queueing while connecting and re-sending the size on `open`
+(`5e22919`). **Both were in a page no test could see**, and the class is now counted: three times in
+this plan the tests drove the sequence a script naturally writes while the page did something else (the
+padding frame's shape, a guard that asked about a directory, and this dropped resize).
 
 **The client's files are split, and the client's decision policy is shared** — spec
 `docs/superpowers/specs/2026-10-12-client-modularity-design.md`. **Merged into `master` at `0de11e0`**
@@ -144,12 +180,12 @@ lines" target for `client.rs` was wrong and is not met**: the four moves shed 48
 the ~730 its arithmetic assumed, because `client.rs` keeps `frame_loop`, `on_message`, `on_action`
 (both settings arms included), `key_input` and `clock_view`. `session.rs` was **not** split — that task
 was dropped deliberately (nothing outside the server needs it) — and `key_input` and `clock_view`
-deliberately did **not** move, because `tipsy-ui` may never gain `crossterm`. **What Phase 3 still
-owes: every `file:line` the web-tier plan and its tasks carry for `client.rs` is stale — the line is in
-`client/settings.rs`, `client/call.rs`, `client/mic.rs` or `client/audio.rs` now — and must be
-re-measured rather than trusted.** The tree is stable, so one re-measurement holds. (Phase 2 owed the
-same and paid it: its own tasks re-measured what they touched, and the ledger records each drift it
-found with the tree's truth beside it.)
+deliberately did **not** move, because `tipsy-ui` may never gain `crossterm`. **The `file:line` debt
+this left is paid:** every `file:line` the web-tier plan and its tasks carry for `client.rs` is stale —
+the line is in `client/settings.rs`, `client/call.rs`, `client/mic.rs` or `client/audio.rs` now — and
+Phase 3's tasks re-measured what they touched instead of trusting the number, each recording the drift
+with the tree's truth beside it in the plan's ledger, while the plan's own numbers stay as written under
+its front-matter warning. (Phase 2 owed the same and paid it the same way.)
 
 **Both throwaway spikes are done, and the second one shapes `hands_free`.** They live in scratch
 directories outside the repo and nothing of them is committed. **Ratzilla: PASS on all four gate
@@ -166,6 +202,28 @@ and one ~10-minute validation with the user's own voice is unavoidable); it need
 detector beside `VadState`**, because it wants 480-sample frames where the client sends 320; and
 **Porcupine is no longer an alternative at all** — every version of its Rust crate is yanked and the
 free tier was withdrawn. Every profile's wake word stays provisional until it is verified.
+
+**Written and waiting to be executed: the tone floor** — `docs/superpowers/plans/2026-10-12-tipsy-tone.md`
+(**3 tasks**) and its spec `docs/superpowers/specs/2026-10-12-tipsy-tone-design.md`, committed at
+`dd02353`. The user's requirement: the almost-drunk tone must **prevail over any configuration**, in the
+voice and in the text, so the app never loses its grace. The copy is the user's and is **approved
+verbatim** (it is quoted in both documents, and implementers reproduce it). The plan's central
+correction is that the connector which keeps only a brief's **first sentence** is the **native Gemini**
+one, not the shipped default — the default OpenAI-compatible route sends the whole brief — so the floor
+is **prepended** to the delivery brief (and never stored in the configuration) while the system prompt
+gets it last.
+
+**The user's queue, in the order they were told it would run:** (1) the login widget must go **at once**
+on a correct answer instead of waiting for `Enter` — the code paths, the spec sentences and the five
+tests it touches are in `.superpowers/sdd/2026-10-11-plan-login-screen/follow-ups.md`, item 1;
+(2) **choosing a profile in the configuration screen must apply at once** — recorded in
+`.superpowers/sdd/2026-10-10-plan-2b-config-screen-and-auto-mode/follow-ups.md`, beside the hot-reload
+request; (3) the tone plan above; (4) the **eight residuals** the Phase 3 re-review parked, the first of
+them a comment in `mic.rs` that claims something the browser does not do —
+`.superpowers/sdd/2026-10-11-plan-3-web-tier/follow-ups.md`; (5) the requests panel (2B's follow-ups)
+and Plan 4 `hands_free`, which still needs about ten minutes of the user's own voice. **The documents a
+fresh session should open first** are the tone spec, the tone plan, the Phase 3 ledger
+(`.superpowers/sdd/2026-10-11-plan-3-web-tier/progress.md`) and its `follow-ups.md`.
 
 ## Budget rules (user is on a tight budget)
 
@@ -198,6 +256,30 @@ free tier was withdrawn. Every profile's wake word stays provisional until it is
 - **Run the tests with `-j 1`.** At cargo's default job parallelism this machine dies with
   `STATUS_STACK_BUFFER_OVERRUN`, which looks exactly like a code fault and is not one. Plan 2B's
   ledger records the discovery.
+- **A running application locks its own binary.** On Windows cargo cannot replace
+  `.target-sandbox\debug\tipsy-compadre.exe` while the user's `serve` is running, and the failure reads
+  `error: failed to remove file …` followed by `could not compile … (test "login")` — **with no mention
+  of a lock**, which is what makes it a trap. Two full verification runs were lost to it. Stop the app
+  before rebuilding, or build into a different target directory.
+- **A debug build's embedded `web/` is read from disk, but the path is compile-time.** `rust-embed`
+  resolves the folder **absolutely** when compiling, so editing `web/terminal/index.html` reaches a
+  running **debug** server built in that tree with no rebuild, while a **release** build embeds it and
+  needs one; a debug binary copied elsewhere still serves the tree it was built in. The README's
+  sentence says "the directory you run the binary from" (`README.md`) and is **wrong** — the practical
+  advice stands, the mechanism does not.
+- **A mutation harness that restores a file by byte copy must reset its `LastWriteTime`.** `Copy-Item`
+  preserves the backup's timestamp, so the restored source can be older than the artifact built from the
+  **mutated** source, cargo judges it fresh, and a stale mutated build is reused — this is three
+  differently sized `libtipsy_ui-*.rlib` files in `debug/deps`, with `cargo test --workspace` green and
+  `cargo test -p tipsy-web` red. `cargo clean -p <crate>` is the cure.
+- **`cargo test -p A -p B` stops at the first failing target**; `--no-fail-fast` is needed to see the
+  second. And when counting clippy's findings, count the `-->` **source locations**, not `^warning:`
+  lines: a dependency's build-script warning (`ring@… ToolExecError`) has no location and inflates a
+  naive count.
+- **`E:` fills up, and it is the wrong place for a full build of this workspace.** A fresh `tipsy-web`
+  build with Ratzilla, web-sys and the wasm target took it to zero. `G:` is where the workspace's
+  `.cargo/config.toml` sends builds, and it is the sandboxed shell's `CARGO_TARGET_DIR` override
+  (`.target-sandbox`, above) that fills `E:`. Delete `debug/incremental` and the `.pdb` files.
 - **When DSH's sandbox breaks, the file tools keep working and the shell does not.** Symptom: every
   `pwsh` call fails with `sandbox-local windows-acl temp grant materialization failed and its cleanup
   also failed`, even a bare directory listing, while `read`, `write`, `glob` and `grep` stay fine. An
