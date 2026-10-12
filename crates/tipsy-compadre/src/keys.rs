@@ -102,11 +102,19 @@ impl KeyResolver {
         self.store.as_ref()
     }
 
+    /// The value, and where it came from. **Every value this returns is registered with
+    /// `logging::hide` before it is returned**, so no call site — a connector, a probe, a refusal, an
+    /// error message — can log it, not even by accident (spec §9.6, v1 spec §11).
     pub fn resolve(&self, name: &str) -> Result<Option<(String, KeySource)>, KeyError> {
         if let Some(v) = (self.env)(&env_var_name(name)).filter(|v| !v.trim().is_empty()) {
-            return Ok(Some((v.trim().to_string(), KeySource::Env)));
+            let v = v.trim().to_string();
+            crate::logging::hide(&v);
+            return Ok(Some((v, KeySource::Env)));
         }
-        Ok(self.store.get(name)?.map(|v| (v, KeySource::Store)))
+        Ok(self.store.get(name)?.map(|v| {
+            crate::logging::hide(&v);
+            (v, KeySource::Store)
+        }))
     }
 }
 

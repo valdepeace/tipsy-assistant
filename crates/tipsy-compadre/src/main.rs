@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use tipsy_compadre::client;
 use tipsy_compadre::config::store;
 use tipsy_compadre::keys::{redact, KeyResolver, KeySource, OsKeyring, SecretStore};
+use tipsy_compadre::logging;
 use tipsy_compadre::providers::{ProviderSlot, build_providers};
 
 /// Exit code used when a provider cannot be built for want of a key.
@@ -31,7 +32,7 @@ struct Cli {
     /// The token the remote server requires. Only read with `--connect`.
     #[arg(long, value_name = "TOKEN", requires = "connect")]
     token: Option<String>,
-    /// Say more about what this process is doing. Task 1.9 also routes the log to stderr with it.
+    /// Say more about what this process is doing, and copy the log to stderr as well.
     #[arg(long, global = true)]
     verbose: bool,
     #[command(subcommand)]
@@ -86,6 +87,19 @@ enum ConfigCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Before anything else, so the first event of the run is recorded and every line after it has
+    // somewhere to go (spec §9.6). A log that cannot be opened is a line on stderr, not a refusal:
+    // the assistant works without its log.
+    let config_path = store::default_path();
+    match logging::init(&logging::log_path(&config_path), cli.verbose) {
+        Ok(path) => announce(cli.verbose, format!("log: {}", path.display())),
+        Err(e) => eprintln!("tipsy-compadre: no log file: {e}"),
+    }
+    // The token a `--connect` run presents is the same secret the server compares, so it is
+    // registered before any arm below can say anything about the attach (spec §9.6).
+    if let Some(token) = cli.token.as_deref() {
+        logging::hide(token);
+    }
     match (cli.connect, cli.command) {
         // `--connect` runs the TUI and nothing else: no server, no providers, no credential store.
         (Some(url), None) => remote_client(url, cli.token, cli.verbose),
@@ -100,8 +114,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// `--verbose` before Task 1.9's `tracing` bootstrap: the one line that says which mode this process
-/// is in, and where. The token is never printed — only whether one was given (spec §9.2).
+/// `--verbose`'s startup line: which mode this process is in, and where. The token is never printed —
+/// only whether one was given (spec §9.2).
+///
+/// **It is an `eprintln!` and stays one now that `logging` exists.** It answers "what did I just run",
+/// which is a line for the terminal it was started from rather than a record of what happened.
+/// Everything that *is* a record — the address the listener bound, the certificate's fingerprint,
+/// what TLS does not buy — goes through `logging`, and reaches `tipsy-compadre.log` whether or not
+/// `--verbose` is passed. This line never reaches a file.
 fn announce(verbose: bool, line: impl std::fmt::Display) {
     if verbose {
         eprintln!("tipsy-compadre: {line}");
@@ -122,6 +142,12 @@ fn run_client(verbose: bool) -> ExitCode {
     if let Some(warning) = &loaded.warning {
         eprintln!("tipsy-compadre: {warning}");
     }
+    // The token must never reach a log line, and it is registered the moment it is in hand
+    // (spec §9.6). Deliberately *here* and in `serve`, rather than once in `main`: an unconditional
+    // `load_or_create` up there would make `config path` and `key status` create the file on a fresh
+    // machine and, worse, rename and reset a corrupt one — a read-only subcommand with a
+    // destructive side effect.
+    logging::hide(&loaded.config.server.token);
     // Building here, and not inside the client, is what turns a missing key into exit code 2.
     match build_providers(&loaded.config.providers, &KeyResolver::system()) {
         Ok(_) => match run_terminal(path) {
@@ -204,6 +230,9 @@ fn serve_command(
     if let Some(warning) = &loaded.warning {
         eprintln!("tipsy-compadre: {warning}");
     }
+    // This process is about to hold the token for as long as it runs, so it is registered before
+    // anything can log it (spec §9.6). The `--verbose` line below says "set", never the value.
+    logging::hide(&loaded.config.server.token);
     let mut config = loaded.config;
     if let Some(bind) = bind {
         // This run only. `serve --bind` never writes the file back (spec §5.1).

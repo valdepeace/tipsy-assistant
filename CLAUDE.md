@@ -49,10 +49,18 @@ is a **ritual, not authentication**: `server.token` is still the only door, and 
 docs or comments claims otherwise. Its record is `.superpowers/sdd/2026-10-11-plan-login-screen/` — read
 `coordinator-rulings.md` there, not `progress.md`, which another session overwrote.
 
-**Written, not started: Plan 3, the web tier**
+**In flight on its own branch: Phase 1 of Plan 3, the web tier**
 (`docs/superpowers/plans/2026-10-11-plan-3-web-tier.md`, spec
 `docs/superpowers/specs/2026-10-11-web-tier-design.md`) — **20 tasks in three phases** (9 server and
-remote client, 4 web terminal, 7 web client), whose Ratzilla gate is answered `PASS`. Start from
+remote client, 4 web terminal, 7 web client), whose Ratzilla gate is answered `PASS`. **Tasks 1.1–1.9
+are executed on branch `plan-3-phase-1` and not merged, and not yet reviewed**, at **490 tests, 0
+failures**: the token-guarded WebSocket server (`serve`, the `Hub`, one session per connection, the
+bind rule), the embedded bundle with its honest fallback pages, TLS with a certificate generated once
+beside `config.toml` and the `insecure_transport` rule, the native `--connect` client, and the
+`tracing` bootstrap whose three redaction rules keep the token, every key value this process resolved
+and audio out of the log. Its ledger is
+`.superpowers/sdd/2026-10-11-plan-3-web-tier/progress.md` and the constraints every task inherits are
+beside it in `global-constraints.md`; Phases 2 and 3 have not started. Start from
 `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`: it names which of its tasks can begin without
 touching a file another task owns, the order the compiler imposes, and the environment traps.
 
