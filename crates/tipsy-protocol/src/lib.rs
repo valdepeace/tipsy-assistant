@@ -246,9 +246,21 @@ pub struct ClientServerView {
 /// `Authorization: Bearer …` to whatever address the configuration names, so a client that could send
 /// an address could redirect that key to a host of its choosing without ever reading the value —
 /// which defeats §4.3's "a client never sees a key value" by moving the key instead of reading it.
-/// `key_name` is the same lever one step further from the socket: naming a different store entry is
-/// choosing which of the server's secrets it spends. The server keeps both, and the type makes
-/// sending either one impossible rather than refused.
+/// `key_name` is the same lever a step nearer the socket: naming a different store entry is choosing
+/// which of the server's secrets it spends, and it spends it on the server's **very next request**.
+/// The server keeps both, and the type makes sending either one impossible rather than refused.
+///
+/// **`realtime.key_name` stays, and the reason is not that its endpoint is a constant** — a fixed
+/// endpoint still spends a secret. What makes it inert over a socket is that **the server never
+/// resolves it for a socket client**: the realtime socket is opened by the *client*, which resolves
+/// that key itself, and a `--connect` client holds no resolver and refuses the call outright
+/// (`client::bridge`). So over a socket the name can only affect a later **local** run of the same
+/// configuration — a lever with no immediate spend, where a provider's `key_name` is spent at once.
+/// The asymmetry between the two is about immediacy, and *that* is the reason.
+///
+/// One residual this leaves: a client on loopback or TLS can still choose a key name through
+/// `SetKey { name, value }` — the same lever with the value supplied — and §9.4's guard is what
+/// refuses it elsewhere.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientProviderView {
     pub capability: Capability,
