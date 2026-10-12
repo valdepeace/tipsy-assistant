@@ -18,7 +18,7 @@ const MISSING_KEY: u8 = 2;
 // comment, because clap folds a doc comment into the help text and this one is a note to the reader
 // of the code, not copy for a user.
 //
-// Task 1.8 registers `--tls`, `--tls-cert` and `--tls-key`, and only then: nothing is accepted
+// Task 1.8 registers `--tls`, `--tls-cert` and `--tls-key` on `serve`; before it, nothing is accepted
 // before it is implemented. `Debug` on all four types below is what the CLI test needs —
 // `Cli::try_parse_from(..).unwrap_err()` requires the success half of the `Result` to be `Debug`,
 // and the `serve` arm's failure message formats the command it did get.
@@ -55,6 +55,16 @@ enum Cmd {
         /// Override the configured bind address for this run only; the file is never written.
         #[arg(long, value_name = "ADDR")]
         bind: Option<String>,
+        /// Serve over TLS. The token and a new API key are then safe on a LAN; it does not by itself
+        /// unlock the browser microphone from another machine (spec §9.5).
+        #[arg(long)]
+        tls: bool,
+        /// A certificate to serve with. Needs `--tls-key`; implies `--tls`.
+        #[arg(long, value_name = "PEM", requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// The private key for `--tls-cert`.
+        #[arg(long, value_name = "PEM", requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
     },
 }
 
@@ -86,7 +96,7 @@ fn main() -> ExitCode {
         (None, None) => run_client(cli.verbose),
         (None, Some(Cmd::Key { command })) => key_command(command),
         (None, Some(Cmd::Config { command })) => config_command(command),
-        (None, Some(Cmd::Serve { bind })) => serve_command(bind, cli.verbose),
+        (None, Some(Cmd::Serve { bind, tls, tls_cert, tls_key })) => serve_command(bind, tls, tls_cert, tls_key, cli.verbose),
     }
 }
 
@@ -171,7 +181,18 @@ fn run_remote_terminal(url: String, token: Option<String>) -> Result<(), String>
 /// The resolver and the connectors are built *here*, in the server process, which is the whole point
 /// of the split: the client that attaches over a socket never resolves a key. A file that names a key
 /// nobody holds exits with the same code a bare run's does (`MISSING_KEY`).
-fn serve_command(bind: Option<String>, verbose: bool) -> ExitCode {
+///
+/// **This function does no file I/O for TLS.** It turns the three flags into the one value
+/// `Settings.tls` takes; the loading, the refusal that names a missing pair and the fingerprint all
+/// belong to `server::run`'s TLS branch, which is also what keeps a second error type out of this
+/// file (spec §5.5, §10).
+fn serve_command(
+    bind: Option<String>,
+    tls: bool,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    verbose: bool,
+) -> ExitCode {
     let path = store::default_path();
     let loaded = match store::load_or_create(&path) {
         Ok(loaded) => loaded,
@@ -191,12 +212,23 @@ fn serve_command(bind: Option<String>, verbose: bool) -> ExitCode {
     announce(
         verbose,
         format!(
-            "mode: server; bind {}; config {}; token {}",
+            "mode: server; bind {}; config {}; token {}{}",
             config.server.bind,
             path.display(),
-            if config.server.has_token() { "set" } else { "not set" }
+            if config.server.has_token() { "set" } else { "not set" },
+            if tls { "; tls" } else { "" }
         ),
     );
+    // One of §5.5's three states. `--tls-cert`/`--tls-key` is `Supplied`; `--tls` alone is
+    // `Generated`; nothing is `None`. clap has already refused a lone `--tls-cert` or `--tls-key`
+    // (`requires`, above), so the `zip` below cannot silently drop a file the user named — and a
+    // `(true, None)` is what is left when `--tls` was given with no pair. `TlsFiles` is Task 1.4's
+    // type, declared beside `Settings` in `server/mod.rs`; this arm only fills it in.
+    let tls = match (tls || tls_cert.is_some(), tls_cert.zip(tls_key)) {
+        (false, _) => None,
+        (true, Some((cert, key))) => Some(tipsy_compadre::server::TlsFiles::Supplied { cert, key }),
+        (true, None) => Some(tipsy_compadre::server::TlsFiles::Generated),
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(e) => {
@@ -214,8 +246,7 @@ fn serve_command(bind: Option<String>, verbose: bool) -> ExitCode {
     };
     // `Settings` is Task 1.4's, and this literal is its final shape, all eight fields. `bind`, `lan`
     // and `token` are the three the bind rule and the handshake read; `config`, `config_path`, `keys`
-    // and `providers` are what `server::run` builds the `Hub` and every session from; `tls` stays
-    // `None` until Task 1.8 fills it in.
+    // and `providers` are what `server::run` builds the `Hub` and every session from.
     let settings = tipsy_compadre::server::Settings {
         bind: config.server.bind.clone(),
         lan: config.server.lan,
@@ -224,7 +255,7 @@ fn serve_command(bind: Option<String>, verbose: bool) -> ExitCode {
         config_path: path,
         keys,
         providers,
-        tls: None,
+        tls,
     };
     // The listener reports the address it actually bound — `--bind 127.0.0.1:0` is a real request for
     // a free port — and `server::run` sends it only after §5.1's whole rule has passed, so a run that
@@ -327,7 +358,8 @@ mod tests {
         let cli = Cli::try_parse_from(["tipsy-compadre", "serve", "--bind", "127.0.0.1:0", "--verbose"]).unwrap();
         assert!(cli.verbose, "`--verbose` is global, so it parses on either side of the subcommand");
         match cli.command {
-            Some(Cmd::Serve { bind }) => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
+            // The three TLS fields belong to the test below; this one is about `--bind`.
+            Some(Cmd::Serve { bind, .. }) => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
             other => panic!("`serve` must be a subcommand, got {other:?}"),
         }
 
@@ -352,10 +384,38 @@ mod tests {
         assert!(error.to_string().contains("--connect"), "`--token` without `--connect` is a usage error: {error}");
     }
 
+    /// Task 1.7's `the_tls_flags_do_not_exist_until_their_task_does` asserted that `serve --tls` did
+    /// **not** parse, and said in as many words that this task would replace it. It is replaced here
+    /// by its positive half rather than deleted: TLS is registered now, and the three shapes a user
+    /// can ask for are the three `Settings.tls` states (spec §5.5). What the flags *mean* — the
+    /// certificate's loading, the refusal that names a path, the fingerprint — belongs to
+    /// `server::run`, and is tested in `server/tls.rs`.
     #[test]
-    fn the_tls_flags_do_not_exist_until_their_task_does() {
-        // Task 1.8 registers `--tls`, `--tls-cert` and `--tls-key` and replaces this test: nothing
-        // is accepted before it is implemented.
-        assert!(Cli::try_parse_from(["tipsy-compadre", "serve", "--tls"]).is_err());
+    fn the_cli_registers_tls_and_its_pair() {
+        let cli = Cli::try_parse_from(["tipsy-compadre", "serve", "--tls"]).unwrap();
+        match cli.command {
+            Some(Cmd::Serve { tls, tls_cert, tls_key, .. }) => {
+                assert!(tls);
+                assert!(tls_cert.is_none() && tls_key.is_none());
+            }
+            other => panic!("`serve` must be a subcommand, got {other:?}"),
+        }
+
+        // Naming a pair is naming TLS: it is registered, and it is the pair that will be served.
+        let cli = Cli::try_parse_from(["tipsy-compadre", "serve", "--tls-cert", "c.pem", "--tls-key", "k.pem"]).unwrap();
+        match cli.command {
+            Some(Cmd::Serve { tls_cert, tls_key, .. }) => {
+                assert_eq!(tls_cert.as_deref(), Some(std::path::Path::new("c.pem")));
+                assert_eq!(tls_key.as_deref(), Some(std::path::Path::new("k.pem")));
+            }
+            other => panic!("`serve` must be a subcommand, got {other:?}"),
+        }
+
+        // Half a pair is a usage error: one file without the other is a configuration mistake, not a
+        // default (spec §5.5: "used when both are given").
+        let error = Cli::try_parse_from(["tipsy-compadre", "serve", "--tls-cert", "c.pem"]).unwrap_err();
+        assert!(error.to_string().contains("--tls-key"), "{error}");
+        let error = Cli::try_parse_from(["tipsy-compadre", "serve", "--tls-key", "k.pem"]).unwrap_err();
+        assert!(error.to_string().contains("--tls-cert"), "{error}");
     }
 }

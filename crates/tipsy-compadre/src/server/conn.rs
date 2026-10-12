@@ -17,6 +17,7 @@
 //! of them stops there for a reason of its own. `UpdateConfig` could not, because the hub's fan-out
 //! *is* `Command::UpdateConfig`, so its route has to be here, one hop earlier.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -83,8 +84,20 @@ enum Inbound {
 }
 
 /// Serves one connection to its end, with the default bounds. Task 1.4's `/ws` handler calls this.
-pub async fn serve(socket: WebSocket, ends: SessionEnds, hub: Hub, client: ClientKind) -> Ending {
-    serve_with(socket, ends, hub, client, ConnOptions::default()).await
+///
+/// `peer` is the address the socket arrived from and `tls` is whether the listener terminates TLS.
+/// Together they are §9.4's whole rule ([`crate::server::tls::accepts_a_secret`]): they are passed in
+/// rather than read from the configuration because a `SetKey`'s safety is a fact about *this*
+/// connection, not about what the file says the server intends.
+pub async fn serve(
+    socket: WebSocket,
+    ends: SessionEnds,
+    hub: Hub,
+    client: ClientKind,
+    peer: SocketAddr,
+    tls: bool,
+) -> Ending {
+    serve_with(socket, ends, hub, client, ConnOptions::default(), peer, tls).await
 }
 
 /// The same bridge with the bounds chosen — the shape the tests drive, and the shape Task 2.2's PTY
@@ -95,6 +108,8 @@ pub async fn serve_with(
     hub: Hub,
     client: ClientKind,
     options: ConnOptions,
+    peer: SocketAddr,
+    tls: bool,
 ) -> Ending {
     // `session_id` is the id the hub allocated and `Welcome` carries. `Hub::spawn` already attached
     // this session, before anything was sent to the client, so nothing here attaches it again — the
@@ -122,7 +137,7 @@ pub async fn serve_with(
                 Some(Ok(Message::Close(_))) => ending = Some(Ending::ClosedByClient),
                 // axum answers ping and the close handshake itself (`:221-228`).
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(message)) => match inbound(message, &to_server, &hub).await {
+                Some(Ok(message)) => match inbound(message, &to_server, &hub, peer, tls).await {
                     Inbound::Nothing => {}
                     // The session's end of the channel is gone: the session is over. That is the
                     // server stopping, not this peer saturating anything — `Saturated` is for the
@@ -185,12 +200,27 @@ pub async fn serve_with(
 /// half of that fan-out, and a bridge that handed the command straight to the session would leave a
 /// client's save applied to one session, unpersisted and invisible to every other client.
 ///
+/// **And this is where §9.4's rule is enforced**, one step before the same place anything else is
+/// handed over: a `SetKey` on a connection that is neither loopback nor TLS is answered with
+/// `Event::Error { code: insecure_transport, recoverable: true }` and **never pushed into
+/// `to_server`**. The code is the machine meaning and the message is a sentence for a person; the
+/// value that was refused appears in neither. The socket stays open: the same screen can save the
+/// same key once the connection is TLS. This is the guard rather than the session's own `SetKey` arm
+/// because the session cannot see the transport — its `SessionPolicy.loopback` is a fact about the
+/// listener, and "the listener is TLS" is not in it at all.
+///
 /// A view the hub refuses writes nothing and answers nothing, exactly as the session's arm was
 /// silent for one: the client's own screen is what names the row it could not parse.
 ///
 /// A malformed command or audio frame is an `Error` event on the wire and **not** a panic and
 /// **not** a dropped connection (spec §10).
-async fn inbound(message: Message, to_server: &mpsc::UnboundedSender<ToServer>, hub: &Hub) -> Inbound {
+async fn inbound(
+    message: Message,
+    to_server: &mpsc::UnboundedSender<ToServer>,
+    hub: &Hub,
+    peer: SocketAddr,
+    tls: bool,
+) -> Inbound {
     match message {
         // axum answers ping, pong and the close handshake itself; the close is handled by the loop.
         Message::Ping(_) | Message::Pong(_) | Message::Close(_) => Inbound::Nothing,
@@ -200,7 +230,12 @@ async fn inbound(message: Message, to_server: &mpsc::UnboundedSender<ToServer>, 
                 Inbound::Nothing
             }
             Ok(command) => {
-                if to_server.send(ToServer::Command(command)).is_err() {
+                let message = ToServer::Command(command);
+                if let Some(refusal) = crate::server::tls::refuse_set_key(&message, peer, tls) {
+                    // The socket stays open: the screen can try again once the connection is TLS.
+                    return Inbound::Send(refusal);
+                }
+                if to_server.send(message).is_err() {
                     Inbound::Gone
                 } else {
                     Inbound::Nothing
@@ -347,7 +382,6 @@ fn release(_session_id: u64) {}
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -492,12 +526,18 @@ mod tests {
 
     /// The `/ws` route's own handler. The `WebSocketUpgrade` extractor takes the last slot and
     /// `State` the one before it, which is how Task 1.4's `ws` handler is written too.
+    ///
+    /// The peer and the TLS flag are the two facts Task 1.4's own handler reads off the connection;
+    /// this one's listener is a plain loopback one, so it says so — which is also what makes the
+    /// loopback half of the §9.4 test below the *real* behaviour of a local connection rather than a
+    /// special case invented for a test.
     async fn handler_with_state(
         axum::extract::State(state): axum::extract::State<ServeTest>,
         upgrade: axum::extract::ws::WebSocketUpgrade,
     ) -> axum::response::Response {
         let hub = state.hub.clone();
         let options = state.options;
+        let peer: SocketAddr = "127.0.0.1:54123".parse().expect("a literal loopback address parses");
         upgrade
             .write_buffer_size(options.write_buffer_size)
             .max_write_buffer_size(options.max_write_buffer_size)
@@ -507,7 +547,7 @@ mod tests {
                 // listener is on loopback and holds no token, so the policy needs neither.
                 let policy = SessionPolicy::local();
                 let ends = hub.spawn(policy);
-                serve_with(socket, ends, hub.clone(), ClientKind::Web, options).await;
+                serve_with(socket, ends, hub.clone(), ClientKind::Web, options, peer, false).await;
             })
     }
 
@@ -911,5 +951,55 @@ mod tests {
         assert_eq!(hub.config().server.bind, "127.0.0.1:7171", "the hub remembered the new value");
         let on_disk = store::load_or_create(hub.path()).unwrap().config;
         assert_eq!(on_disk.server.bind, "127.0.0.1:7171", "and it is in the file, not only in memory");
+    }
+
+    /// Review Focus line 3's third leak, and §9.4's whole rule **wired in** rather than merely
+    /// correct: a `SetKey` from off this machine over plaintext never reaches the session and the
+    /// refusal comes back on the session's own event channel, while the same command from loopback —
+    /// or over TLS — is forwarded.
+    ///
+    /// The guard is driven at [`inbound`], which is the one place a socket message becomes a
+    /// `ToServer`: that is what makes this a test of the wiring and not only of
+    /// `tls::refuse_set_key`, whose own test lives beside it.
+    #[tokio::test]
+    async fn a_set_key_off_a_plaintext_lan_never_reaches_the_session() {
+        // A fixture, not a key: the workspace rule is that keys appear by name and never in a file,
+        // a log or a fixture, and this string only proves that the value never crosses.
+        const FIXTURE: &str = "sk-or-v1-fixture0000000000000000000000000000";
+        let lan: SocketAddr = "192.168.1.30:54123".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:54123".parse().unwrap();
+        let command = Command::SetKey { name: "openrouter".into(), value: FIXTURE.into() };
+        let text = Message::Text(serde_json::to_string(&command).unwrap().into());
+
+        // A hub nothing is asked of: the refusal must happen before the guard would ever read it.
+        let (_, hub) = server_with_hub(FakeChat::new(vec![]), ConnOptions::default()).await;
+
+        // Off this machine, over plaintext: the session must never see it, and the screen must be
+        // told why on the same channel every other server answer uses.
+        let (to_server, mut reached) = mpsc::unbounded_channel();
+        match inbound(text.clone(), &to_server, &hub, lan, false).await {
+            Inbound::Send(ToClient::Event(Event::Error { code, message, recoverable })) => {
+                assert_eq!(code, ErrorCode::InsecureTransport, "the machine meaning a client branches on");
+                assert!(recoverable, "the same save works once the connection is TLS");
+                assert!(!message.contains(FIXTURE), "the refusal must not repeat the key: {message}");
+            }
+            Inbound::Send(other) => panic!("a refusal is an error event, got {other:?}"),
+            Inbound::Nothing | Inbound::Gone => panic!("a key must not cross a plaintext LAN"),
+        }
+        assert!(reached.try_recv().is_err(), "and the session must never see it");
+
+        // The same command on loopback: forwarded, not refused — a client on this machine is this
+        // machine, however it reached us.
+        let (to_server, mut reached) = mpsc::unbounded_channel();
+        assert!(matches!(inbound(text.clone(), &to_server, &hub, loopback, false).await, Inbound::Nothing));
+        assert!(
+            matches!(reached.try_recv(), Ok(ToServer::Command(Command::SetKey { .. }))),
+            "a client on this machine may set a key"
+        );
+
+        // And over TLS, from anywhere: the other half of the same rule.
+        let (to_server, mut reached) = mpsc::unbounded_channel();
+        assert!(matches!(inbound(text, &to_server, &hub, lan, true).await, Inbound::Nothing));
+        assert!(matches!(reached.try_recv(), Ok(ToServer::Command(Command::SetKey { .. }))));
     }
 }
