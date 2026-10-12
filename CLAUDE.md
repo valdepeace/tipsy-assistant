@@ -85,11 +85,12 @@ beside it in `global-constraints.md`. **Read the two review reports in that same
 `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`, which the ledger records as superseded and
 wrong in three ways.
 
-**Phase 2 of that plan — the web terminal — is complete on branch `web-tier-phase-2`, head `e93b193`,
-and is not yet merged.** Four commits on a branch cut from `master` at `a548cea`: `f548207` (a
+**Phase 2 of that plan — the web terminal — is complete on branch `web-tier-phase-2`, head `bc1cc00`,
+and is not yet merged.** Five commits on a branch cut from `master` at `a548cea`: `f548207` (a
 terminal's child in a real pty, `client/pty.rs` over `portable-pty` 0.9.0),
 `ba2387c` (the raw-bytes socket and the pump), `59e211d` (the xtask fetch, verify and extract of the
-pinned xterm.js) and `e93b193` (the page, `/terminal` served end to end, and the embed it lives in). It
+pinned xterm.js), `e93b193` (the page, `/terminal` served end to end, and the embed it lives in) and
+`bc1cc00` (the whole-phase review's own fix wave). It
 was **reviewed once as a whole phase** — no blockers, five findings and seven nits, all closed in one
 fix wave: the page now sends its 256-byte padding frame as a **binary** frame, which is the shape the
 route ignores and the shape the test always sent (the string it used to send was a *text* frame, so

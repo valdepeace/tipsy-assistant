@@ -8816,8 +8816,8 @@ downloads and under what licence (spec §2 W5). That is what the negation above 
     `// verify` the research note's §6.5 skeleton carries next to `fit.fit()`.
   - `rust-embed` 8.13.0's `#[allow_missing = true]`, which is what makes the bundle optional (Task
     1.5 owns that side).
-- Produces, in the `xtask` binary crate (`cargo xtask …`, so `xtask/src/main.rs` dispatches on
-  `std::env::args().nth(1)`):
+- Produces, in the `xtask` binary crate (`cargo run -p xtask -- …`, so `xtask/src/main.rs` dispatches
+  on `std::env::args().nth(1)`):
 
 ```rust
 // xtask/src/assets.rs
@@ -9069,8 +9069,10 @@ dependency beyond the Tech Stack list**.)
 `xtask/src/main.rs`:
 
 ```rust
-//! `cargo xtask <task>`: the project's own build scripts, so the release steps live in the repository
-//! instead of in a README someone has to retype.
+//! The project's own build scripts, so the release steps live in the repository instead of in a README
+//! someone has to retype. Run them as `cargo run -p xtask -- <task>`, **not** `cargo xtask <task>`:
+//! cargo resolves that from `PATH` and this workspace's binary is not there (a `[alias]` in a
+//! `.cargo/config.toml` would work, but `.cargo/` is git-ignored and never ships).
 
 mod assets;
 
