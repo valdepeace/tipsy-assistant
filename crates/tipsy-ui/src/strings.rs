@@ -22,6 +22,10 @@ pub struct Strings {
     pub live: &'static str,
     /// Why a call did not start while `[realtime] enabled` is false.
     pub live_off: &'static str,
+    /// `F10` on a client with no realtime socket to open: there is no live call in the browser, no
+    /// command that would open one, and nothing for the indicator to report. The key says so rather
+    /// than swallowing the press (the phase review's nit).
+    pub live_web_unavailable: &'static str,
     pub cleared: &'static str,
     pub help: &'static str,
     pub weekdays: [&'static str; 7],
@@ -52,6 +56,11 @@ pub struct Strings {
     pub cfg_lan: &'static str,
     pub cfg_token: &'static str,
     pub cfg_regenerate: &'static str,
+    /// The Server tab's Regenerate row on a client that cannot mint a token: no command in this
+    /// protocol mints one and `store::new_token` lives in the server process, so the row is inert over
+    /// a socket and says where the token does come from instead of doing nothing at all (the phase
+    /// review's nit). The native client never draws this: there the row works.
+    pub cfg_regenerate_native: &'static str,
     pub cfg_save: &'static str,
     pub cfg_dirty: &'static str,
     pub cfg_unset: &'static str,
@@ -110,6 +119,35 @@ pub struct Strings {
     pub err_token_invalid: &'static str,
     /// The handshake's fallback sentence, for an ending that is not one of the three above.
     pub err_handshake: &'static str,
+    /// The browser client lost its socket and is retrying. v1 spec §12: "the client reconnects with
+    /// backoff". **The native `--connect` bridge does not use it** — its own line is an
+    /// `Event::Error` message built in `client/bridge.rs`, which is a different sink — so this pair is
+    /// the web client's, and it is here rather than in `tipsy-web` because `UILanguage`'s table is
+    /// the project's only i18n mechanism.
+    pub web_offline: &'static str,
+    /// The socket is up again, which is what the session's own `Welcome` proves.
+    pub web_online: &'static str,
+    /// The browser gate's button. The v1 spec asks for it in as many words: "In the browser, audio
+    /// capture requires a user gesture; the web client shows a 'press to start' screen until then"
+    /// (`docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md:193-194`).
+    pub mic_start: &'static str,
+    /// The line beside that button while the microphone can be offered at all.
+    pub mic_hint: &'static str,
+    /// `navigator.mediaDevices` is not there at all — it is `undefined` in an insecure context, which
+    /// is why this is a *capability* reason and not a permission one, and why it is the message that
+    /// tells the user to reach the page on loopback or over a certificate the browser trusts (MDN,
+    /// quoted at `ratzilla-and-wasm-audio.md` §4.1; web-tier spec §9.5).
+    pub mic_no_api: &'static str,
+    /// The capture opened: the frames are flowing.
+    pub mic_granted: &'static str,
+    /// "Listening disabled with a warning; typing still works" — v1 spec §12 `:418`.
+    pub mic_denied: &'static str,
+    pub mic_nodevice: &'static str,
+    pub mic_busy: &'static str,
+    /// The rest of the ways a capture fails — the worklet refused to load, the browser ignored the
+    /// constraints, a transient rejection. One message, because the user's next move is the same for
+    /// all three, and because "everything else" is not a set worth naming one string per member.
+    pub mic_failed: &'static str,
 }
 
 pub static ES: Strings = Strings {
@@ -130,6 +168,7 @@ pub static ES: Strings = Strings {
     speaking: "Hablando...",
     live: "EN VIVO",
     live_off: "El modo en vivo está apagado ([realtime] enabled = false)",
+    live_web_unavailable: "La llamada en vivo no está en el cliente web: usa el cliente nativo.",
     cleared: "Conversación borrada",
     help: " Enter preguntar · !texto recitar · Tab micro · F4 borrar · F10 llamada · ←→ chat/red · Esc salir",
     weekdays: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
@@ -160,6 +199,7 @@ pub static ES: Strings = Strings {
     cfg_lan: "Red local",
     cfg_token: "Token",
     cfg_regenerate: "Regenerar token",
+    cfg_regenerate_native: "El token lo genera el servidor: solo el cliente nativo puede regenerarlo.",
     cfg_save: "Guardar",
     cfg_dirty: "sin guardar",
     cfg_unset: "sin definir",
@@ -191,6 +231,16 @@ pub static ES: Strings = Strings {
     err_token_required: "Este servidor está expuesto y pide un token: pásalo con --token.",
     err_token_invalid: "Ese no es el token de este servidor.",
     err_handshake: "No se pudo completar el saludo con el servidor.",
+    web_offline: "Sin conexión: reintentando…",
+    web_online: "Conexión restablecida",
+    mic_start: "Pulsa para empezar",
+    mic_hint: "El navegador pedirá permiso para el micrófono",
+    mic_no_api: "Este navegador no da acceso al micrófono aquí: abre la página en localhost o por HTTPS.",
+    mic_granted: "Micrófono abierto",
+    mic_denied: "Micrófono denegado: revisa el permiso del sitio. Puedes escribir.",
+    mic_nodevice: "No hay micrófono conectado. Puedes escribir.",
+    mic_busy: "El micrófono está ocupado por otra aplicación. Puedes escribir.",
+    mic_failed: "No se pudo abrir el micrófono. Puedes escribir.",
 };
 
 pub static EN: Strings = Strings {
@@ -211,6 +261,7 @@ pub static EN: Strings = Strings {
     speaking: "Speaking...",
     live: "LIVE",
     live_off: "The live mode is off ([realtime] enabled = false)",
+    live_web_unavailable: "The live call is not in the web client: use the native client.",
     cleared: "Conversation cleared",
     help: " Enter ask · !text recite · Tab mic · F4 clear · F10 call · ←→ chat/network · Esc quit",
     weekdays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
@@ -241,6 +292,7 @@ pub static EN: Strings = Strings {
     cfg_lan: "LAN",
     cfg_token: "Token",
     cfg_regenerate: "Regenerate token",
+    cfg_regenerate_native: "The server mints the token: only the native client can regenerate it.",
     cfg_save: "Save",
     cfg_dirty: "unsaved",
     cfg_unset: "unset",
@@ -272,6 +324,18 @@ pub static EN: Strings = Strings {
     err_token_required: "This server is exposed and asks for a token: pass it with --token.",
     err_token_invalid: "That is not this server's token.",
     err_handshake: "The handshake with the server could not be completed.",
+    web_offline: "Connection lost: retrying…",
+    web_online: "Connection restored",
+    mic_start: "Press to start",
+    mic_hint: "The browser will ask for the microphone",
+    // The plan's own Step 6 English table stops one field short of the Spanish one — this line is the
+    // one it lost, and it is the reason the capability probe can answer in English at all.
+    mic_no_api: "This browser gives this page no microphone access: open it on localhost or over HTTPS.",
+    mic_granted: "Microphone open",
+    mic_denied: "Microphone denied: check the site's permission. You can still type.",
+    mic_nodevice: "No microphone connected. You can still type.",
+    mic_busy: "The microphone is in use by another application. You can still type.",
+    mic_failed: "The microphone could not be opened. You can still type.",
 };
 
 pub fn strings(lang: UiLanguage) -> &'static Strings {
@@ -296,5 +360,71 @@ mod tests {
             assert!(!table.live_off.is_empty(), "a refusal has to say something");
             assert!(table.help.contains("F10"), "the help line names the key: {}", table.help);
         }
+    }
+
+    /// The two socket notices exist in both languages and say different things: a client that showed
+    /// "connection lost" when the connection came back would be worse than silent. This is Task 3.2's
+    /// pair, and the reason they are in this table rather than hard-coded in `tipsy-web`.
+    #[test]
+    fn the_socket_notices_have_copy_in_both_languages() {
+        for table in [strings(UiLanguage::Es), strings(UiLanguage::En)] {
+            assert!(!table.web_offline.is_empty(), "a lost connection has to say something");
+            assert!(!table.web_online.is_empty(), "and so does a restored one");
+            assert_ne!(table.web_offline, table.web_online, "the two are not the same notice");
+        }
+        assert_ne!(strings(UiLanguage::Es).web_offline, strings(UiLanguage::En).web_offline);
+        assert_ne!(strings(UiLanguage::Es).web_online, strings(UiLanguage::En).web_online);
+    }
+
+    /// The browser gate's copy, in both tables and in both directions: the gate's own two lines, the
+    /// five reasons `MicAvailability` can hand back, and the pass notice. **This is the test the plan's
+    /// own Step 6 table would have failed**: its English block lists seven of the eight fields, so the
+    /// `EN` table would not have compiled — and a missing `mic_no_api` is the one reason an insecure
+    /// context can produce, which is exactly the state the capability probe exists for.
+    #[test]
+    fn the_microphone_copy_is_complete_in_both_languages() {
+        for table in [strings(UiLanguage::Es), strings(UiLanguage::En)] {
+            for (name, text) in [
+                ("mic_start", table.mic_start),
+                ("mic_hint", table.mic_hint),
+                ("mic_no_api", table.mic_no_api),
+                ("mic_granted", table.mic_granted),
+                ("mic_denied", table.mic_denied),
+                ("mic_nodevice", table.mic_nodevice),
+                ("mic_busy", table.mic_busy),
+                ("mic_failed", table.mic_failed),
+            ] {
+                assert!(!text.trim().is_empty(), "{name} has to say something");
+            }
+            // "typing still works" is the promise the v1 spec makes for every disabled microphone
+            // (§12), so each refusal says so rather than leaving the user to guess.
+            for text in [table.mic_denied, table.mic_nodevice, table.mic_busy, table.mic_failed] {
+                assert!(text.contains("escribir") || text.contains("type"), "{text}");
+            }
+            assert!(table.mic_no_api.contains("HTTPS"), "the insecure-context reason names the fix");
+        }
+        assert_ne!(strings(UiLanguage::Es).mic_start, strings(UiLanguage::En).mic_start);
+        assert_ne!(strings(UiLanguage::Es).mic_no_api, strings(UiLanguage::En).mic_no_api);
+        assert_ne!(strings(UiLanguage::Es).mic_granted, strings(UiLanguage::En).mic_granted);
+    }
+
+    /// **The two keys a web client has no implementation for now say so in both languages** (the phase
+    /// review's nit): `Ctrl+R` on the Server tab mints a token in the server process, and `F10` needs a
+    /// realtime socket the browser has no command to open. Both used to be inert with a comment in the
+    /// code and nothing on screen.
+    #[test]
+    fn the_not_implemented_here_copy_exists_in_both_languages() {
+        for table in [strings(UiLanguage::Es), strings(UiLanguage::En)] {
+            assert!(!table.cfg_regenerate_native.trim().is_empty(), "the token row has to say where");
+            assert!(!table.live_web_unavailable.trim().is_empty(), "and F10 why it did nothing");
+        }
+        assert_ne!(
+            strings(UiLanguage::Es).cfg_regenerate_native,
+            strings(UiLanguage::En).cfg_regenerate_native
+        );
+        assert_ne!(
+            strings(UiLanguage::Es).live_web_unavailable,
+            strings(UiLanguage::En).live_web_unavailable
+        );
     }
 }

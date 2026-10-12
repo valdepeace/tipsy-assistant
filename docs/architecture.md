@@ -71,8 +71,8 @@ and resize reaches the child through the pseudo-terminal itself. Users who prefe
 also run the binary under `ttyd`.
 
 **The bundle is the repository's `web/` directory, and that is one directory rather than three.**
-`cargo run -p xtask -- dist` fetches the pinned xterm.js into `web/vendor/` and (from Phase 3's Task
-3.6) builds the WebAssembly client into `web/dist/`; the binary embeds that whole tree, so both host
+`cargo run -p xtask -- dist` fetches the pinned xterm.js into `web/vendor/` and builds the WebAssembly
+client into `web/dist/`; the binary embeds that whole tree, so both host
 pages (`web/terminal/index.html` and `web/client/index.html`), the vendored `vendor/` files and the
 generated output under `dist/` are served from memory as `/assets/terminal/…`, `/assets/vendor/…` and
 `/assets/dist/…`. The folder attribute that names it is spelled `../../web/` in
@@ -91,9 +91,9 @@ WebAssembly. Native-only dependencies (multi-threaded tokio, `cpal`, `rodio`, `k
 |---|---|---|---|
 | `tipsy-protocol` | library | `Command` / `Event` messages and the audio frame format | yes |
 | `tipsy-ui` | library | The front end's shared, wasm-safe half: the ratatui HUD (widgets, state and es/en strings), backend-agnostic, **and the decisions a client makes with no device, socket or clock in reach (`policy`)** | yes |
-| `tipsy-web` | `.wasm` bundle | Web client: Ratzilla backend, browser audio, WebSocket transport | yes (target) — **arrives in Phase 3 of `2026-10-11-plan-3-web-tier.md`; it does not exist yet** |
+| `tipsy-web` | cdylib | Web client: the Ratzilla backend, the browser's microphone and speakers, the WebSocket transport | yes |
 | `tipsy-compadre` | **binary** | The server (brain, providers, config, axum, the WebSocket door) plus the native TUI client | no |
-| `xtask` | binary | `cargo run -p xtask -- dist`: fetch and verify xterm.js, build the bundle, build the binary that embeds it — **Phase 2 lands the fetch and Phase 3's Task 3.6 the two builds** | no |
+| `xtask` | **binary** | The build's own tool: `cargo run -p xtask -- dist` fetches and verifies the terminal assets, builds the wasm bundle, then builds the binary that embeds it | no |
 
 A client's turn, microphone and playback policy — which command starts a turn or quiets the device,
 when the microphone is wanted and where one captured frame goes, which cell a click landed on — lives in
@@ -120,9 +120,10 @@ embeds it), wrapped in a single project command — `cargo run -p xtask -- dist`
 `cargo xtask dist`**: cargo resolves `cargo <name>` from `PATH`, and this workspace's binary target is
 not there, so the short form answers `error: no such command: 'xtask'`. A `.cargo/config.toml`
 `[alias]` would make the short form work but that directory is git-ignored and does not ship. A plain
-`cargo build` embeds whatever `web/` holds at that moment, so it serves the checked-in
-`web/terminal/index.html` and, once Phase 3 lands it, `/` answers with a page that says the web UI is
-not available in this build and names the command above.
+`cargo build` embeds whatever `web/` holds at that moment: both checked-in pages, and the WebAssembly
+bundle **only if `dist` has run**. With no bundle it still serves the real client page — and the script
+that page imports answers 404 — while the page that says the web UI is not available in this build and
+names the command above is what a build with no `web/client/index.html` serves.
 
 The server's HTTP and WebSocket layer is `axum` 0.8.9 with its `ws` feature, and TLS is
 `axum-server` 0.8.0 (`tls-rustls`). One consequence is worth writing down rather than discovering:
