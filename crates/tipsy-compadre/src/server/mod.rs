@@ -3,15 +3,16 @@
 pub mod assets;
 pub mod conn;
 pub mod hub;
+pub mod tls;
 
 pub use hub::Hub;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -93,12 +94,16 @@ impl std::fmt::Debug for Settings {
 /// mistyped `--tls-cert` would be answered with a silently generated certificate instead of the
 /// refusal. `TlsFiles` keeps `Clone` + `Debug` honest because it is both — which is also why
 /// `Settings` can hold it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TlsFiles {
     Generated,
     Supplied { cert: PathBuf, key: PathBuf },
 }
 
+/// Why `run` refused to start, or stopped (spec §5.1, §5.5, §10). `Display` is hand-written below
+/// rather than derived, because each sentence has to carry the fact a user needs — the address that
+/// was refused, or the path that would not load — and the one variant that wraps another error says
+/// so transparently.
 #[derive(Debug)]
 pub enum ServerError {
     /// `bind` is not an explicit `IP:port`. A hostname is refused on purpose: `TcpListener::bind`
@@ -110,6 +115,18 @@ pub enum ServerError {
     /// (spec §5.1 step 3).
     BoundWiderThanAsked { addr: SocketAddr },
     Io(std::io::Error),
+    /// TLS could not be set up: a pair the user named is absent or unparseable, or a self-signed pair
+    /// could not be minted (spec §5.5, §10). **Task 1.8's variant**: it cannot come from Task 1.4,
+    /// because `TlsError` does not exist until `server/tls.rs` does. It is transparent in `Display`
+    /// and in `source` for one reason: `TlsError`'s sentence already names the paths a user has to
+    /// look at, and it is the line a failed `serve` prints.
+    Tls(tls::TlsError),
+}
+
+impl From<tls::TlsError> for ServerError {
+    fn from(error: tls::TlsError) -> Self {
+        ServerError::Tls(error)
+    }
 }
 
 impl std::fmt::Display for ServerError {
@@ -132,6 +149,9 @@ impl std::fmt::Display for ServerError {
                 "bound to {addr}, which is not a loopback address, and no token is configured"
             ),
             ServerError::Io(e) => write!(f, "cannot listen: {e}"),
+            // Transparent on purpose: `TlsError`'s own sentence already names the paths a user has
+            // to look at, and wrapping it again here would put a second prefix in front of them.
+            ServerError::Tls(e) => write!(f, "{e}"),
         }
     }
 }
@@ -140,6 +160,7 @@ impl std::error::Error for ServerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ServerError::Io(e) => Some(e),
+            ServerError::Tls(e) => Some(e),
             _ => None,
         }
     }
@@ -155,6 +176,10 @@ pub(crate) struct ServeState {
     /// loopback needs no token, anything wider does (spec §4.1, §9.1). It is the same `SessionPolicy`
     /// `Hub::spawn` takes.
     pub(crate) policy: SessionPolicy,
+    /// Whether this listener terminates TLS. It rides here because it is the one fact of §9.4's rule
+    /// a socket cannot read off itself: the `SetKey` guard is `tls || peer.ip().is_loopback()`, and
+    /// the peer comes from the connection while this comes from `Settings.tls`.
+    pub(crate) tls: bool,
 }
 
 /// The token as the routes compare it. `has_token` (`config/model.rs:59-61`) trims, so a
@@ -168,8 +193,8 @@ fn token_of(token: &str) -> Option<String> {
 /// the hub by the time this runs, which is why `run` builds the hub first and passes both in. There
 /// is no provider stack here either — the hub holds it, and a connection gets a session from
 /// `Hub::spawn`.
-pub(crate) fn state(settings: &Settings, hub: Hub, policy: SessionPolicy) -> ServeState {
-    ServeState { token: token_of(&settings.token), hub, policy }
+pub(crate) fn state(settings: &Settings, hub: Hub, policy: SessionPolicy, tls: bool) -> ServeState {
+    ServeState { token: token_of(&settings.token), hub, policy, tls }
 }
 
 /// Spec §5.1 steps 1 and 2, before the bind: the user-facing refusal.
@@ -184,7 +209,9 @@ fn guard_pre_bind(bind: &str, token: Option<&str>) -> Result<SocketAddr, ServerE
 }
 
 /// Spec §5.1 step 3, after the bind. The listener is dropped by the caller when this returns `Err`.
-fn guard_post_bind(listener: &tokio::net::TcpListener, token: Option<&str>) -> Result<(), ServerError> {
+/// It takes a **`std::net`** listener because `run` binds once, synchronously, and hands the same
+/// socket to whichever listener serves it (spec §5.1 step 3 is about the socket, not the runtime).
+fn guard_post_bind(listener: &std::net::TcpListener, token: Option<&str>) -> Result<(), ServerError> {
     let addr = listener.local_addr().map_err(ServerError::Io)?;
     if !addr.ip().is_loopback() && token.is_none() {
         return Err(ServerError::BoundWiderThanAsked { addr });
@@ -197,7 +224,18 @@ fn guard_post_bind(listener: &tokio::net::TcpListener, token: Option<&str>) -> R
 pub async fn run(settings: Settings, bound: tokio::sync::oneshot::Sender<SocketAddr>) -> Result<(), ServerError> {
     let token = token_of(&settings.token);
     let addr = guard_pre_bind(&settings.bind, token.as_deref())?;
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(ServerError::Io)?;
+    // Bound synchronously, and only then handed to whichever listener serves it: `axum_server` (the
+    // TLS arm) is built from a `std::net::TcpListener`, and one bind means one place where §5.1's
+    // post-bind half is checked — before TLS setup, so a certificate that cannot be read refuses to
+    // start rather than becoming a listener that fails on its first connection (spec §10).
+    //
+    // **`set_nonblocking(true)` is required and is not a detail.** `axum_server::from_tcp` wraps the
+    // socket with `tokio::net::TcpListener::from_std`, and on this platform a *blocking* socket given
+    // to it does not merely misbehave: `accept_stream` parks a runtime worker inside `accept(2)`, so
+    // the first connection is left waiting for ever and the whole test binary stalls. Measured here,
+    // not assumed — the identical listener with `set_nonblocking(true)` answers 200 immediately.
+    let listener = std::net::TcpListener::bind(addr).map_err(ServerError::Io)?;
+    listener.set_nonblocking(true).map_err(ServerError::Io)?;
     guard_post_bind(&listener, token.as_deref())?;
     let local = listener.local_addr().map_err(ServerError::Io)?;
     let _ = bound.send(local);
@@ -210,12 +248,37 @@ pub async fn run(settings: Settings, bound: tokio::sync::oneshot::Sender<SocketA
         token: token.clone().unwrap_or_default(),
         loopback: local.ip().is_loopback(),
     };
-    // Task 1.8's TLS branch goes here: `tls::load_or_generate(files)` against `settings.tls`, with
-    // the listener handed to `axum_server::tls_rustls::bind_rustls` instead of `axum::serve`. Doing
-    // the loading inside `run` is what makes an absent or unparseable `--tls-cert` a `ServerError`
-    // naming the path (spec §10) rather than a second error type in the CLI. `None` is no TLS, and
-    // that is the only branch this task implements.
-    let _ = &settings.tls;
+    // Task 1.8's TLS branch. The loading is here and not in `main.rs` for two reasons: a certificate
+    // that cannot be read has to travel as one of this function's own errors, and the CLI must not
+    // grow a second error type of its own (spec §5.5, §10).
+    //
+    // The SAN list is built from the **parsed** address, never from `settings.bind`: `rcgen` turns a
+    // string that parses as an `IpAddr` into an IP SAN and anything else — `"127.0.0.1:7070"`
+    // included — into a DNS name, which no browser matches. A certificate without the literal
+    // address in its SANs is a certificate the browser rejects (research note §4.1).
+    let tls_config = match &settings.tls {
+        None => None,
+        Some(files) => {
+            let paths = tls::Paths {
+                files: files.clone(),
+                config_dir: settings.config_path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                hostnames: vec![local.ip().to_string(), "localhost".to_string()],
+            };
+            let certificate = tls::load_or_generate(paths)?;
+            if let Some(fingerprint) = &certificate.fingerprint {
+                // Printed once, by the run that minted the pair, so a user can compare it with the
+                // browser's certificate viewer (spec §5.5).
+                println!("tipsy-compadre: certificate generated at {}", certificate.cert.display());
+                println!("tipsy-compadre: SHA-256 fingerprint {fingerprint}");
+            }
+            // What the flag buys, and what it does not, where a user reads it (spec §9.5).
+            eprintln!("tipsy-compadre: TLS encrypts this connection, so the token and a new API key are safe on a LAN.");
+            eprintln!("tipsy-compadre: it does not unlock the browser microphone from another machine: that needs a");
+            eprintln!("tipsy-compadre: certificate the browser already trusts (--tls-cert/--tls-key), or a client on this");
+            eprintln!("tipsy-compadre: machine, where http://127.0.0.1 is already a secure context.");
+            Some(tls::rustls_config(&certificate).await?)
+        }
+    };
     // The `Hub` is built once, before the first connection, and outlives every session (spec §5.2).
     // It takes the one shared provider slot: `Hub::spawn` clones it into each session, and
     // `reconfigure_all` is what replaces its contents when the configuration changes. It also takes
@@ -227,8 +290,29 @@ pub async fn run(settings: Settings, bound: tokio::sync::oneshot::Sender<SocketA
         settings.keys.clone(),
         settings.providers.clone(),
     );
-    let app = mount(state(&settings, hub, policy));
-    if let Err(e) = axum::serve(listener, app).await {
+    let app = mount(state(&settings, hub, policy, tls_config.is_some()));
+    // **The same `app` value in both arms**, which is what makes "a TLS listener serves the same
+    // routes as the plain one" true by construction rather than by two routers being kept in step.
+    // `into_make_service_with_connect_info::<SocketAddr>()` is what gives the `/ws` handler the peer
+    // address Task 1.8's §9.4 guard reads; without it that extractor refuses the request, so both
+    // arms need it.
+    let handle = axum_server::Handle::<SocketAddr>::new();
+    let outcome = match tls_config {
+        Some(config) => {
+            axum_server::tls_rustls::bind_rustls(local, config)
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+        }
+        None => {
+            axum_server::from_tcp(listener)
+                .map_err(ServerError::Io)?
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+        }
+    };
+    if let Err(e) = outcome {
         tracing::error!(error = %e, "the listener stopped with an error");
     }
     Ok(())
@@ -317,7 +401,17 @@ fn page_response(content_type: &'static str, body: Vec<u8>) -> Response {
 }
 
 /// The protocol socket. Registered here; everything past the upgrade belongs to Task 1.6.
-async fn ws(State(state): State<ServeState>, query: Query<TokenQuery>, upgrade: WebSocketUpgrade) -> Response {
+///
+/// `ConnectInfo<SocketAddr>` is the peer's address, and Task 1.8's §9.4 guard is the one thing that
+/// needs it: the rule is about **who** sent a `SetKey`, not about what the configuration says. The
+/// `true` passed to `conn::serve` is whether this listener terminates TLS — the other half of the
+/// same decision, and the one fact a socket cannot read off itself.
+async fn ws(
+    State(state): State<ServeState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    query: Query<TokenQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
     if !token_ok(&state, &query) {
         return refused();
     }
@@ -332,6 +426,9 @@ async fn ws(State(state): State<ServeState>, query: Query<TokenQuery>, upgrade: 
     // itself, and `serve` needs another handle to it.
     let hub = state.hub.clone();
     let policy = state.policy.clone();
+    // Whether this listener terminates TLS, taken off the state the router was built with. It travels
+    // into the bridge because a socket cannot read its own transport: §9.4's rule is `tls || loopback`.
+    let tls = state.tls;
     upgrade.on_upgrade(move |socket| async move {
         // `Hub::spawn` is the only path a connection uses: the session is attached to the registry
         // **before** `Welcome` goes out, which is what removes the race a spawn-then-attach ordering
@@ -341,7 +438,7 @@ async fn ws(State(state): State<ServeState>, query: Query<TokenQuery>, upgrade: 
         // `ClientKind::Web`: this socket carries the HUD protocol, not raw PTY bytes. `/terminal/ws`
         // (`ClientKind::WebTerminal`) is Task 2.2's. The kind travels with the socket because the
         // session's own front door is `Command::Hello`, which every connection sends first.
-        conn::serve(socket, ends, hub.clone(), ClientKind::Web).await;
+        conn::serve(socket, ends, hub.clone(), ClientKind::Web, peer, tls).await;
     })
 }
 
@@ -515,12 +612,13 @@ mod tests {
 
         // Step 3, after the bind. The only way to reach a non-loopback `local_addr` here is to ask
         // for one directly — which is exactly what the third check exists for: a listener that came
-        // out wider than the address that was requested.
-        let wide = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("0.0.0.0 is bindable");
+        // out wider than the address that was requested. `std::net`, because that is the socket `run`
+        // binds before it decides which listener serves it.
+        let wide = std::net::TcpListener::bind("0.0.0.0:0").expect("0.0.0.0 is bindable");
         assert!(!wide.local_addr().unwrap().ip().is_loopback(), "0.0.0.0 is not loopback");
         assert!(matches!(guard_post_bind(&wide, None), Err(ServerError::BoundWiderThanAsked { .. })));
         assert!(guard_post_bind(&wide, Some("t")).is_ok(), "a token makes it legal after the bind too");
-        let tight = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tight = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         assert!(guard_post_bind(&tight, None).is_ok(), "a loopback bind passes with no token");
     }
 }
