@@ -1,6 +1,16 @@
 # Plan 3 — Web tier Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Pending, and it changes the citations below.** Before Phase 2 starts, the client's four large files
+> are split by reason to change and the client's decision policy moves to `tipsy_ui::policy` — see
+> `docs/superpowers/specs/2026-10-12-client-modularity-design.md` and the dated notice at the top of
+> `.superpowers/sdd/2026-10-11-plan-3-web-tier/global-constraints.md`. **Every `file:line` below for
+> `client.rs`, `session.rs`, `state.rs` and `config_form.rs` is stale until re-measured**; `client.rs`
+> stays the parent module; and Tasks 3.4 and 3.5 import `starts_turn`, `interrupts_playback`,
+> `test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`, `mic_wanted`, `mic_route`/
+> `MicRoute` and `hit_at` instead of defining them. `key_input` and `clock_view` stay per shell, because
+> `tipsy-ui` never gains `crossterm`.
 
 **Goal:** Make the assistant reachable from outside the one terminal that owns it: a token-guarded
 WebSocket server (`tipsy-compadre serve`), a native TUI that attaches to a remote one

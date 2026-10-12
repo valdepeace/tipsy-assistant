@@ -70,6 +70,18 @@ beside it in `global-constraints.md`. **Read the two review reports in that same
 `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`, which the ledger records as superseded and
 wrong in three ways. Phases 2 and 3 have not started.
 
+**Before Phase 2 starts, the client's files are split** — spec
+`docs/superpowers/specs/2026-10-12-client-modularity-design.md`: `client.rs` (`impl Client` is one
+823-line block carrying six reasons to change), `session.rs`, `state.rs` and `config_form.rs` are split
+by reason to change, and the client's turn, microphone and playback policy — `starts_turn`,
+`interrupts_playback`, `test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`,
+`mic_wanted`, `mic_route`/`MicRoute` and `hit_at` — moves to `tipsy_ui::policy`, so Plan 3's Tasks 3.4
+and 3.5 import it instead of cloning it. **Every `file:line` the web-tier plan carries for those four
+files is stale until re-measured**, and `client.rs` stays the parent module (`pub mod bridge;`, and
+Task 2.1's `pub mod pty;`, are unaffected). `key_input` and `clock_view` deliberately do **not** move,
+because `tipsy-ui` may never gain `crossterm`. It runs in its own worktree, after Phase 1 merges and
+before Phase 2.
+
 **Both throwaway spikes are done, and the second one shapes `hands_free`.** They live in scratch
 directories outside the repo and nothing of them is committed. **Ratzilla: PASS on all four gate
 questions and on all four items that had been left `UNVERIFIED`**
