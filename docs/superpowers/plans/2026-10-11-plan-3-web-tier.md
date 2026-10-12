@@ -12250,7 +12250,7 @@ by this task; if the check needs an edit to it, that edit belongs to Task 3.5's 
 - Test: `crates/tipsy-web/src/playback.rs` (its own `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: `tipsy_protocol::{AssistantState, Command, Event, Frame}` — `Frame::Speech { seq: u32, samples: Vec<i16> }` (`crates/tipsy-protocol/src/lib.rs:179`), `Event::SpeechChunk { seq, sample_rate }` (`:151`), `Event::Done { .. }` (`:152`), `Event::Status { state, .. }` (`:146`), `Event::Heard { .. }` (`:147`), `Frame::decode(&[u8]) -> Result<Frame, FrameError>` (`:227`); `tipsy_ui::UiState::start_voice(Vec<f32>)` (`crates/tipsy-ui/src/state.rs:511`), whose hop is `ENVELOPE_HOP_MS = 50` (`state.rs:14`, `render.rs:32`); Task 3.1's recorded verdict (this task does not run if it was FAIL) and its `rustup target add wasm32-unknown-unknown`; Task 3.2's `tipsy_web::start()` and the decoded `ToClient` queue its socket fills; Task 3.3's `AudioContext`, created and resumed inside the press-to-start handler (research note §5.2); **`tipsy_ui::policy::{flush_on_interrupt, interrupts_playback, starts_turn}`** (`crates/tipsy-ui/src/policy.rs:18-51`, `:73-75`) — the turn and playback decisions this task used to define for itself, and no longer does: `client.rs` is not where they live any more, and neither is this file. `Command` stays in the `tipsy_protocol` import above: Step 2's barge-in test names an eleven-command cohort with it.
+- Consumes: `tipsy_protocol::{AssistantState, Command, Event, Frame}` — `Frame::Speech { seq: u32, samples: Vec<i16> }` (`crates/tipsy-protocol/src/lib.rs:179`), `Event::SpeechChunk { seq, sample_rate }` (`:151`), `Event::Done { .. }` (`:152`), `Event::Status { state, .. }` (`:146`), `Event::Heard { .. }` (`:147`), `Frame::decode(&[u8]) -> Result<Frame, FrameError>` (`:227`); `tipsy_ui::UiState::start_voice(Vec<f32>)` (`crates/tipsy-ui/src/state.rs:511`), whose hop is `ENVELOPE_HOP_MS = 50` (`state.rs:14`, `render.rs:32`); Task 3.1's recorded verdict (this task does not run if it was FAIL) and its `rustup target add wasm32-unknown-unknown`; Task 3.2's `tipsy_web::start()` and the decoded `ToClient` queue its socket fills; Task 3.3's `AudioContext`, created and resumed inside the press-to-start handler (research note §5.2); **`tipsy_ui::policy::{flush_on_interrupt, interrupts_playback, starts_turn}`** (`crates/tipsy-ui/src/policy.rs:18-51`, `:73-75`) — the turn and playback decisions this task used to define for itself, and no longer does: `client.rs` is not where they live any more, and neither is this file. `Command` stays in the `tipsy_protocol` import above: Step 2's barge-in test names a thirteen-command cohort with it.
 - Produces: `tipsy_web::playback::{Playback, Scheduled, CUSHION_S}`; `Playback::{new, rate, set_rate, chunk, end_of_turn, barge_in, finished, replay, forget_reply, envelope, reply, gaps, is_playing}`; `tipsy_web::web_audio::{play, silence, forget}` (wasm only). **`starts_turn` and `interrupts_playback` are not this module's exports**: Step 2 qualifies them from `tipsy_ui::policy`, and `dispatch` (Task 3.5) calls them from there too.
 
 - [ ] **Step 1: Read Task 3.1's verdict, and stop if it was FAIL**
@@ -12332,10 +12332,10 @@ Create `crates/tipsy-web/src/playback.rs` with the module documentation, the pub
 
 // The decisions this file does not own. `client.rs` was where they used to be copied from, and it is
 // not where they live any more: `tipsy_ui::policy` is the one home, shared with the native client.
-// `Command` stays: the test module's barge-in test names an eleven-command cohort with it, and this
+// `Command` stays: the test module's barge-in test names a thirteen-command cohort with it, and this
 // task's `Consumes` line lists it. Only the two *definitions* left this file.
 use tipsy_protocol::Command;
-use tipsy_ui::policy::{flush_on_interrupt, interrupts_playback, starts_turn};
+use tipsy_ui::policy::{interrupts_playback, starts_turn};
 
 /// How far in front of `now` a turn's first chunk is placed.
 ///
@@ -12997,7 +12997,7 @@ if let UiAction::Send(command) = &action {
 
 The native client's `flush_on_interrupt(interrupting, playing)` guard (`client.rs:578-580`) is kept here even though it is not load-bearing in a browser: the guard exists because rodio's `clear()` pauses the sink and the client had to resume it (`audio/device.rs:57-68`), and WebAudio has no such trap. Keeping the two clients reading the same is worth one `&&`.
 
-**That guard is a function now, and a later implementer should import it rather than re-derive it.** `flush_on_interrupt(interrupting: bool, playing: bool) -> bool` is `tipsy_ui::policy`'s (`crates/tipsy-ui/src/policy.rs:73-75`), and `policy.rs:65-75` is its documentation. It is already in this step's import line above, and the two lines of the step open-code its body as `interrupts_playback(command) && playback.is_playing(now)`; calling `flush_on_interrupt(interrupts_playback(command), playback.is_playing(now))` is the same value and the one way the browser and the native client cannot drift on that `&&`. The step's code is left as authored — this is the pointer, not a rewrite.
+**That guard is a function now, and a later implementer should import it rather than re-derive it.** `flush_on_interrupt(interrupting: bool, playing: bool) -> bool` is `tipsy_ui::policy`'s (`crates/tipsy-ui/src/policy.rs:73-75`), and `policy.rs:65-75` is its documentation. It is named in this task's `Consumes` line rather than in the module's `use`, deliberately: the step's code below does not call it, and an import nothing calls is a clippy finding this task cannot afford. The two lines of the step open-code its body as `interrupts_playback(command) && playback.is_playing(now)`; calling `flush_on_interrupt(interrupts_playback(command), playback.is_playing(now))` is the same value and the one way the browser and the native client cannot drift on that `&&` — and an implementer who makes that call adds `flush_on_interrupt` to the `use` line at the top of the module in the same edit. The step's code is left as authored — this is the pointer, not a rewrite.
 
 - [ ] **Step 6: Write the `AudioContext` half**
 
