@@ -1785,7 +1785,15 @@ mod tests {
     #[test]
     fn every_asset_the_page_references_is_embedded() {
         const VENDOR: [&str; 3] = ["vendor/xterm.mjs", "vendor/xterm.css", "vendor/addon-fit.mjs"];
-        let fetched = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/vendor").is_dir();
+        // **`any` of the three *files*, not `is_dir()` on `web/vendor`.** That directory exists in a
+        // fresh clone — its `README.md` is committed — so the old `is_dir()` guard was always true,
+        // this skip could never fire, and the assertions below ran in a checkout that had fetched
+        // nothing. Measured at the merge into `master`: `cargo test` failed here with "web/vendor is
+        // incomplete" while the very same commit was green in the one worktree where `xtask dist` had
+        // been run. A *partial* fetch is deliberately not skipped: that is the state the assertions
+        // below exist to catch.
+        let web = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web");
+        let fetched = VENDOR.iter().any(|path| web.join(path).is_file());
         if !fetched && !VENDOR.iter().any(|path| crate::server::assets::asset(path).is_some()) {
             eprintln!(
                 "web/vendor is neither in this checkout nor in this binary: run `{}` and read this \
