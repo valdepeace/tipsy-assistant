@@ -444,10 +444,17 @@ async fn ws(
     // The research note reads axum 0.8.9's own defaults: the write buffer is 128 KiB and
     // `max_write_buffer_size` is **unlimited** until it is set (`web-transport-and-terminal.md:1339-1344`).
     // A peer that stops reading must not grow the server's memory, so the ceiling is explicit.
+    //
+    // The read side gets the same treatment: axum's `max_message_size` default is **64 MiB** and
+    // nothing in the protocol caps a frame's sample count, so one inbound message could have added
+    // tens of megabytes to a session's buffer. `max_frame_size` is set from the same number so no
+    // single frame can slip past the message ceiling.
     let options = conn::ConnOptions::default();
     let upgrade = upgrade
         .write_buffer_size(options.write_buffer_size)
-        .max_write_buffer_size(options.max_write_buffer_size);
+        .max_write_buffer_size(options.max_write_buffer_size)
+        .max_message_size(options.max_message_size)
+        .max_frame_size(options.max_message_size);
     // Taken out before the upgrade so the async block owns what it needs: `spawn` needs the hub
     // itself, and `serve` needs another handle to it.
     let hub = state.hub.clone();
