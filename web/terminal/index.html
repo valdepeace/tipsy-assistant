@@ -41,8 +41,10 @@
       // ring comes out misaligned ("todo descolocado", reported from a real browser). Measured on this
       // machine: the Phase 3 spike's own glyph table found `◉` and `⚙` take exactly one monospace
       // advance in `DejaVu Sans Mono`, and that font is installed here. The plan's list had `Consolas`
-      // first, which is where this came from.
-      fontFamily: "\"DejaVu Sans Mono\", Consolas, monospace",
+      // first, which is where this came from. `Cascadia Mono` sits behind it as a second complete
+      // choice, because it too carries the box, block and braille glyphs; `Consolas` is the last
+      // resort it used to be first.
+      fontFamily: "\"DejaVu Sans Mono\", \"Cascadia Mono\", Consolas, monospace",
       fontSize: 15,
       theme: { background: "#101014" },
     });
