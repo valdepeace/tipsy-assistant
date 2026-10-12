@@ -247,6 +247,9 @@ pub async fn run(settings: Settings, bound: tokio::sync::oneshot::Sender<SocketA
         // hand-edited file is no token for a session either.
         token: token.clone().unwrap_or_default(),
         loopback: local.ip().is_loopback(),
+        // A socket that never says `Hello` is refused and let go after this long: with the upgrade's
+        // own token check gone, this is the only ceiling on a connection that sends nothing at all.
+        handshake_timeout: crate::session::HANDSHAKE_TIMEOUT,
     };
     // Task 1.8's TLS branch. The loading is here and not in `main.rs` for two reasons: a certificate
     // that cannot be read has to travel as one of this function's own errors, and the CLI must not
@@ -421,6 +424,14 @@ fn page_response(content_type: &'static str, body: Vec<u8>) -> Response {
 
 /// The protocol socket. Registered here; everything past the upgrade belongs to Task 1.6.
 ///
+/// **The token is not required here, and that is deliberate** (the token's transport, F1/F2). The
+/// client sends it in `Hello`, the session is the only thing that can judge it, and the two pages
+/// keep their `?token=…` because a browser cannot put one anywhere else. Demanding it on the upgrade
+/// as well would have been a second gate for a value that reaches this process in a frame, and the
+/// URL that satisfied it is where the token leaked — into shell history, into a `Referer` and into
+/// the log line of anything that prints the address (spec §9.2, §9.1). What keeps a silent socket
+/// from holding a session is `SessionPolicy::handshake_timeout`, not an HTTP status.
+///
 /// `ConnectInfo<SocketAddr>` is the peer's address, and Task 1.8's §9.4 guard is the one thing that
 /// needs it: the rule is about **who** sent a `SetKey`, not about what the configuration says. The
 /// `true` passed to `conn::serve` is whether this listener terminates TLS — the other half of the
@@ -428,12 +439,8 @@ fn page_response(content_type: &'static str, body: Vec<u8>) -> Response {
 async fn ws(
     State(state): State<ServeState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    query: Query<TokenQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !token_ok(&state, &query) {
-        return refused();
-    }
     // The research note reads axum 0.8.9's own defaults: the write buffer is 128 KiB and
     // `max_write_buffer_size` is **unlimited** until it is set (`web-transport-and-terminal.md:1339-1344`).
     // A peer that stops reading must not grow the server's memory, so the ceiling is explicit.
@@ -461,15 +468,18 @@ async fn ws(
     })
 }
 
+/// The token the two **pages** are reached with, and the one shape a browser can send on a
+/// navigation: spec §9.2's `?token=…`, which the two `no-store`/`no-referrer` headers exist for. It
+/// is deliberately not read by `/ws`: a socket sends the token in `Hello`, where the session can
+/// judge it, and a URL is the one place a secret is copied into shell history and logs.
 #[derive(Deserialize)]
 struct TokenQuery {
     token: Option<String>,
 }
 
 /// Spec §9.1: a server with no token accepts anything, and §5.1 guarantees that server is on
-/// loopback. A server with a token needs it on the upgrade for the pages and, until Task 1.2's
-/// `Hello` validation answers, for the socket too — the query form is what a browser can send on a
-/// navigation, which is the whole reason §9.2 pays for it.
+/// loopback. A server with a token needs it for its two pages and for its assets; the protocol
+/// socket answers with a `Hello` refusal instead (see [`ws`]).
 fn token_ok(state: &ServeState, query: &TokenQuery) -> bool {
     match &state.token {
         None => true,
@@ -600,6 +610,80 @@ mod tests {
         assert_eq!(page_status(addr, "/", Some("correct-horse")).await, 200, "the token it holds opens the page");
         assert_eq!(page_status(addr, "/", Some("wrong-horse")).await, 401, "another token does not");
         assert_eq!(page_status(addr, "/terminal", None).await, 401, "and both pages need it");
+    }
+
+    /// **F2, at the route.** The documented remote attach presents the token in `Hello` and sends no
+    /// query at all. `/ws` used to answer a socket with no `?token=` with a **401 before the upgrade**,
+    /// which made that attach impossible against any server holding a token and pushed users onto the
+    /// URL form that leaks it into shell history, a `Referer` and every log that prints an address
+    /// (spec §9.1, §9.2). The token is judged by the session now, exactly once, in the frame it
+    /// belongs to.
+    ///
+    /// The three providers point at a refused loopback port rather than at their real hosts, so the
+    /// accepted halves run the real greeting and make no outbound request to a third party.
+    ///
+    /// The two listeners here are the two halves of §4.1, and they are deliberately different: on an
+    /// **exposed** one the token is the door, and on a **loopback** one there is no door to lock —
+    /// `SessionPolicy::require_token` is built from the bound address, which the design says is the
+    /// only fact about exposure. The pages keep their `?token=…` on both.
+    #[tokio::test]
+    async fn the_socket_takes_its_token_in_hello_and_not_in_the_url() {
+        use futures::{SinkExt, StreamExt};
+        use tipsy_protocol::{ClientKind, Command, PROTOCOL_VERSION};
+        use tokio_tungstenite::tungstenite::Message;
+
+        type Client = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+        async fn text_frame(socket: &mut Client) -> String {
+            let message = tokio::time::timeout(PATIENCE, socket.next())
+                .await
+                .expect("the bridge must answer inside the patience window")
+                .expect("the socket must stay open")
+                .expect("the socket must not error");
+            match message {
+                Message::Text(text) => text.to_string(),
+                other => panic!("the server sends JSON text here, got {other:?}"),
+            }
+        }
+
+        /// One attach with no query at all, answering with the first text frame the server sends.
+        async fn attach(port: u16, token: Option<&str>) -> String {
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                .await
+                .expect("the upgrade must not require a query");
+            let hello = Command::Hello {
+                token: token.map(str::to_string),
+                client: ClientKind::Web,
+                protocol_version: PROTOCOL_VERSION,
+            };
+            socket.send(Message::text(serde_json::to_string(&hello).unwrap())).await.unwrap();
+            text_frame(&mut socket).await
+        }
+
+        // An exposed listener: `0.0.0.0` is not loopback, so its sessions require the token.
+        let mut exposed = settings("0.0.0.0:0", "correct-horse");
+        for provider in [&mut exposed.config.providers.chat, &mut exposed.config.providers.speech, &mut exposed.config.providers.transcribe] {
+            provider.base_url = "http://127.0.0.1:9/v1".into();
+        }
+        exposed.providers = providers(&exposed.config);
+        let bound = start(exposed).await.expect("a token makes a wide bind legal");
+
+        let welcome = attach(bound.port(), Some("correct-horse")).await;
+        assert!(welcome.contains(r#""type":"welcome""#), "the token in `Hello` is what opens the session: {welcome}");
+
+        let wrong = attach(bound.port(), Some("wrong-horse")).await;
+        assert!(wrong.contains(r#""type":"error""#) && wrong.contains("token_invalid"), "{wrong}");
+        assert!(!wrong.contains("wrong-horse"), "the refused token must not be echoed: {wrong}");
+
+        let absent = attach(bound.port(), None).await;
+        assert!(absent.contains("token_required"), "and an exposed server needs one presented at all: {absent}");
+
+        // A loopback listener is this machine, so its sessions require no token: the documented local
+        // attach (`--connect ws://127.0.0.1:7070/ws`, no `--token`) works even with a token in the
+        // file. The pages are the half that still demands it here.
+        let loopback = start(settings("127.0.0.1:0", "correct-horse")).await.expect("a loopback bind needs no token to be legal");
+        let local = attach(loopback.port(), None).await;
+        assert!(local.contains(r#""type":"welcome""#), "a loopback listener asks for no token: {local}");
     }
 
     #[tokio::test]

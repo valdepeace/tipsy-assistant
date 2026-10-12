@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use tipsy_compadre::client::bridge::DisplayUrl;
 use tipsy_compadre::client;
 use tipsy_compadre::config::store;
 use tipsy_compadre::keys::{redact, KeyResolver, KeySource, OsKeyring, SecretStore};
@@ -174,16 +175,23 @@ fn run_terminal(path: PathBuf) -> Result<(), String> {
     runtime.block_on(async move { client::run(path) })
 }
 
+/// The `--verbose` startup line for a `--connect` run: where this process is attaching and whether a
+/// token was given. **The URL is a [`DisplayUrl`]**, so a query — which is where a token would be, and
+/// the only place one ever was on this path — is not part of it. That is the whole of F1's rule for
+/// this line: `eprintln!` never passes through the log's scrubber, so the value printed here has to be
+/// safe before it arrives (`--connect` with a token in the URL is what a shell history holds).
+fn remote_banner(url: &str, token: Option<&str>) -> String {
+    format!(
+        "mode: remote TUI; attaching to {}; token {}",
+        DisplayUrl::new(url),
+        if token.is_some() { "given" } else { "not given" }
+    )
+}
+
 /// The `--connect` run. No configuration is required beyond this machine's own settings, and a
 /// refusal is reported before the terminal is entered, so the user reads it on a clean screen.
 fn remote_client(url: String, token: Option<String>, verbose: bool) -> ExitCode {
-    announce(
-        verbose,
-        format!(
-            "mode: remote TUI; attaching to {url}; token {}",
-            if token.is_some() { "given" } else { "not given" }
-        ),
-    );
+    announce(verbose, remote_banner(&url, token.as_deref()));
     match run_remote_terminal(url, token) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -411,6 +419,28 @@ mod tests {
 
         let error = Cli::try_parse_from(["tipsy-compadre", "--token", "abc"]).unwrap_err();
         assert!(error.to_string().contains("--connect"), "`--token` without `--connect` is a usage error: {error}");
+    }
+
+    /// F1: a `--connect` URL with a token in it is what a shell history holds, and the `--verbose`
+    /// banner is printed with `eprintln!`, which no `ScrubWriter` touches. The line printed is this
+    /// function's, so this is that line — and the refused-attach half of the same rule is pinned
+    /// where the sentence a user copies is built (`client::bridge`'s
+    /// `an_unreachable_url_never_carries_a_token_into_its_message`).
+    #[test]
+    fn the_connect_banner_never_prints_the_token() {
+        // A fixture, not a key: the workspace rule is that secrets appear by name and never in a file
+        // or a fixture, and this string exists only to prove that it does not cross.
+        const SECRET: &str = "9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        let line = remote_banner(&format!("ws://192.168.1.5:7070/ws?token={SECRET}"), Some(SECRET));
+        assert!(!line.contains(SECRET), "the banner put the token on a terminal: {line}");
+        assert!(!line.contains('?'), "the query is what carried it: {line}");
+        assert!(line.contains("ws://192.168.1.5:7070/ws"), "and the address a user needs stays: {line}");
+        assert!(line.contains("token given"), "the line still says whether one was given: {line}");
+
+        assert_eq!(
+            remote_banner("ws://127.0.0.1:7070/ws", None),
+            "mode: remote TUI; attaching to ws://127.0.0.1:7070/ws; token not given"
+        );
     }
 
     /// Task 1.7's `the_tls_flags_do_not_exist_until_their_task_does` asserted that `serve --tls` did

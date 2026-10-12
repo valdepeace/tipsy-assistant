@@ -37,6 +37,18 @@ fn next_session_id() -> u64 {
     SESSION_IDS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// How long a session waits for its first message before it refuses the client that never spoke.
+///
+/// **This is the ceiling the route's pre-upgrade token check used to be.** `/ws` demanded `?token=…`
+/// before the upgrade, which is 401 for a socket that says nothing — and it is also what made the
+/// documented remote attach impossible (the client sends the token in `Hello`, never in the URL).
+/// With that check gone the session is the only gate, so a peer that opens a socket and never says
+/// anything must be bounded here or it holds a session — a cloned configuration, a `Brain` and a
+/// detector — for as long as it stays connected. Ten seconds is far longer than a real handshake:
+/// both clients put their `Hello` on the wire before the terminal is even entered, and a browser has
+/// one round trip to make. It is short enough that a silent peer cannot accumulate sessions.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What this session requires of a client before it serves one (spec §4.1).
 ///
 /// **The server's exposure is not read from the configuration.** `config.server.lan` is the user's
@@ -54,18 +66,33 @@ pub struct SessionPolicy {
     /// True when the connection reaches this server only over loopback. `GetConfig`'s token rule
     /// (spec §4.3, Task 1.3) and `SetKey`'s refusal (spec §9.4, Task 1.8) are both decided from it.
     pub loopback: bool,
+    /// How long the prelude waits for the first message before refusing the connection
+    /// ([`HANDSHAKE_TIMEOUT`]). It is part of the policy because it is one more thing this session
+    /// requires of a client before it serves one, and because a test can then pin the refusal in
+    /// milliseconds instead of holding a ten-second timer.
+    pub handshake_timeout: Duration,
 }
 
 impl SessionPolicy {
     /// A session reached over the in-process channel: no token, none asked for, and the token still
     /// crosses to it, because it is the client's own machine (spec §4.3).
     pub fn local() -> Self {
-        Self { require_token: false, token: String::new(), loopback: true }
+        Self {
+            require_token: false,
+            token: String::new(),
+            loopback: true,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+        }
     }
 
     /// A session behind a listener that is not loopback.
     pub fn exposed(token: impl Into<String>) -> Self {
-        Self { require_token: true, token: token.into(), loopback: false }
+        Self {
+            require_token: true,
+            token: token.into(),
+            loopback: false,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+        }
     }
 
     /// The one place "may this client be served?" is decided, so the version check, the missing token
@@ -297,10 +324,22 @@ impl Session {
         // message allowed to be first, so a first message that is something else is exactly the
         // client `admits` answers `ProtocolVersion` to. Asking it only when the message already
         // parsed as `Hello` would serve an exposed session an `Ask` that never presented a token.
-        let first = match rx.recv().await {
-            Some(message) => message,
+        //
+        // **And the wait itself is bounded** (`HANDSHAKE_TIMEOUT`): a peer that says nothing is not
+        // refused by `admits` because there is nothing to refuse, so it would hold this session — and
+        // its configuration, brain and detector — for ever. The timeout is what makes "the socket
+        // must say `Hello` first" a requirement rather than an invitation.
+        let first = match tokio::time::timeout(self.policy.handshake_timeout, rx.recv()).await {
+            Ok(Some(message)) => message,
             // The client vanished before saying anything: nothing to serve and nobody to tell.
-            None => return,
+            Ok(None) => return,
+            // Nobody said anything at all. A peer that never greets is not speaking this protocol,
+            // which is the same judgement a first message that is not a `Hello` gets, and the
+            // channel closes when this function returns.
+            Err(_) => {
+                self.refuse(ErrorCode::ProtocolVersion);
+                return;
+            }
         };
         let admitted = match &first {
             ToServer::Command(hello) => self.policy.admits(hello),

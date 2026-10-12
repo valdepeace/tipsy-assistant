@@ -403,6 +403,32 @@ async fn a_first_message_that_is_not_a_hello_is_refused() {
     assert!(!seen.iter().any(|m| matches!(m, ToClient::Event(Event::Reply { .. }))), "the question was never asked: {seen:#?}");
 }
 
+/// F2's consequence, and the ceiling that replaces what the route's `?token=` gate used to be: with
+/// no HTTP-layer check on `/ws`, a socket that says **nothing at all** is bounded only by the session,
+/// so the session must refuse a peer that never greets rather than hold its configuration, its brain
+/// and its detector for as long as the socket stays open.
+///
+/// The policy carries the deadline, which is why this is pinned in milliseconds instead of holding a
+/// ten-second timer: the shipped value is `HANDSHAKE_TIMEOUT`, and `server::run` hands it to every
+/// session it spawns.
+#[tokio::test]
+async fn a_client_that_says_nothing_at_all_is_refused_and_let_go() {
+    let policy = SessionPolicy { handshake_timeout: Duration::from_millis(50), ..SessionPolicy::exposed("s3cret") };
+    // The policy requires a token, so the harness does not send the handshake itself; and the sender is
+    // held rather than dropped, because a *closed* channel is a different case — the client vanishing
+    // — which the session answers by returning silently and is not what this is about.
+    let (_tx, mut rx, _, _) = session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", policy);
+
+    let seen = until_closed(&mut rx, 2000).await;
+    match seen.as_slice() {
+        [ToClient::Event(Event::Error { code, recoverable, .. })] => {
+            assert_eq!(*code, ErrorCode::ProtocolVersion, "a client that never greets is not speaking this protocol");
+            assert!(!*recoverable, "and the session is over: the connection is let go");
+        }
+        other => panic!("a silent client gets one error and a closed channel, got {other:?}"),
+    }
+}
+
 // ---------- tests ----------
 
 #[tokio::test]
