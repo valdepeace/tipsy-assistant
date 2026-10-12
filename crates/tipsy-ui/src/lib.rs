@@ -1,6 +1,7 @@
 //! Backend-agnostic ratatui HUD for tipsy-compadre.
 
 pub mod config_form;
+pub mod policy;
 pub mod render;
 pub mod render_config;
 pub mod render_login;
