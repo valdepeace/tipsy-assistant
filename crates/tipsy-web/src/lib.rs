@@ -6,11 +6,16 @@
 //! `draw_web` wraps `requestAnimationFrame` itself, so the loop needs **no async runtime** — only the
 //! socket's callbacks do, and those use `spawn_local` (ratzilla-and-wasm-audio.md §6.4 point 5).
 //!
-//! **What this file deliberately does not have yet.** The key and mouse handlers, the "press to
-//! start" gate and the page's layout are Tasks 3.3, 3.4 and 3.5's; the hits `tipsy_ui::draw` reports
-//! are therefore dropped here rather than kept in a cell nothing reads, and Task 3.5 is what starts
-//! reading them.
+//! **What this file deliberately does not have yet.** The key and mouse handlers and the page's
+//! layout are Tasks 3.4 and 3.5's; the hits `tipsy_ui::draw` reports are therefore dropped here
+//! rather than kept in a cell nothing reads, and Task 3.5 is what starts reading them.
+//!
+//! **The microphone is Task 3.3's and it is wired here**, because `#[wasm_bindgen(start)]` is the only
+//! entry point `init()` calls and this is where the `UiState`, the queue and the render loop live: the
+//! gate is built from this function, the capture it opens is kept in one [`mic::CaptureSlot`] for the
+//! whole run, and every frame drains that capture inside the one borrow of the state the frame owns.
 
+pub mod mic;
 pub mod socket;
 pub mod wire;
 
@@ -45,6 +50,14 @@ pub fn start() -> Result<(), JsValue> {
     let token = socket::token_from_location();
     let outbox = socket::spawn_connection(url, token, Rc::clone(&queue), Rc::clone(&state));
 
+    // One per run: the gate fills it on the user's press, this loop drains it on every frame, and it
+    // holds the `AudioContext` Task 3.4 plays the reply through. `None` means no capture is running.
+    let capture: mic::CaptureSlot = Rc::new(RefCell::new(None));
+    // The "press to start" screen (v1 spec `:193-194`). It builds its own elements, so the page Task
+    // 3.2 created needs no change for it, and a microphone that cannot work is a *disabled* button
+    // with a reason rather than a button that fails on its first press.
+    mic::press_to_start(Rc::clone(&state), Rc::clone(&capture));
+
     let mut last = js_sys::Date::now();
     terminal.draw_web({
         let outbox = outbox.clone();
@@ -75,6 +88,13 @@ pub fn start() -> Result<(), JsValue> {
                         // this client never sent.
                         ToClient::Audio(Frame::Speech { .. } | Frame::Mic(_)) => {}
                     }
+                }
+                // The microphone, once per frame and inside the one borrow this frame owns: the port's
+                // handler only appends what the worklet posted, and this is the only place a captured
+                // frame may reach the socket. `capture().as_ref()` is `None` until the gate's click
+                // opened one, which is what "no capture, no frames" means here.
+                if let Some(capture) = capture.borrow().as_ref() {
+                    mic::drain_capture(capture, &mut state, &outbox);
                 }
                 state.profile.as_ref().map(|profile| profile.name.clone()).unwrap_or_default()
             };
