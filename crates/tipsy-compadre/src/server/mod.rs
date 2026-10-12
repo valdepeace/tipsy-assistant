@@ -68,21 +68,37 @@ pub struct Settings {
 
 /// Hand-written, not derived: the derive would require `ProviderSlot` — hence the three connector
 /// trait objects behind it — to be `Debug`, and it is not. The two handles are shown as handles, and
-/// the token is *not* printed, because a `Debug` line reaches a log more often than anyone intends
-/// (spec §9.6).
+/// neither the token nor the configuration is printed: `Config`'s own `Debug` prints
+/// `server.token`, which made an earlier version of this formatter claim more than it did, and a
+/// `Debug` line reaches a log more often than anyone intends (spec §9.6).
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Settings")
             .field("bind", &self.bind)
             .field("lan", &self.lan)
             .field("token", &if self.token.trim().is_empty() { "<none>" } else { "<set>" })
-            .field("config", &self.config)
+            // A summary rather than `&self.config`: printing the whole configuration would print the
+            // token into whatever line this `Debug` lands in, which is the one thing this file's own
+            // comment promised it did not do.
+            .field("config", &config_summary(&self.config))
             .field("config_path", &self.config_path)
             .field("keys", &"<key resolver>")
             .field("providers", &"<provider slot>")
             .field("tls", &self.tls)
             .finish()
     }
+}
+
+/// The configuration as a `Debug` may print it: what describes it, and none of the secrets
+/// `Config`'s derived `Debug` would print (its `server.token` above all).
+fn config_summary(config: &Config) -> String {
+    format!(
+        "Config {{ active_profile: {:?}, profiles: {}, bind: {:?}, lan: {} }}",
+        config.active_profile,
+        config.profiles.len(),
+        config.server.bind,
+        config.server.lan
+    )
 }
 
 /// Which certificate the listener uses, when TLS is on at all (spec §5.5, W2).
@@ -584,6 +600,24 @@ mod tests {
             None => format!("http://{addr}{path}"),
         };
         reqwest::get(url).await.unwrap().status().as_u16()
+    }
+
+    /// F11: `Settings`' hand-written `Debug` said the token was not printed and then printed the whole
+    /// configuration, whose own `Debug` prints it. A formatter written to be safe has to be.
+    ///
+    /// The token is put in **both** fields on purpose: `Settings::token` was already collapsed, and the
+    /// leak was `Settings::config.server.token` — which is the one a test that only set the first
+    /// would not see.
+    #[test]
+    fn settings_debug_never_prints_the_token() {
+        let mut settings = settings("127.0.0.1:0", "");
+        settings.token = "correct-horse".into();
+        settings.config.server.token = "correct-horse".into();
+
+        let line = format!("{settings:?}");
+        assert!(!line.contains("correct-horse"), "the token reached a `Debug` line: {line}");
+        assert!(line.contains(r#"token: "<set>""#), "and the line still says whether one is set: {line}");
+        assert!(line.contains("127.0.0.1:0"), "the fields that describe the run are still there: {line}");
     }
 
     #[tokio::test]

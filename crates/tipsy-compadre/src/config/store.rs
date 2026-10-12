@@ -10,11 +10,34 @@ pub struct LoadOutcome {
     pub warning: Option<String>,
 }
 
+/// The environment variable that moves the whole configuration directory somewhere else for one run:
+/// `config.toml`, the log beside it and a generated TLS pair.
+///
+/// **It is what makes a live end-to-end check possible.** The default is the user's real
+/// `%APPDATA%\tipsy-compadre`, so running `serve` or `--connect` by hand used to write the user's own
+/// configuration, log and certificate, and three tasks of this phase stopped rather than do that.
+pub const CONFIG_DIR_ENV: &str = "TIPSY_CONFIG_DIR";
+
+/// Where `config.toml` lives: the directory [`CONFIG_DIR_ENV`] names, or the OS configuration
+/// directory.
+///
+/// Everything this program keeps beside the configuration is derived from this one path — the log
+/// through `logging::log_path`, and the generated certificate pair through `server::run`'s
+/// `tls::Paths` — so one variable moves all three at once.
 pub fn default_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("tipsy-compadre")
-        .join("config.toml")
+    config_dir(std::env::var_os(CONFIG_DIR_ENV)).join("config.toml")
+}
+
+/// The directory half of [`default_path`], written as a function of the override so both halves can be
+/// tested without touching the process environment: `std::env::set_var` is `unsafe` in edition 2024
+/// and process-global in a test binary whose tests run in parallel.
+fn config_dir(override_dir: Option<std::ffi::OsString>) -> PathBuf {
+    match override_dir {
+        // An empty variable is not an override: `TIPSY_CONFIG_DIR=` must not leave `config.toml` in
+        // whatever directory the process happened to start in.
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("tipsy-compadre"),
+    }
 }
 
 pub fn save(path: &Path, config: &Config) -> std::io::Result<()> {
@@ -83,6 +106,24 @@ mod tests {
     use super::*;
     use crate::config::{LoginEntry, ProviderKind, Profile, ServerConfig};
     use tipsy_protocol::ListeningMode;
+
+    /// The override the live end-to-end check needs: one variable moves the configuration, its log
+    /// and the generated certificate together, and an empty value is not an override.
+    ///
+    /// `default_path` itself is not driven here — writing the process environment would be `unsafe`
+    /// and racy under parallel tests — so what is pinned is the rule it is built from. The live run
+    /// recorded in the ledger is what shows the variable reaches the real process.
+    #[test]
+    fn the_configuration_directory_can_be_moved_for_one_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("tipsy-live");
+        assert_eq!(config_dir(Some(chosen.clone().into_os_string())), chosen);
+
+        let fallback = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("tipsy-compadre");
+        assert_eq!(config_dir(Some(std::ffi::OsString::new())), fallback, "an empty override is not one");
+        assert_eq!(config_dir(None), fallback, "no override is the OS configuration directory");
+        assert!(config_dir(None).ends_with("tipsy-compadre"));
+    }
 
     #[test]
     fn creates_default_file_when_missing() {
