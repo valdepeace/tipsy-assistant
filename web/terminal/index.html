@@ -69,6 +69,15 @@
     // bytes are not what we want to hand a text reader. This one line is the difference.
     ws.binaryType = "arraybuffer";
 
+    // **What the page produces before the socket opens would otherwise be dropped**, and the first
+    // thing it produces is its own size: `fit.fit()` above runs before this socket exists, so its
+    // `resize` never left the page — and the server's own `TERMINAL_COLS`/`TERMINAL_ROWS` docs say the
+    // child is spawned at a fixed size *waiting* for that first resize. Without this queue the child
+    // keeps the size the PTY was born with and the TUI stays clipped until a human drags the window
+    // (reported from a real browser: "the first time it does not detect the window size"). The Phase 3
+    // client page keeps the same rule in its `Outbox`.
+    const pending = [];
+
     ws.onopen = () => {
       // The first frame tells the server this connection is real; a browser cannot ask whether its
       // own socket is open at the other end. The payload is a padding frame and nothing else: it is
@@ -83,6 +92,11 @@
       // sent. The wire table spells this frame **Binary**; this is the shape it names.
       const pad = new TextEncoder().encode("tipsterm-hello-pad".padEnd(256, "-"));
       ws.send(pad);
+      // Anything produced while connecting goes now, and then the size is sent **again** — this is the
+      // line that makes the terminal fit the window the first time. `send`'s own `OPEN` check is why
+      // the earlier attempt was lost, and the server debounces a repeat harmlessly.
+      for (const text of pending.splice(0)) ws.send(text);
+      send({ type: "resize", cols: term.cols, rows: term.rows });
     };
 
     ws.onmessage = (event) => {
@@ -136,8 +150,13 @@
     addEventListener("beforeunload", () => ws.close());
 
     function send(message) {
+      const text = JSON.stringify(message);
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(message));
+        ws.send(text);
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        // Kept, not thrown away: `onopen` flushes this queue. A message produced while connecting is
+        // the common case here, not an edge — the terminal's first `resize` is one of them.
+        pending.push(text);
       }
     }
   </script>
