@@ -294,6 +294,15 @@ the running binary. `UiState` gains the flag — today `state.rs:291` destructur
 and never reads it — and the HUD needs somewhere to say "the web UI is not available in this build",
 which is what `architecture.md:85-86` promises.
 
+**And "the truth" is the page *and* the script it loads** (Phase 3's fix wave, its finding 3, which is
+a decision about a Phase-1-authored flag and is recorded as one): `web_bundle()` was "is
+`client/index.html` in the embed?", and that page is **committed** while `web/dist/` is not — so on any
+checkout that has never run `cargo run -p xtask -- dist`, the flag said `true` while
+`/assets/dist/tipsy_web.js` answered 404, which is exactly the case the HUD's message exists for and
+the one in which that message can never appear (the HUD that draws it is the missing bundle). The flag
+is now both files, so a plain `cargo build` reports `false`; `/` still answers the committed page on
+such a build, and that residual is named in `assets.rs` rather than implied.
+
 ### 5.5 TLS
 
 `--tls` turns on the listener's TLS; the certificate comes from `--tls-cert`/`--tls-key` when both

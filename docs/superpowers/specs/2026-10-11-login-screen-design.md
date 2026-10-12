@@ -427,10 +427,17 @@ changing it changes no code path.
 - **The microphone opens with the screen** when `voice = true`, and the widget says so: a red `● rec`
   in its own title, which is the v1 rule about a visible indicator kept without a header. `Tab` closes
   it, `Esc` leaves, and `voice = false` means no audio ever leaves the machine.
-- **Nothing reaches the provider until the local detector confirms speech.** The login capture runs
-  `VadState` in front of the transcriber exactly as `auto` mode does: the silence, the room tone and
-  the chair creak before the first syllable are dropped, and only what was confirmed as the user's
-  speech is uploaded. That is a stronger guarantee than push-to-talk gives today.
+- **Nothing reaches the provider until the local detector confirms speech — and it is the *server's*
+  detector that says so.** The login capture runs `VadState` (`session.rs`'s `login_vad`) in front of
+  the transcriber exactly as `auto` mode does: the silence, the room tone and the chair creak before
+  the first syllable are dropped, and only what was confirmed as the user's speech reaches the
+  provider. That is a stronger guarantee than push-to-talk gives it. **In the browser the wording is
+  "reaches the provider", not "leaves the machine"**: `tipsy-web` has no detector at all, so every
+  20 ms frame its open capture produces is uploaded to `/ws` — the same frames push-to-talk uploads —
+  and the server's own VAD is what keeps the silence out of the transcription call. A client that
+  wanted to filter its own uploads would have to bring a detector with it; what the browser does owe,
+  and enforces, is that no frame leaves the page while no capture is open, and that a frame the door
+  refuses is dropped rather than kept (the phase review's finding 6, which corrected this bullet).
 - **One transcription call per finished utterance**, capped at 15 s each, and only the transcribe
   key is spent: no chat call and no speech call happens before the HUD. That is precisely why
   `TurnInput::Utterance` was rejected (L4) — reusing it would have answered the login out loud and

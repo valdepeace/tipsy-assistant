@@ -153,6 +153,28 @@ pub fn check_bundle_names(root: &Path, bundle: &Path) -> Result<(), String> {
     ))
 }
 
+/// Empties the bundle directory before `wasm-bindgen` writes into it.
+///
+/// **A stale file under an old name would be served for ever** (the phase review's nit):
+/// `web/dist/` is what the embed's own `/assets/dist/…` route answers from, and nothing — not
+/// [`REQUIRED`], not a page — would ever name a renamed asset again, so a build would keep serving a
+/// file nobody builds. `wasm-bindgen` writes its four files by name and never removes anything.
+///
+/// **The guard is the path's own tail, because this deletes a directory.** `bundle` is
+/// `<workspace-root>/web/dist` at every call site, so a path that does not end that way is a caller's
+/// bug and this refuses instead of deleting whatever it was handed.
+pub fn clear_bundle(bundle: &Path) -> Result<(), String> {
+    if !bundle.ends_with(Path::new("web").join("dist")) {
+        return Err(format!("{} is not the web bundle directory, so it is not emptied", bundle.display()));
+    }
+    match std::fs::remove_dir_all(bundle) {
+        Ok(()) => Ok(()),
+        // Not there yet is the ordinary first run, and not an error.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", bundle.display())),
+    }
+}
+
 /// The file names directly under the bundle directory — the evidence a name mismatch is diagnosed
 /// from. Subdirectories are not listed: the two inferred names are files.
 fn bundle_names(bundle: &Path) -> Result<Vec<String>, String> {
@@ -232,6 +254,9 @@ pub fn run(root: &Path) -> Result<(), String> {
                 let locked = locked_wasm_bindgen(&lock)
                     .ok_or("wasm-bindgen is not in Cargo.lock: add it to tipsy-web before running dist")?;
                 check_bindgen_version(&locked)?;
+                // Emptied first, so the directory the embed serves holds this build's files and
+                // nothing an earlier one left behind (the phase review's nit).
+                clear_bundle(&bundle)?;
                 std::fs::create_dir_all(&bundle).map_err(|error| format!("{}: {error}", bundle.display()))?;
                 let out = bundle.display().to_string();
                 let artifact = wasm_artifact(&target).display().to_string();
@@ -436,6 +461,35 @@ version = "0.2.129"
 
         std::fs::write(bundle.join("tipsy_web_bg.wasm"), b"").unwrap();
         assert!(check_bundle_names(root, &bundle).is_ok(), "both inferred names are present");
+    }
+
+    /// **The bundle directory is emptied before `wasm-bindgen` writes into it** (the phase review's
+    /// nit): `/assets/dist/…` is served from this directory, and a file an earlier build left under a
+    /// renamed asset would be served for ever — `REQUIRED` and the pages name the four files
+    /// `wasm-bindgen` writes, never the ones it stopped writing. The guard is tested too, because this
+    /// is the one function in the crate that deletes a directory.
+    #[test]
+    fn the_bundle_directory_is_emptied_before_it_is_written_and_never_by_surprise() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("web").join("dist");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("tipsy_web.js"), b"an older build").unwrap();
+        std::fs::write(bundle.join("tipsy_web_old_name.js"), b"an asset nobody builds").unwrap();
+
+        clear_bundle(&bundle).expect("the bundle path is the one `run` builds");
+        assert!(!bundle.exists(), "the directory goes, and with it the files it held");
+        clear_bundle(&bundle).expect("and clearing it again, before anything created it, is not an error");
+
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("tipsy_web.js"), b"this build").unwrap();
+        assert_eq!(std::fs::read(bundle.join("tipsy_web.js")).unwrap(), b"this build");
+
+        // The guard: a path that is not the bundle directory is refused rather than deleted, so a
+        // future caller with a different root cannot take a directory with it.
+        let elsewhere = dir.path().join("web");
+        let error = clear_bundle(&elsewhere).expect_err("only a `web/dist` path may be deleted");
+        assert!(error.contains("not the web bundle directory"), "{error}");
+        assert!(elsewhere.is_dir(), "and the refused path is still there");
     }
 
     #[test]

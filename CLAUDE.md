@@ -45,7 +45,9 @@ release checklist still owes one live-key spoken exchange.
 `docs/superpowers/specs/2026-10-11-login-screen-design.md`) — the ritual door: a widget with the core in
 the middle over a veiled, unreadable HUD; an allowlist of names and keywords in `[login]` in
 `config.toml`, judged on the server so it never travels to a client; typing and voice, with only the
-speech the local detector confirms ever uploaded; the profile's greeting withheld until the door opens.
+speech the **server's** detector confirms ever reaching a provider — a browser client has no detector of
+its own and uploads every frame of an open capture, which is what the server's `login_vad` filters
+(Plan 3's fix wave, finding 6); the profile's greeting withheld until the door opens.
 **Six tasks** — four with written bodies in the plan and two executed from briefs, whose reports are in
 its workspace — one whole-branch review, one fix wave and one scoped re-review that closed every
 finding, the worst of them being that the client could forward login audio before the microphone device

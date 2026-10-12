@@ -25,12 +25,23 @@
 //! gate is built from this function, the capture it opens is kept in one [`mic::CaptureSlot`] for the
 //! whole run, and every frame drains that capture inside the one borrow of the state the frame owns.
 //!
-//! **The reply is Task 3.4's, and it plays through the microphone's own context.** [`playback`] is the
+//! **The reply is Task 3.4's, and it plays through the run's own `AudioContext`.** [`playback`] is the
 //! timeline — pure, host-tested — and [`web_audio`] is the presenter that schedules one
-//! `AudioBufferSourceNode` per sentence on it. There is exactly one `AudioContext` per run and it is
-//! the capture's ([`mic::Capture::context`]): a second one would be a second clock. That is also why a
-//! `Frame::Speech` arriving before the user's press is **dropped** rather than kept — the events around
-//! it still reach the HUD, and the audio has nowhere to go.
+//! `AudioBufferSourceNode` per sentence on it. There is exactly one `AudioContext` per run — a second
+//! one would be a second clock — and **the user's press creates it whether or not the microphone
+//! capture succeeded** ([`mic::AudioSlot`], the phase review's finding 4): a page whose `getUserMedia`
+//! was refused, or whose device is busy, still hears the greeting and every reply, and the microphone
+//! is one consumer of the context rather than the thing that brings it into being. That is also why a
+//! `Frame::Speech` arriving before the press is **dropped** rather than kept — the events around it
+//! still reach the HUD, and the audio has nowhere to go.
+//!
+//! **The gate, and the failure it has to survive, are [`mic::press_to_start`]'s; this file reads the
+//! fact.** The overlay is opaque and full-viewport, so **every** path out of the gate takes it off the
+//! page (the phase review's Blocker 2) and the reason is recorded in the state: the login screen's own
+//! line when one is up, the HUD's notice when none is. A screen that opens **after** the refusal — the
+//! probe answers at load, before `Welcome` arrives — is put right by the frame loop from
+//! [`mic::MicFailure`], so it never claims a `● rec` for a device that will not open and never sends a
+//! `LoginStart` for one.
 
 pub mod hud;
 pub mod login_door;
@@ -45,7 +56,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use tipsy_protocol::{AssistantState, ClientConfigView, Command, Event, Frame, ToClient, ToServer};
-use tipsy_ui::{policy, ClockView, ConfigEffect, ConfigForm, Hit, UiAction, UiState};
+use tipsy_ui::{policy, ClockView, ConfigEffect, ConfigForm, Hit, NoticeKind, UiAction, UiState};
 use wasm_bindgen::prelude::*;
 
 // `draw_web` and the three event hooks are `WebRenderer`'s, and the trait has to be in scope for
@@ -75,10 +86,27 @@ pub fn start() -> Result<(), JsValue> {
     // One per run: the gate fills it on the user's press, this loop drains it on every frame, and it
     // holds the `AudioContext` Task 3.4 plays the reply through. `None` means no capture is running.
     let capture: mic::CaptureSlot = Rc::new(RefCell::new(None));
+    // **The run's own audio, filled by the same press and independently of the capture** (finding 4):
+    // the reply is scheduled on this context, so a refused microphone is a page that plays but cannot
+    // listen rather than a page that can do neither.
+    let audio: mic::AudioSlot = Rc::new(RefCell::new(None));
+    // Why the microphone will not open, once the page knows: the probe runs here, before `Welcome` and
+    // so before any login screen exists, and the screen that arrives afterwards has to say its piece
+    // rather than claim a capture it can never have (Blocker 2).
+    let mic_failure: mic::MicFailure = Rc::new(RefCell::new(None));
     // The "press to start" screen (v1 spec `:193-194`). It builds its own elements, so the page Task
-    // 3.2 created needs no change for it, and a microphone that cannot work is a *disabled* button
-    // with a reason rather than a button that fails on its first press.
-    mic::press_to_start(Rc::clone(&state), Rc::clone(&capture));
+    // 3.2 created needs no change for it, and a microphone that cannot work is a **pressable** button
+    // with the reason beside it — the press is the gesture the audio context needs and the way past an
+    // otherwise opaque overlay — rather than a button over a page nobody can reach. It gets the
+    // `Outbox` too, because the press opens the HUD's microphone and the server has to be told
+    // (`Command::ListenStart`: a switch the session does not know about is one whose frames it drops).
+    mic::press_to_start(
+        Rc::clone(&state),
+        Rc::clone(&capture),
+        Rc::clone(&audio),
+        Rc::clone(&mic_failure),
+        outbox.clone(),
+    );
 
     // The reply's timeline: one per run, fed by the frame loop below and presented by `web_audio`.
     let shared = Rc::new(RefCell::new(Shared {
@@ -90,6 +118,11 @@ pub fn start() -> Result<(), JsValue> {
         playback: playback::Playback::new(),
         outbox,
         capture,
+        audio,
+        mic_failure,
+        // `[listening] mic_gain` (finding 7): the identity until this client has been told the
+        // configuration, which a browser learns from `Event::Config` and from nowhere else.
+        mic_gain: mic::MicGain::default(),
         queue,
         // **One `Door` per `start()`, and it carries the request in flight and no run-scoped bit at
         // all**: the once-per-run rule is `UiState::login_seen`, asked of the state by `show_login`
@@ -156,6 +189,15 @@ pub fn start() -> Result<(), JsValue> {
         let dt = (now - last).max(0.0) as u64;
         last = now;
 
+        // `[listening] mic_gain`, as the configuration this client has been given spells it (finding
+        // 7). A browser has no `config.toml`: the value arrives with `Event::Config` — the answer to
+        // the `GetConfig` the configuration screen sends when it opens — and it is kept here so that
+        // closing the screen does not unlearn it. `configured_gain` refuses a placeholder form and an
+        // unsaved edit, which is what makes reading it every frame honest.
+        if let Some(gain) = mic::configured_gain(&shared.state.borrow()) {
+            shared.mic_gain = gain;
+        }
+
         // The frame's whole borrow of the state, and it answers with the actions the input raised: the
         // door's reconciliation has to follow `hud::drain` **inside the same frame** — a `Tab` that just
         // closed the capture is a `LoginStop` now, not on the next one — and `drain_capture` has to be
@@ -168,8 +210,8 @@ pub fn start() -> Result<(), JsValue> {
 
             // The frame loop drains everything that arrived since the last frame, exactly as the native
             // loop drains `from_server` (`client.rs:322-324`). The one clock the reply is scheduled on
-            // is the capture's `AudioContext`, and it is `None` until the user's press.
-            let audio_now = audio_now(&shared.capture);
+            // is the press's `AudioContext`, and it is `None` until that press.
+            let audio_now = audio_now(&shared.audio);
             let (welcomed, scheduled) = {
                 let mut queue = shared.queue.borrow_mut();
                 route(&mut queue, &mut shared.playback, &mut shared.door, &mut state, audio_now)
@@ -182,11 +224,24 @@ pub fn start() -> Result<(), JsValue> {
                 state.notify(text);
             }
             if let Some(audio_now) = audio_now {
-                present(&mut shared.playback, &shared.capture, audio_now, &scheduled);
+                present(&mut shared.playback, &shared.audio, audio_now, &scheduled);
             }
             // Everything the handlers queued since the last frame, in the order it arrived, tested
             // against the hits of the frame the user was actually looking at.
-            let actions = hud::drain(&mut state, &shared.hits, &mut shared.queued);
+            let mut actions = hud::drain(&mut state, &shared.hits, &mut shared.queued);
+            // **A microphone that refused before the screen was up.** The probe answers at load and a
+            // press can fail while no screen exists, so the screen that opens afterwards is put right
+            // here — before `sync`, so the same frame sends no `LoginStart` for a device that will not
+            // open, and before the draw below, so no `● rec` is ever painted for one.
+            let mic_failed = shared.mic_failure.borrow().is_some();
+            if mic_failed {
+                mic::carry_no_microphone(&mut state);
+                // The reducer's own `Tab`, and the empty-box re-arm, still raise `LoginStart` in the
+                // one frame before the carry above has run. A client whose microphone refused must
+                // not announce a capture it cannot have: the server would drop the frames anyway, and
+                // this keeps the wire honest rather than merely harmless.
+                actions.retain(|action| !matches!(action, UiAction::Send(Command::LoginStart)));
+            }
             // The capture's edges: a screen that just opened with `voice` sends `LoginStart`; `Tab`,
             // the third refusal, a failed device and a **pass** all close the capture and send
             // `LoginStop`; and the command goes down the same socket path every other HUD command does
@@ -204,7 +259,7 @@ pub fn start() -> Result<(), JsValue> {
             // handler only appends what the worklet posted, and this is the only place a captured
             // frame may reach the socket — behind [`login_door::Door::sends_frames`] and nothing else.
             // No capture means no frames, which is what the gate's un-pressed state is.
-            drain_microphone(&shared.door, &mut state, &shared.capture, &shared.outbox);
+            drain_microphone(&shared.door, &mut state, &shared.capture, &shared.outbox, &shared.mic_gain);
             actions
         };
 
@@ -250,8 +305,17 @@ struct Shared {
     playback: playback::Playback,
     /// Task 3.2's sender for everything the HUD asks the server for.
     outbox: socket::Outbox,
-    /// Task 3.3's capture slot, which is also where the one `AudioContext` lives.
+    /// Task 3.3's capture slot, which holds the microphone's graph while a capture runs.
     capture: mic::CaptureSlot,
+    /// **The run's one `AudioContext`**, filled by the same press and independent of the capture
+    /// (finding 4): playback's clock, and the reason a refused microphone still hears the reply.
+    audio: mic::AudioSlot,
+    /// Why the microphone will not open, once the page knows (Blocker 2): read by the frame loop so a
+    /// screen that opens after the refusal is typing-only and says so.
+    mic_failure: mic::MicFailure,
+    /// `[listening] mic_gain` as the last filled, clean configuration carried it, and the identity
+    /// until this client has been given one (finding 7).
+    mic_gain: mic::MicGain,
     /// The messages the socket has queued, drained once per frame.
     queue: Rc<RefCell<VecDeque<ToClient>>>,
     /// Task 3.7's login door: the screen's first-show, the capture's edges and the one predicate a
@@ -286,10 +350,16 @@ fn focus_canvas() {
     }
 }
 
-/// The one clock the reply is scheduled on: the capture's `AudioContext`, and `None` until the user's
-/// press. `current_time` is MDN's, in seconds, and it stops advancing while the context is suspended.
-fn audio_now(capture: &mic::CaptureSlot) -> Option<f64> {
-    capture.borrow().as_ref().map(|capture| capture.context().current_time())
+/// The one clock the reply is scheduled on: the `AudioContext` the user's press created, and `None`
+/// until then. `current_time` is MDN's, in seconds, and it stops advancing while the context is
+/// suspended.
+///
+/// **It is the audio slot that is read, not the capture** (finding 4): the context exists as soon as
+/// the press does, so a page whose `getUserMedia` was refused is a page that plays the greeting and
+/// every reply. Reading the capture here is what used to make playback impossible without a
+/// successful capture — `route` drops a `Frame::Speech` when this is `None`.
+fn audio_now(audio: &mic::AudioSlot) -> Option<f64> {
+    audio.borrow().as_ref().map(|context| context.current_time())
 }
 
 /// Schedules the chunks the timeline placed and drops the nodes whose audio has ended.
@@ -298,12 +368,11 @@ fn audio_now(capture: &mic::CaptureSlot) -> Option<f64> {
 /// has: a failure goes where the browser console can be read.
 fn present(
     playback: &mut playback::Playback,
-    capture: &mic::CaptureSlot,
+    audio: &mic::AudioSlot,
     audio_now: f64,
     scheduled: &[playback::Scheduled],
 ) {
-    if let Some(capture) = capture.borrow().as_ref() {
-        let ctx = capture.context();
+    if let Some(ctx) = audio.borrow().as_ref() {
         for chunk in scheduled {
             if let Err(error) = web_audio::play(ctx, chunk) {
                 web_sys::console::error_1(&error);
@@ -321,15 +390,16 @@ fn present(
 /// The microphone, once per frame: the port's handler only appends what the worklet posted, and this
 /// is the only place a captured frame may reach the socket. **The guard is the door's**, and it is
 /// inside [`mic::drain_capture`] rather than here, so the one send site and the one predicate cannot
-/// drift apart.
+/// drift apart; the gain is `[listening] mic_gain`'s, applied to the level the `VOZ` panel shows.
 fn drain_microphone(
     door: &login_door::Door,
     state: &mut UiState,
     capture: &mic::CaptureSlot,
     outbox: &socket::Outbox,
+    gain: &mic::MicGain,
 ) {
     if let Some(capture) = capture.borrow().as_ref() {
-        mic::drain_capture(capture, door, state, outbox);
+        mic::drain_capture(capture, door, state, outbox, gain);
     }
 }
 
@@ -352,10 +422,11 @@ fn send(shared: &Shared, command: Command) {
 /// The action loop's other half: the native client's `on_action` (`client.rs:428-509`) with a socket
 /// instead of a file.
 ///
-/// Every arm is an `UiAction` this build has. Two of them are deliberately inert and named here
-/// rather than left to be discovered: `ToggleLive` has no browser implementation in this phase — there
-/// is no realtime call on a web client, and no command to send — and `LoginDone` belongs to Task 3.7,
-/// which is the task that shows the door in the first place.
+/// Every arm is an `UiAction` this build has, and the two this build does not implement say so on
+/// screen rather than only in a comment: `ToggleLive` has no browser implementation in this phase —
+/// there is no realtime call on a web client, and no command to send — and the Server tab's
+/// Regenerate row has no command in this protocol either, because `store::new_token` lives in the
+/// server process. `LoginDone` is Task 3.7's, and the screen goes down here.
 fn dispatch(action: UiAction, shared: &mut Shared) {
     let mut state = shared.state.borrow_mut();
     match action {
@@ -364,7 +435,7 @@ fn dispatch(action: UiAction, shared: &mut Shared) {
             // `tipsy_ui::policy`'s three decisions — `flush_on_interrupt`, `interrupts_playback` and
             // `starts_turn` — in the native client's order (`client.rs:458-464`), which is the plan's
             // five lines as one call. Re-deriving the `&&` here is exactly what Task 3.4 removed.
-            let now = audio_now(&shared.capture).unwrap_or(0.0);
+            let now = audio_now(&shared.audio).unwrap_or(0.0);
             web_audio::silence(&shared.playback.on_command(&command, now));
             send(shared, command);
         }
@@ -378,12 +449,12 @@ fn dispatch(action: UiAction, shared: &mut Shared) {
         // HUD selected — the native client ignores the index too. Task 3.4 owns the audio and the
         // timeline, and a `Replay` that is audible does not touch the sequence position.
         UiAction::Replay(_) => {
-            let Some(now) = audio_now(&shared.capture) else {
+            let Some(now) = audio_now(&shared.audio) else {
                 // No press yet, so no context: there is nothing to play through and nothing kept.
                 return;
             };
             if let Some(scheduled) = shared.playback.replay(now) {
-                present(&mut shared.playback, &shared.capture, now, std::slice::from_ref(&scheduled));
+                present(&mut shared.playback, &shared.audio, now, std::slice::from_ref(&scheduled));
             }
         }
         // F9 and the gear. There is no `config.toml` in a browser, so the screen is read over the wire
@@ -420,17 +491,23 @@ fn dispatch(action: UiAction, shared: &mut Shared) {
                     // `policy::test_interrupts_playback` joined with `policy::flush_on_interrupt` the
                     // way the native client joins them (`client.rs:496-500`).
                     ConfigEffect::Test(capability) => {
-                        let now = audio_now(&shared.capture).unwrap_or(0.0);
+                        let now = audio_now(&shared.audio).unwrap_or(0.0);
                         web_audio::silence(&hud::test_barge_in(&mut shared.playback, capability, now));
                         send(shared, Command::TestProvider { capability });
                     }
                     // No command in the protocol this plan fixes mints a token: §4.2 lists `GetConfig`,
                     // `UpdateConfig` and `SetKey`, and `store::new_token` (`config/store.rs:28-48`)
                     // lives in the server process. The browser therefore cannot regenerate one, and
-                    // this arm must NOT invent a command or mint a token client-side. Leave the row
-                    // inert and report it: the Server tab's Regenerate row is native-only until a plan
-                    // defines a command for it.
-                    ConfigEffect::RegenerateToken => {}
+                    // this arm must NOT invent a command or mint a token client-side. **The row now
+                    // says so** (the phase review's nit): the text goes on the screen's own notice
+                    // line, which is the only line visible while the screen has the keyboard — the
+                    // HUD's notice is behind it.
+                    ConfigEffect::RegenerateToken => {
+                        let text = state.strings().cfg_regenerate_native.to_string();
+                        if let Some(form) = state.config_form.as_mut() {
+                            form.notice = Some((NoticeKind::Warning, text));
+                        }
+                    }
                     ConfigEffect::None => {}
                 }
             }
@@ -438,8 +515,12 @@ fn dispatch(action: UiAction, shared: &mut Shared) {
         // F10 has no browser meaning in this phase: `tipsy-ui` maps the key to `ToggleLive` (Plan 2C's
         // indicator), and a web client has no realtime socket to open, no `Command` that would open
         // one and nothing for an indicator to report. The arm is inert rather than unreachable — the
-        // key is the HUD's, and swallowing it is the honest answer. Recorded in the ledger as a gap.
-        UiAction::ToggleLive => {}
+        // key is the HUD's, and swallowing it is the honest answer — but **it now says so** (the phase
+        // review's nit): an inert key that explains itself is not the same as one that does nothing.
+        UiAction::ToggleLive => {
+            let text = state.strings().live_web_unavailable;
+            state.notify(text);
+        }
         // The door opened and the user pressed `Enter`: the screen goes down. The capture went down
         // before it — a pass closes `LoginState::open` in the reducer
         // (`crates/tipsy-ui/src/state.rs:607`), so the frame loop's `Door::sync` already sent the
@@ -1143,6 +1224,9 @@ mod tests {
             playback: playback::Playback::new(),
             outbox: socket::Outbox::for_tests(),
             capture: Rc::new(RefCell::new(None)),
+            audio: Rc::new(RefCell::new(None)),
+            mic_failure: Rc::new(RefCell::new(None)),
+            mic_gain: mic::MicGain::default(),
             queue: Rc::new(RefCell::new(VecDeque::new())),
             door: login_door::Door::new(),
             quit: false,
@@ -1182,6 +1266,62 @@ mod tests {
         dispatch(UiAction::LoginDone, &mut shared);
         assert!(shared.state.borrow().login.is_none(), "the arm takes the screen down");
         assert!(shared.state.borrow().login_seen, "and the run still remembers it was asked");
+    }
+
+    /// **The two keys this build does not implement now say so where the user is looking** (the phase
+    /// review's nit). `F10`'s `ToggleLive` and the Server tab's `Ctrl+R` were inert with a comment in
+    /// the code and nothing on screen. [`dispatch`] is the only caller either arm has, so both are
+    /// reachable from a host test — which is also why this is the test that fails if either goes back
+    /// to being silent.
+    #[test]
+    fn the_two_keys_this_build_does_not_implement_say_so() {
+        let es = tipsy_ui::strings(tipsy_protocol::UiLanguage::Es);
+        let mut shared = shared_for_tests();
+
+        // The token row: the configuration screen's own notice line, because the HUD's line is behind
+        // the full-screen form.
+        shared.state.borrow_mut().show_config_form(ConfigForm::default());
+        dispatch(UiAction::Config(tipsy_ui::ConfigAction::RegenerateToken), &mut shared);
+        let notice = shared
+            .state
+            .borrow()
+            .config_form
+            .as_ref()
+            .and_then(|form| form.notice.clone())
+            .expect("the row explains itself on the screen's notice line");
+        assert_eq!(notice.1, es.cfg_regenerate_native);
+        assert_eq!(notice.0, NoticeKind::Warning, "it is not an error: it is a row that is not here");
+
+        // And `F10` on the HUD: the notice line the HUD draws, and no call started.
+        dispatch(UiAction::ToggleLive, &mut shared);
+        assert_eq!(
+            shared.state.borrow().notice.as_ref().map(|(text, _)| text.as_str()),
+            Some(es.live_web_unavailable)
+        );
+        assert!(!shared.state.borrow().live, "and it starts nothing, which is the point");
+    }
+
+    /// **The reply's clock is the context the press made, not the capture's** (the phase review's
+    /// finding 4). `audio_now` and `present` are called from inside `draw_web`'s callback, which needs a
+    /// real browser, so no host test can run them — and the decision they carry is *which slot the
+    /// `AudioContext` lives in*, which is exactly the decision that made playback impossible without a
+    /// successful capture. This reads the committed source the way `mic.rs` pins its one send site, and
+    /// it is falsifiable: pointing either call back at the capture fails it.
+    #[test]
+    fn the_reply_is_scheduled_on_the_context_the_press_made_and_not_on_the_capture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("lib.rs");
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let production = &source[..source.find("#[cfg(test)]").expect("this module follows")];
+        for call in ["let audio_now = audio_now(&shared.audio);", "present(&mut shared.playback, &shared.audio"] {
+            assert!(production.contains(call), "the clock is the run's audio slot: `{call}` is missing");
+        }
+        assert!(
+            !production.contains("audio_now(&shared.capture)")
+                && !production.contains("present(&mut shared.playback, &shared.capture"),
+            "and it is never the capture's context: a refused microphone must still play the greeting \
+             and every reply (finding 4)"
+        );
     }
 
     /// An HTML document with its HTML comments and its CSS block comments removed.

@@ -456,7 +456,26 @@ async fn welcome_then_greeting() {
                 tipsy_compadre::server::assets::web_bundle(),
                 "the session reports the asset layer's own answer and may not invent one"
             );
-            assert!(web_bundle, "Task 3.2's client page is committed, so this build carries the bundle");
+            // **And which case this tree is in, asked of the embed rather than asserted.** The flag
+            // means the client page *and* the script it imports (the Phase 3 fix wave's F3):
+            // `web/client/index.html` is committed and `web/dist/` is not, so a bare
+            // `assert!(web_bundle)` would be red in a fresh clone and green only in a worktree where
+            // `cargo run -p xtask -- dist` has run — the Phase 2 lesson, exactly. The property is
+            // asserted instead, and the line says which side of it this tree is on.
+            let page = tipsy_compadre::server::assets::asset(
+                tipsy_compadre::server::assets::PAGE_CLIENT,
+            )
+            .is_some();
+            let script = tipsy_compadre::server::assets::asset(
+                tipsy_compadre::server::assets::PAGE_CLIENT_SCRIPT,
+            )
+            .is_some();
+            assert_eq!(
+                web_bundle,
+                page && script,
+                "the flag is the page and the script it loads (page={page} script={script})"
+            );
+            println!("web_bundle={web_bundle} (page={page} script={script})");
         }
         other => panic!("the first message must be Welcome, got {other:?}"),
     }
