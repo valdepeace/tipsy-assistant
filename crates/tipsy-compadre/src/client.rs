@@ -40,6 +40,9 @@ pub mod audio;
 pub mod bridge;
 pub mod call;
 pub mod mic;
+/// The pseudo-terminal a web terminal's child runs in. Nothing in this file uses it: `serve`'s
+/// `/terminal/ws` route owns it, and it is here because `client` is the parent module.
+pub mod pty;
 pub mod settings;
 
 use call::call_ended;

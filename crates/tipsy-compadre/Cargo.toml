@@ -30,6 +30,10 @@ chrono = "0.4"
 clap = { version = "4.6", features = ["derive"] }
 getrandom = "0.4"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+# 0.9.0, read off crates.io by the research note (web-transport-and-terminal.md §0). ConPTY on
+# Windows 10 1809 and later; `openpty` fails with a readable error below that floor, which `spawn`
+# turns into "Windows 10 1809 or later is required for the web terminal".
+portable-pty = "0.9"
 axum = { version = "0.8.9", features = ["ws"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rcgen = "0.14"
