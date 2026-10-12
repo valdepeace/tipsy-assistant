@@ -66,7 +66,7 @@ beside those.
 | `client/mic.rs` | `drain_mic`, `sync_mic`, `login_capture`, `sync_login_mic`, `close_login_mic` and the microphone queue |
 | `client/audio.rs` | `playing`, `flush_playback`, `on_speech`, and the reply kept for `Replay` |
 | `client/call.rs` | `toggle_call`, `start_call`, `sync_call`, `end_call`, `call_ended` |
-| `client/settings.rs` | `open_screen`, `open_screen_remote`, `on_config_effect`, `test_provider`, `save`, `save_remote`, `regenerate_token`, `config_notice`, and the configuration half of `on_action` |
+| `client/settings.rs` | `open_screen`, `open_screen_remote`, `on_config_effect`, `test_provider`, `save`, `save_remote`, `regenerate_token`, `config_notice` — **eight methods, not "the configuration half of `on_action`"**: that half is two arms *inside* `on_action`'s body (`UiAction::OpenConfig` and `UiAction::Config`), they stay in the parent because moving them would rewrite a body this refactor may not touch, and they call these methods |
 
 The free functions at the bottom of `client.rs` do not stay where they are: `starts_turn`,
 `interrupts_playback`, `test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`,
@@ -89,11 +89,18 @@ Only two rules are needed.
 2. **Nothing becomes `pub`.** `pub(super)` from `client::mic` means "visible in `client` and its
    descendants", which includes `crate::client::tests`.
 
-Shared test helpers (`mock_client`, `welcome`, `welcome_mode`, `resolver`, `queue_frames`,
+Shared test helpers (`mock_client`, `welcome`, `resolver`, `queue_frames`,
 `sync_login`, `press_test`) stay in the parent's `mod tests`, marked `pub(super)` so a child's tests can
 reach them. If `use crate::client::tests::*;` from six child modules reads worse than it should, the
 fallback is `client/support.rs` behind `#[cfg(test)] mod support;` — same content, one more file, and
 it is *not* a test file: it holds helpers with no `#[test]` in it.
+
+**Two of those helpers did not stay, and the rule that moved them is D4, not this sentence.**
+`queue_frames` went with its one moving test to `client/mic.rs` (Task 2) and `press_test` went with its
+one moving test to `client/settings.rs`: a helper the parent's own tests no longer call is dead code
+there, and this crate's lint gate does not allow dead code.
+Measured on the finished tree, the parent's `mod tests` keeps `resolver`, `mock_client`, `welcome` and
+`sync_login`, and the parent names `press_test` and `queue_frames` nowhere.
 
 ## 4. The shared core, and the gate that decides membership
 
@@ -174,12 +181,17 @@ ways. `cargo fmt` is never run.
 
 1. **Test-name identity.** Before the first edit and after the last one:
    `cargo test -j 1 --workspace -- --list` into a file, then compare. The gate is the **set of test
-   function names — the last `::` segment of each listed path — plus the total count**, and it must be
-   identical. It is deliberately not the full module path: a test that moves from `client::tests::foo`
-   to `policy::tests::foo` is the work, not a regression. This is the gate that catches a test lost
-   inside the 823-line split.
-2. **The suite is green**, `0` failures, with the same count the baseline recorded. The baseline is
-   **505 at `2b328f3`** as this document is written; it is re-measured, not trusted.
+   function names — the last `::` segment of each listed path — plus the total count**, and **no
+   baseline name may be lost**: the only additions the delivered state carries are the four
+   `tipsy_ui::policy` tests Task 1 created, and any other new name is a finding. It is
+   deliberately not the full module path: a test that moves from `client::tests::foo` to
+   `policy::tests::foo` is the work, not a regression. This is the gate that catches a test lost inside
+   the 823-line split.
+2. **The suite is green**, `0` failures, at the delivered counts: **513 entries / 511 distinct names**
+   in the delivered state against the baseline's **509 / 507** — four additions and zero losses, and
+   the two duplicated leaf names are the same pair on both sides. The baseline is the `2f25c20`
+   capture; the `505 at 2b328f3` this document was written against is historical now. Both counts are
+   re-measured, not trusted.
 3. **No test is deleted, ignored, or weakened.** No `#[ignore]`, no assertion relaxed, no test renamed.
    A test that cannot be made to pass in its new home is a finding for the review, not a deletion.
 4. **The wasm gate:** `cargo check -p tipsy-ui -p tipsy-protocol --target wasm32-unknown-unknown` is
@@ -191,12 +203,23 @@ ways. `cargo fmt` is never run.
    into `global-constraints.md` in the same commit that moves it.
 6. **Size targets**, measured as production lines — everything above the file's first `#[cfg(test)]`
    line, and a file with no test module counts whole:
-   - `client.rs` under 450, and no child under `client/` over 400;
+   - **`client.rs` (parent) at most 574 production lines — the delivered measurement, a ceiling rather
+     than a target — and no child under `client/` over 400** — 574 is where the tree landed, not a slack
+     target. The 450 this line first carried was unreachable by construction: §3 puts
+     `frame_loop`, `on_message`, `on_action` (both configuration arms included), `key_input` and
+     `clock_view` in the parent, and the four child moves shed **481** production lines
+     (`1055` → `945` → `905` → `819` → **574**, one step per child task), not the ~730 the arithmetic of
+     the time assumed. The chain's first step is `1176` at `2f25c20`, which is Task 1's policy move:
+     that move shed **121** and the four children shed **481**, and the two together are the 602 the
+     whole chain covers. The four children measure 271, 132, 115 and 58 production lines, which the 400
+     does bind;
    - `session.rs` under 450 if the droppable task is done;
    - `tipsy-ui`'s `policy` module under 250 including its documents.
 7. **The shared core is reachable from a browser build**: `tipsy-web` does not exist yet, so the proof
-   is the wasm check plus a grep proving `tipsy_ui::policy` names nothing from `std::fs`, `std::time`,
-   `tokio` or `crossterm`.
+   is the wasm check plus a check of the module's **production imports** — what its `use` lines and
+   code paths name — proving `tipsy_ui::policy` names nothing from `std::fs`, `std::time`, `tokio` or
+   `crossterm`. Prose in a doc comment does not count either way: `policy.rs` does say `crossterm` in
+   a comment, and the gate is about what the module reaches for, not about the word.
 
 ## 7. Risks and residuals
 

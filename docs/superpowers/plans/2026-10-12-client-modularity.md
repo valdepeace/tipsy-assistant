@@ -801,9 +801,10 @@ moves with them and becomes `pub(super)` if the parent still uses it.
 (Get-Content crates/tipsy-compadre/src/client.rs).Count
 ```
 
-Expected: production lines (the first number minus one) **under 450**, and no file under
-`crates/tipsy-compadre/src/client/` over 400 production lines. As a comparison, `client.rs` had ~1176
-production lines and 2296 total when this plan was written.
+Expected: production lines (the first number minus one) **at most 574**, and no file under
+`crates/tipsy-compadre/src/client/` over 400 production lines. 574 is the delivered measurement and a
+ceiling rather than a target — the gate is the spec's §6, item 6, which this plan's front matter points
+at. As a comparison, `client.rs` had ~1176 production lines and 2296 total when this plan was written.
 
 - [ ] **Step 5: Gates, exactly as Task 3 Step 4**
 
@@ -856,7 +857,10 @@ with it. Update that line in the same commit that moves it, exactly as the file'
 
 - [ ] **Step 4: The size gate**
 
-Production lines of `session.rs` under 450.
+Production lines of `session.rs` under 450 — **this is the dropped task's expectation, not a live
+target**: Task 6 is the droppable split (see its heading), the delivered branch did not execute it, and
+`session.rs` therefore measures what it measured before. Nothing here expects a move that will not
+happen.
 
 ---
 

@@ -73,10 +73,27 @@ WebAssembly. Native-only dependencies (multi-threaded tokio, `cpal`, `rodio`, `k
 | Crate | Kind | Contents | Compiles to WASM |
 |---|---|---|---|
 | `tipsy-protocol` | library | `Command` / `Event` messages and the audio frame format | yes |
-| `tipsy-ui` | library | The ratatui HUD: widgets, state and es/en strings, backend-agnostic | yes |
+| `tipsy-ui` | library | The front end's shared, wasm-safe half: the ratatui HUD (widgets, state and es/en strings), backend-agnostic, **and the decisions a client makes with no device, socket or clock in reach (`policy`)** | yes |
 | `tipsy-web` | `.wasm` bundle | Web client: Ratzilla backend, browser audio, WebSocket transport | yes (target) — **arrives in Phase 3 of `2026-10-11-plan-3-web-tier.md`; it does not exist yet** |
 | `tipsy-compadre` | **binary** | The server (brain, providers, config, axum, the WebSocket door) plus the native TUI client | no |
 | `xtask` | binary | `cargo xtask dist`: fetch and verify xterm.js, build the bundle, build the binary that embeds it — **arrives in Phase 2 of the same plan** | no |
+
+A client's turn, microphone and playback policy — which command starts a turn or quiets the device,
+when the microphone is wanted and where one captured frame goes, which cell a click landed on — lives in
+`tipsy_ui::policy`, and **both the terminal client and the browser client call it**, so the two cannot
+drift: `crates/tipsy-compadre/src/client.rs` is one caller and Plan 3's web client is the other. It is
+the wasm-safe half by construction — nothing there may reach for a device, a socket, the file system,
+this process's clock or `crossterm` — which is why `client.rs`'s `key_input` (a crossterm `KeyEvent`) and
+`clock_view` (this process's clock) stay per shell instead, and why Plan 3's browser client reads
+`js_sys::Date` for its own.
+
+**`client.rs` is the parent module and its four children — `client/mic.rs`, `audio.rs`, `call.rs`,
+`settings.rs` — reach its imports, so that file's import list is part of their interface.** Each child
+opens with `use super::*` and resolves names it never imports itself (`CallSetup`, `Heard`, `envelope`,
+`rms`, `i16_to_f32`, `Capability`, `ClientConfigView`, `NoticeKind`, `config_from`, `form_of`,
+`provider_config`, `build_one`) through that glob. **Narrowing `client.rs`'s imports to what the parent
+alone names breaks the children**: removing `CallSetup` and `Heard` from `use crate::realtime::{…}`
+produces `E0433: cannot find type CallSetup` in `client/call.rs`, which is where both are used.
 
 There is **a single executable**. The `tipsy-web` bundle is embedded into the `tipsy-compadre`
 binary at build time and served from memory, so users download one file.
