@@ -18,7 +18,7 @@ use tipsy_ui::{
     ClockView, ConfigEffect, ConfigForm, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw,
 };
 use tipsy_ui::policy::{
-    MicRoute, flush_on_interrupt, hit_at, interrupts_playback, mic_route, starts_turn, takes_the_floor,
+    MicRoute, flush_on_interrupt, hit_at, interrupts_playback, mic_route, speech_rate, starts_turn, takes_the_floor,
     test_interrupts_playback,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -35,6 +35,7 @@ use crate::server::Hub;
 use crate::session::{SessionEnds, SessionPolicy};
 use crate::sysmon;
 
+pub mod audio;
 /// The client's own half of the socket bridge: the `--connect` path's three channel ends.
 pub mod bridge;
 pub mod mic;
@@ -352,8 +353,8 @@ impl Client {
     fn on_message(&mut self, to_server: &UnboundedSender<ToServer>, message: ToClient) {
         match message {
             ToClient::Event(event) => {
-                if let Event::SpeechChunk { sample_rate, .. } = &event {
-                    self.rate = *sample_rate;
+                if let Some(rate) = speech_rate(&event) {
+                    self.rate = rate;
                 }
                 // A remote screen follows the server's configuration: `GetConfig` when it opens, and
                 // again whenever the server says something changed — `Event::ConfigChanged` carries
@@ -416,25 +417,6 @@ impl Client {
         }
     }
 
-    /// True while the device still has audio queued or being played.
-    ///
-    /// The device is the only honest source for this: the session reports the end of a turn before
-    /// the device has finished speaking, so its status cannot say what is still audible.
-    fn playing(&self) -> bool {
-        self.player.as_ref().is_some_and(Player::playing)
-    }
-
-    /// Silences the device: whatever rodio still has queued is audio the assistant no longer wants
-    /// to say. The samples already kept for `Replay` are untouched.
-    ///
-    /// Takes `&self` on purpose: the only thing it touches is the device, so a caller holding the
-    /// live call's bookkeeping can silence the device without giving that borrow up.
-    fn flush_playback(&self) {
-        if let Some(player) = &self.player {
-            player.stop();
-        }
-    }
-
     /// Lets go of the call and silences the device: the audio still queued belongs to a call that is
     /// over, which is the same rule the user's own barge-in follows (`flush_on_interrupt`).
     fn end_call(&mut self) {
@@ -494,28 +476,6 @@ impl Client {
             events,
         ));
         Ok(())
-    }
-
-    /// Plays one spoken sentence, and shows the envelope of the reply it belongs to.
-    fn on_speech(&mut self, samples: Vec<i16>) {
-        if samples.is_empty() {
-            return;
-        }
-        self.reply.extend_from_slice(&samples);
-        let bytes = samples.len() * 2;
-        if let Some(player) = &self.player {
-            player.play(samples, self.rate);
-        }
-        // While a call is live the device is asked what it has actually played — the queue it still
-        // holds is subtracted, because a response is generated faster than it is spoken and the
-        // bytes merely handed over would overstate what the user heard (Review Focus 2). The device
-        // is reachable only from this thread, so this is where the number is worked out.
-        if let (Some(call), Some(player)) = (&self.call, &self.player) {
-            let (remaining, pos) = player.progress();
-            call.heard().push(bytes, remaining, pos.as_millis() as u64);
-        }
-        // The oscilloscope shows the reply as it is heard, so it is rebuilt as it grows.
-        self.state.start_voice(envelope(&i16_to_f32(&self.reply), self.rate));
     }
 
     /// Acts on what the call's socket task decided since the last frame.
@@ -953,8 +913,9 @@ pub(super) mod tests {
     use crate::providers::ProviderSlot;
     use tipsy_ui::{ConfigAction, NoticeKind};
     /// A resolver that knows one key — `openrouter`, the name the default configuration uses — and
-    /// reads no environment.
-    fn resolver() -> KeyResolver {
+    /// reads no environment. The playback tests in `client/audio.rs` name it too, which is why it is
+    /// reachable from a child.
+    pub(super) fn resolver() -> KeyResolver {
         let store = MemoryStore::default();
         SecretStore::set(&store, "openrouter", "k-test").unwrap();
         KeyResolver::new(Box::new(store), Box::new(|_| None))
@@ -1110,22 +1071,6 @@ pub(super) mod tests {
         assert!(client.state.on_key(KeyInput::F(9)).is_empty(), "no second screen while the door is shut");
         assert!(client.state.config_form.is_none());
         assert_eq!(client.state.on_key(KeyInput::Esc), vec![UiAction::Quit]);
-    }
-
-    #[test]
-    fn a_chunk_header_sets_the_rate_the_device_is_told() {
-        let config = Config::default();
-        let keys = resolver();
-        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
-        let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
-        let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
-        client.on_message(&to_server, ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
-        client.on_message(&to_server, ToClient::Audio(Frame::Speech { seq: 0, samples: vec![5, 6] }));
-        // There is no output device in a test — `Player::new` needs one — so the playback itself is
-        // skipped; what is pinned is the rate it would be handed, which is the announced one and
-        // never a guess about which mode is running.
-        assert_eq!(client.rate, 24000);
-        assert_eq!(client.reply, vec![5, 6], "the reply is kept for `F2` as it always was");
     }
 
     #[test]
@@ -1289,31 +1234,6 @@ pub(super) mod tests {
             }
             other => panic!("a first `Ask` on an ungreeted session is refused, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn a_finished_reply_keeps_its_audio_until_a_new_turn_starts() {
-        let (to_server, _from_client) = tokio::sync::mpsc::unbounded_channel();
-        let config = Config::default();
-        let keys = resolver();
-        let providers = ProviderSlot::new(build_providers(&config.providers, &keys).unwrap());
-        let mut client = Client::new(config, PathBuf::from("config.toml"), keys, providers);
-
-        client.on_message(&to_server, ToClient::Event(Event::Status { state: AssistantState::Speaking, detail: None }));
-        client.on_message(&to_server, ToClient::Event(Event::SpeechChunk { seq: 0, sample_rate: 24000 }));
-        client.on_message(&to_server, ToClient::Audio(Frame::Speech { seq: 0, samples: vec![7, 8, 9] }));
-        client.on_message(&to_server, ToClient::Event(Event::Reply { text: "Aquí andamos.".into() }));
-        client.on_message(&to_server, ToClient::Event(Event::Done { first_audio_ms: Some(1), total_ms: 2 }));
-        assert_eq!(client.reply, vec![7, 8, 9], "`F2` has the reply as soon as it is spoken");
-
-        // The idle that ends every normal reply: the device is still speaking, so it must keep both
-        // the queue and what `F2` replays.
-        client.on_message(&to_server, ToClient::Event(Event::Status { state: AssistantState::Idle, detail: None }));
-        assert_eq!(client.reply, vec![7, 8, 9], "a normal `Speaking -> Idle` keeps the last reply");
-
-        let (events, _results) = tokio::sync::mpsc::unbounded_channel();
-        client.on_action(UiAction::Send(Command::Ask { text: "¿y eso?".into() }), &to_server, &events);
-        assert!(client.reply.is_empty(), "the next turn speaks a reply of its own");
     }
 
     /// Review Focus 3, second half: the screen opens on the file as it is *now*. A `config.toml`
