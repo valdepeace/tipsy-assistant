@@ -85,12 +85,15 @@ beside it in `global-constraints.md`. **Read the two review reports in that same
 `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`, which the ledger records as superseded and
 wrong in three ways.
 
-**Phase 2 of that plan — the web terminal — is complete on branch `web-tier-phase-2`, head `bc1cc00`,
-and is not yet merged.** Five commits on a branch cut from `master` at `a548cea`: `f548207` (a
+**Phase 2 of that plan — the web terminal — is merged into `master` at `0ff2e62`** (it ran on branch
+`web-tier-phase-2` in its own worktree, which is gone; its ledger and the fix waves' evidence were
+synced to `.superpowers/sdd/2026-10-11-plan-3-web-tier/`). **Seven commits** on a branch cut from
+`master` at `a548cea`: `f548207` (a
 terminal's child in a real pty, `client/pty.rs` over `portable-pty` 0.9.0),
 `ba2387c` (the raw-bytes socket and the pump), `59e211d` (the xtask fetch, verify and extract of the
 pinned xterm.js), `e93b193` (the page, `/terminal` served end to end, and the embed it lives in) and
-`bc1cc00` (the whole-phase review's own fix wave). It
+`bc1cc00` (the whole-phase review's own fix wave), `28986c8` (the review's three documentation
+residues) and `0ff2e62` (the guard in the last paragraph). It
 was **reviewed once as a whole phase** — no blockers, five findings and seven nits, all closed in one
 fix wave: the page now sends its 256-byte padding frame as a **binary** frame, which is the shape the
 route ignores and the shape the test always sent (the string it used to send was a *text* frame, so
@@ -101,9 +104,19 @@ Task 3.6 no longer lists the phantom `web/vendor/xterm.js`, which made its bundl
 shell's, so running it from another directory no longer reports success into a directory nothing
 reads; and the fetched files are now checked against the extracted sha256 `web/vendor/README.md`
 records, so "already fetched and verified" is true rather than an existence check. It closes at
-**542 entries / 540 distinct, 0 failures** (from the phase's own **514/512** baseline), clippy at
+**544 entries / 542 distinct, 0 failures** (from the phase's own **514/512** baseline), clippy at
 exactly the seven, wasm clean. Its record is the same ledger, whose Task 2.1 section now exists and
-whose Task 2.4 section carries the live check. **Phase 3 has not started.**
+whose Task 2.4 section carries the live check.
+
+**And the merge found the phase's last defect, which none of the three reviews could see.**
+`every_asset_the_page_references_is_embedded` skipped itself when `web/vendor` was not a directory —
+but that directory **exists in a fresh clone**, because its `README.md` is committed, so `.is_dir()`
+was always true and the skip was **dead code**: the assertions under it ran in a checkout that had
+fetched nothing, so the suite was **red on `master` and green in the one worktree where `xtask dist`
+had been run** — and that worktree is where every review had run. Fixed by asking about the three
+fetched **files** rather than the directory (`0ff2e62`), and verified on both sides: the assertions run
+where the files exist, and the test skips with its explanation where they do not. **Phase 3 has not
+started.**
 
 **The client's files are split, and the client's decision policy is shared** — spec
 `docs/superpowers/specs/2026-10-12-client-modularity-design.md`. **Merged into `master` at `0de11e0`**
