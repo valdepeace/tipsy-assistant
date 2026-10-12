@@ -22,6 +22,14 @@ while it is open (a cost of drawing the header over the full-screen form, and un
 `client.rs` that overclaims where a read error is shown, one mangled test line `cargo fmt` would fix,
 and the help text that lost the true half of the toggle key (`Enter` still toggles a switch row).
 
+**Two requests from the user, recorded in that workspace's `follow-ups.md` (2026-10-12):** reloading
+`config.toml` **in place** — a save from the screen already applies without a restart, but a
+hand-edited file is read only at startup — and a panel **beside the HUD's others** showing each
+request's state, how long it took and the message it returned. Both come with the design questions the
+plan will have to answer (what counts as one request; where the record comes from; the error text is a
+new sink for the redaction rules). And a profile switch mid-run **used to leave the greeting behind**,
+fixed in `4a6bab9` with the test that pins it.
+
 **Integrated on `master` too: Plan 2C**
 (`docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md`) — the OpenAI Realtime voice mode:
 `[realtime]` in the config, the socket over `tokio-tungstenite`, the pure wire-event mapping, the turn
