@@ -110,6 +110,14 @@ pub struct Strings {
     pub err_token_invalid: &'static str,
     /// The handshake's fallback sentence, for an ending that is not one of the three above.
     pub err_handshake: &'static str,
+    /// The browser client lost its socket and is retrying. v1 spec §12: "the client reconnects with
+    /// backoff". **The native `--connect` bridge does not use it** — its own line is an
+    /// `Event::Error` message built in `client/bridge.rs`, which is a different sink — so this pair is
+    /// the web client's, and it is here rather than in `tipsy-web` because `UILanguage`'s table is
+    /// the project's only i18n mechanism.
+    pub web_offline: &'static str,
+    /// The socket is up again, which is what the session's own `Welcome` proves.
+    pub web_online: &'static str,
 }
 
 pub static ES: Strings = Strings {
@@ -191,6 +199,8 @@ pub static ES: Strings = Strings {
     err_token_required: "Este servidor está expuesto y pide un token: pásalo con --token.",
     err_token_invalid: "Ese no es el token de este servidor.",
     err_handshake: "No se pudo completar el saludo con el servidor.",
+    web_offline: "Sin conexión: reintentando…",
+    web_online: "Conexión restablecida",
 };
 
 pub static EN: Strings = Strings {
@@ -272,6 +282,8 @@ pub static EN: Strings = Strings {
     err_token_required: "This server is exposed and asks for a token: pass it with --token.",
     err_token_invalid: "That is not this server's token.",
     err_handshake: "The handshake with the server could not be completed.",
+    web_offline: "Connection lost: retrying…",
+    web_online: "Connection restored",
 };
 
 pub fn strings(lang: UiLanguage) -> &'static Strings {
@@ -296,5 +308,19 @@ mod tests {
             assert!(!table.live_off.is_empty(), "a refusal has to say something");
             assert!(table.help.contains("F10"), "the help line names the key: {}", table.help);
         }
+    }
+
+    /// The two socket notices exist in both languages and say different things: a client that showed
+    /// "connection lost" when the connection came back would be worse than silent. This is Task 3.2's
+    /// pair, and the reason they are in this table rather than hard-coded in `tipsy-web`.
+    #[test]
+    fn the_socket_notices_have_copy_in_both_languages() {
+        for table in [strings(UiLanguage::Es), strings(UiLanguage::En)] {
+            assert!(!table.web_offline.is_empty(), "a lost connection has to say something");
+            assert!(!table.web_online.is_empty(), "and so does a restored one");
+            assert_ne!(table.web_offline, table.web_online, "the two are not the same notice");
+        }
+        assert_ne!(strings(UiLanguage::Es).web_offline, strings(UiLanguage::En).web_offline);
+        assert_ne!(strings(UiLanguage::Es).web_online, strings(UiLanguage::En).web_online);
     }
 }
