@@ -87,6 +87,14 @@ this process's clock or `crossterm` — which is why `client.rs`'s `key_input` (
 `clock_view` (this process's clock) stay per shell instead, and why Plan 3's browser client reads
 `js_sys::Date` for its own.
 
+**`client.rs` is the parent module and its four children — `client/mic.rs`, `audio.rs`, `call.rs`,
+`settings.rs` — reach its imports, so that file's import list is part of their interface.** Each child
+opens with `use super::*` and resolves names it never imports itself (`CallSetup`, `Heard`, `envelope`,
+`rms`, `i16_to_f32`, `Capability`, `ClientConfigView`, `NoticeKind`, `config_from`, `form_of`,
+`provider_config`, `build_one`) through that glob. **Narrowing `client.rs`'s imports to what the parent
+alone names breaks the children**: removing `CallSetup` and `Heard` from `use crate::realtime::{…}`
+produces `E0433: cannot find type CallSetup` in `client/call.rs`, which is where both are used.
+
 There is **a single executable**. The `tipsy-web` bundle is embedded into the `tipsy-compadre`
 binary at build time and served from memory, so users download one file.
 

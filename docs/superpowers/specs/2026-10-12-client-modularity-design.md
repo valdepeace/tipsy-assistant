@@ -66,7 +66,7 @@ beside those.
 | `client/mic.rs` | `drain_mic`, `sync_mic`, `login_capture`, `sync_login_mic`, `close_login_mic` and the microphone queue |
 | `client/audio.rs` | `playing`, `flush_playback`, `on_speech`, and the reply kept for `Replay` |
 | `client/call.rs` | `toggle_call`, `start_call`, `sync_call`, `end_call`, `call_ended` |
-| `client/settings.rs` | `open_screen`, `open_screen_remote`, `on_config_effect`, `test_provider`, `save`, `save_remote`, `regenerate_token`, `config_notice`, and the configuration half of `on_action` |
+| `client/settings.rs` | `open_screen`, `open_screen_remote`, `on_config_effect`, `test_provider`, `save`, `save_remote`, `regenerate_token`, `config_notice` — **eight methods, not "the configuration half of `on_action`"**: that half is two arms *inside* `on_action`'s body (`UiAction::OpenConfig` and `UiAction::Config`), they stay in the parent because moving them would rewrite a body this refactor may not touch, and they call these methods |
 
 The free functions at the bottom of `client.rs` do not stay where they are: `starts_turn`,
 `interrupts_playback`, `test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`,
@@ -94,6 +94,13 @@ Shared test helpers (`mock_client`, `welcome`, `welcome_mode`, `resolver`, `queu
 reach them. If `use crate::client::tests::*;` from six child modules reads worse than it should, the
 fallback is `client/support.rs` behind `#[cfg(test)] mod support;` — same content, one more file, and
 it is *not* a test file: it holds helpers with no `#[test]` in it.
+
+**Two of those helpers did not stay, and the rule that moved them is D4, not this sentence.**
+`queue_frames` went with its one moving test to `client/mic.rs` (Task 2) and `press_test` went with its
+one moving test to `client/settings.rs`: a helper the parent's own tests no longer call is dead code
+there, and this crate's lint gate does not allow dead code.
+Measured on the finished tree, the parent's `mod tests` keeps `resolver`, `mock_client`, `welcome` and
+`sync_login`, and the parent names `press_test` and `queue_frames` nowhere.
 
 ## 4. The shared core, and the gate that decides membership
 
@@ -191,7 +198,13 @@ ways. `cargo fmt` is never run.
    into `global-constraints.md` in the same commit that moves it.
 6. **Size targets**, measured as production lines — everything above the file's first `#[cfg(test)]`
    line, and a file with no test module counts whole:
-   - `client.rs` under 450, and no child under `client/` over 400;
+   - **`client.rs` (parent) under 574 production lines, and no child under `client/` over 400** — 574 is
+     the delivered measurement, not a slack target. The 450 this line first carried was unreachable by
+     construction: §3 puts `frame_loop`, `on_message`, `on_action` (both configuration arms included),
+     `key_input` and `clock_view` in the parent, and the four moves shed **481** production lines
+     (`1176` at `2f25c20` → `1055` → `945` → `905` → `819` → **574**), not the ~730 the arithmetic of the
+     time assumed. The four children measure 271, 132, 115 and 58 production lines, which the 400 does
+     bind;
    - `session.rs` under 450 if the droppable task is done;
    - `tipsy-ui`'s `policy` module under 250 including its documents.
 7. **The shared core is reachable from a browser build**: `tipsy-web` does not exist yet, so the proof
