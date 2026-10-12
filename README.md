@@ -7,13 +7,15 @@ end, always gives a correct and useful answer. The project is meant to be shared
 community: a single executable, cloud providers that anyone can use with their own key, and
 profiles that anyone can write for their own region.
 
-**Status: early development — terminal client only.** The workspace, the protocol, the
+**Status: early development — terminal client and server.** The workspace, the protocol, the
 configuration and the key handling, the chat, speech and transcription providers (the
 OpenAI-compatible connector plus the native Gemini and ElevenLabs ones), the brain, the native
 terminal client and its configuration screen all work, and nine profiles ship with it. Two of the
 three listening modes work: `push`, where you open and close the microphone by hand, and `auto`,
-where a voice detector decides what is an utterance. Still to come: `hands_free` (it waits for the
-wake word), the WebSocket server, the web client and the web terminal, plus CI and releases.
+where a voice detector decides what is an utterance. The server and the remote client work too:
+`tipsy-compadre serve` listens, and `tipsy-compadre --connect <ws-url>` attaches a terminal to it.
+Still to come: `hands_free` (it waits for the wake word), the web client and the web terminal (the
+last two phases of the same plan), plus CI and releases.
 
 ## Quick start
 
@@ -215,8 +217,10 @@ The microphone device (`mic_device`) is a third case: the Listening tab saves it
 carries it, but the client opens the system's default input device whatever it says, so naming a
 device does not change what is recorded — at this launch or the next one.
 
-The Server tab — `bind`, the LAN switch and the token — is for the WebSocket server, which does not
-exist yet: the three values are written to the file and nothing listens on them today.
+The Server tab — `bind`, the LAN switch and the token — configures the WebSocket server. `serve`
+reads those three values; the token is the password every remote client presents, and `Ctrl+R`'s
+fresh value is written when you save. [Running a server, and attaching to
+one](#running-a-server-and-attaching-to-one) is what those three values mean.
 
 ### The login screen
 
@@ -261,6 +265,53 @@ is true, the top border says so in red while it is open, and `Tab` closes it —
 runs, the client shows it by setting the same open-microphone state push-to-talk sets. Three refusals
 in a row stop the automatic listening and the bottom border points you at this file; `Tab` starts it
 again.
+
+## Running a server, and attaching to one
+
+```sh
+# The server, headless: the web client at / and the web terminal at /terminal.
+cargo run -p tipsy-compadre -- serve
+
+# The same TUI you get from a bare run, drawn on this machine and driven by that server.
+cargo run -p tipsy-compadre -- --connect ws://127.0.0.1:7070/ws
+
+# From another machine, once `lan = true` and a token are in config.toml:
+cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the Server tab's token>
+```
+
+- `serve` records where it is listening — the address it was asked for and the one it bound, which
+  differ whenever `--bind` names port `0` — in `tipsy-compadre.log`. `--verbose` prints the bound
+  address as well. `--bind` overrides `bind` for one run and never writes the file back.
+- `lan = true` with an empty token **refuses to start**, naming `lan`: an exposed server with no
+  token is open to anything on the network. The same is true of any `bind` that is not a loopback
+  address, and a hostname is refused by name rather than resolved.
+- The token is 128 bits of OS entropy rendered as 32 lowercase hex characters, generated on the first
+  run and stored in `config.toml`. It travels in `Hello` for a protocol client and as `?token=…` on
+  the two pages, which a browser can only send in the URL; both pages therefore answer with
+  `Referrer-Policy: no-referrer` and `Cache-Control: no-store`, so the token is not in a `Referer`
+  and not in a cache.
+- `/` is the web client and `/terminal` the web terminal. A plain `cargo build` embeds no bundle:
+  both routes then answer with a page that says to build it with `cargo xtask dist`.
+- `--connect` runs the TUI and nothing else: it starts no server, builds no provider and reads no
+  API key, because every provider call happens in the server process.
+- `--verbose` also writes the log to stderr. The log file is `tipsy-compadre.log`, beside
+  `config.toml`, and it never contains the token, a key or audio: every complete line is scrubbed on
+  its way out, and both copies go through the same scrubber.
+
+### TLS, and what it does and does not do
+
+`serve --tls` encrypts the connection, which is what makes the token and a newly set API key safe on
+a LAN. With no `--tls-cert`/`--tls-key` pair it generates a self-signed certificate once, beside
+`config.toml`, and the run that minted it records its SHA-256 fingerprint — as `AA:BB:…`, the string
+a browser's certificate viewer shows — in `tipsy-compadre.log`, so the two can be compared.
+`--verbose` prints those lines too.
+
+**It does not unlock the browser's microphone from another machine.** Browsers expose
+`getUserMedia` only in a secure context; `http://127.0.0.1` already is one, so the microphone works
+on the server machine with no TLS at all; and a certificate the browser does not trust is not a
+secure context. For a browser on another device, use a certificate that device already trusts —
+`mkcert` with its root installed, or a real certificate for a name that resolves to the LAN
+address — through `--tls-cert`/`--tls-key`.
 
 ## Realtime voice mode
 
@@ -315,6 +366,11 @@ API keys stay in the operating system's credential store — Windows Credential 
 Keychain or the Secret Service on Linux — under the service `tipsy-compadre`, or in the environment
 variable you exported. `key status` prints only a redacted form of a key, `key set` prints no more
 than that when it confirms, and nothing ever writes a key into `config.toml`.
+
+Nothing above reaches the log either, and that is enforced rather than promised: `tipsy-compadre.log`
+is written through a scrubber, so the server's token, every key value this process resolved and any
+sample dump of recorded audio are removed before a line reaches the file — and before it reaches the
+`--verbose` copy on stderr, which goes through the same scrubber.
 
 ## Profile guideline
 
@@ -374,10 +430,12 @@ what a test cannot hear.
 - [ ] Talk over the call mid-answer: the speech stops at once, the log keeps only what was said
       before the interruption, and the model does not carry on from the cut-off sentence.
 - [ ] **No key reaches a log.** The realtime socket's `Authorization: Bearer <key>` header is
-      protected today only by the absence of a logger: `tungstenite` logs the request line — header
-      included — at `trace!`, and this workspace installs no `log`/`tracing` subscriber. Whoever
-      installs one has to filter that crate above `trace!` (never enable `trace` for it), or the key
-      is written to the log. The same invariant sits beside `RealtimeSocket` in
+      protected by the subscriber's ceiling: `tungstenite` logs the request line — header included —
+      at `trace!`, and `logging.rs` filters both of its layers at `DEBUG`, so `trace!` is
+      unreachable and stays that way (the test `the_subscriber_never_enables_trace` fails if a layer
+      is ever raised). Both layers are also scrubbed on the way out, so the server's token, a key
+      value this process resolved and any sample dump cannot reach the file or the `--verbose` copy.
+      The same invariant sits beside `RealtimeSocket` in
       `crates/tipsy-compadre/src/realtime/socket.rs`.
 - [ ] The real microphone and speakers in the browser, and the wake word in Spanish and English,
       once those milestones land.

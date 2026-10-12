@@ -266,19 +266,38 @@ pub async fn run(settings: Settings, bound: tokio::sync::oneshot::Sender<SocketA
             };
             let certificate = tls::load_or_generate(paths)?;
             if let Some(fingerprint) = &certificate.fingerprint {
-                // Printed once, by the run that minted the pair, so a user can compare it with the
-                // browser's certificate viewer (spec §5.5).
-                println!("tipsy-compadre: certificate generated at {}", certificate.cert.display());
-                println!("tipsy-compadre: SHA-256 fingerprint {fingerprint}");
+                // Recorded once, by the run that minted the pair, so a user can compare it with the
+                // browser's certificate viewer (spec §5.5). It is a log record rather than a
+                // `println!`: `--verbose` puts it on the terminal, and every run leaves it in
+                // `tipsy-compadre.log`, where a reader who missed the screen can still find it. The
+                // fingerprint survives the redaction rules by shape — `AA:BB:…` is not one opaque
+                // word — which `logging`'s own tests pin.
+                tracing::info!(path = %certificate.cert.display(), "generated a self-signed certificate");
+                tracing::info!(fingerprint = %fingerprint, "SHA-256 of the certificate, as a browser shows it");
             }
-            // What the flag buys, and what it does not, where a user reads it (spec §9.5).
-            eprintln!("tipsy-compadre: TLS encrypts this connection, so the token and a new API key are safe on a LAN.");
-            eprintln!("tipsy-compadre: it does not unlock the browser microphone from another machine: that needs a");
-            eprintln!("tipsy-compadre: certificate the browser already trusts (--tls-cert/--tls-key), or a client on this");
-            eprintln!("tipsy-compadre: machine, where http://127.0.0.1 is already a secure context.");
+            // What the flag buys, and what it does not, where a user reads it (spec §9.5). This is
+            // the ruling the README repeats, and the one a certificate viewer cannot tell anyone.
+            tracing::warn!(
+                "TLS encrypts this connection, so the token and a new API key are safe on a LAN. It \
+                 does not unlock the browser microphone from another machine: that needs a \
+                 certificate the browser already trusts (--tls-cert/--tls-key), or a client on this \
+                 machine, where http://127.0.0.1 is already a secure context."
+            );
             Some(tls::rustls_config(&certificate).await?)
         }
     };
+    // The listener is up, and this is the one record that says where and how. `asked` and `bound`
+    // differ whenever `--bind 127.0.0.1:0` asked for a port the kernel chose; **`lan` is read here
+    // and nowhere else** (spec §5.1) — it is the mode the operator asked for, and the *bound* address
+    // is what §5.1's rule and every session's policy are built from. The token is not part of the
+    // record, and neither is anything a log reader could turn into one (spec §9.6).
+    tracing::info!(
+        asked = %settings.bind,
+        bound = %local,
+        lan = settings.lan,
+        tls = tls_config.is_some(),
+        "listening"
+    );
     // The `Hub` is built once, before the first connection, and outlives every session (spec §5.2).
     // It takes the one shared provider slot: `Hub::spawn` clones it into each session, and
     // `reconfigure_all` is what replaces its contents when the configuration changes. It also takes
@@ -620,5 +639,54 @@ mod tests {
         assert!(guard_post_bind(&wide, Some("t")).is_ok(), "a token makes it legal after the bind too");
         let tight = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         assert!(guard_post_bind(&tight, None).is_ok(), "a loopback bind passes with no token");
+    }
+
+    /// The seam Task 1.9 exists to close: `run` used to `println!` the minted pair's path and its
+    /// fingerprint and `eprintln!` the four §9.5 lines. They are `tracing` records now, and this is
+    /// what says so — the real subscriber over a tempfile, read back. It installs the **global** slot
+    /// rather than a thread-local one on purpose: `run` is a task of its own, and a thread-local
+    /// default would not reach it.
+    ///
+    /// Nothing here touches `%APPDATA%`: the configuration, the log and the generated certificate all
+    /// live in the tempdir this test made. Running the binary instead would have written the user's
+    /// own configuration, which is why no test does that (`store::default_path` has no override).
+    ///
+    /// `lan = true` on a loopback bind is legal — §5.1's rule is about the bound address — and it is
+    /// the value that makes `lan=true` below this test's own line rather than another run's.
+    #[tokio::test]
+    async fn the_tls_lines_are_log_records_and_the_log_says_which_mode_was_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = crate::config::store::load_or_create(&path).unwrap().config;
+        let log = crate::logging::log_path(&path);
+        let subscriber = crate::logging::subscriber_at(&log, crate::logging::Secrets::default(), false).unwrap();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("this binary installs no other global subscriber");
+
+        let mut settings = settings("127.0.0.1:0", "");
+        settings.lan = true;
+        settings.config = config;
+        settings.config_path = path.clone();
+        settings.tls = Some(TlsFiles::Generated);
+        let addr = start(settings).await.expect("a loopback bind needs no token, with TLS or without");
+        assert!(addr.port() != 0);
+
+        // The bound address is sent before the TLS branch and before the `listening` record, so the
+        // file is awaited rather than assumed; `lan=true` is this test's own line, so waiting for it
+        // is waiting for the last of the four records. What this asserts is the file's contents, and
+        // the file is written by whoever runs.
+        let mut written = String::new();
+        for _ in 0..100 {
+            written = std::fs::read_to_string(&log).unwrap_or_default();
+            if written.contains("lan=true") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(written.contains("generated a self-signed certificate"), "{written}");
+        assert!(written.contains("SHA-256 of the certificate"), "{written}");
+        assert!(written.contains("does not unlock the browser microphone"), "{written}");
+        assert!(written.contains("lan=true"), "the log says which mode the operator asked for: {written}");
+        assert!(written.contains("tls=true"), "and that this listener is encrypted: {written}");
     }
 }

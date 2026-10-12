@@ -74,20 +74,30 @@ WebAssembly. Native-only dependencies (multi-threaded tokio, `cpal`, `rodio`, `k
 |---|---|---|---|
 | `tipsy-protocol` | library | `Command` / `Event` messages and the audio frame format | yes |
 | `tipsy-ui` | library | The ratatui HUD: widgets, state and es/en strings, backend-agnostic | yes |
-| `tipsy-web` | `.wasm` bundle | Web client: Ratzilla backend, browser audio, WebSocket transport | yes (target) |
-| `tipsy-compadre` | **binary** | The server (brain, providers, config, axum) plus the native TUI client | no |
+| `tipsy-web` | `.wasm` bundle | Web client: Ratzilla backend, browser audio, WebSocket transport | yes (target) — **arrives in Phase 3 of `2026-10-11-plan-3-web-tier.md`; it does not exist yet** |
+| `tipsy-compadre` | **binary** | The server (brain, providers, config, axum, the WebSocket door) plus the native TUI client | no |
+| `xtask` | binary | `cargo xtask dist`: fetch and verify xterm.js, build the bundle, build the binary that embeds it — **arrives in Phase 2 of the same plan** | no |
 
 There is **a single executable**. The `tipsy-web` bundle is embedded into the `tipsy-compadre`
 binary at build time and served from memory, so users download one file.
 
 Building the full distribution takes two steps (the WASM bundle first, then the binary that
 embeds it), wrapped in a single project command (`cargo xtask dist`). A plain `cargo build`
-produces a binary without the web client; the server then reports that the web UI is not
-available.
+produces a binary without the web client; both page routes then answer with a page that says the web
+UI is not available in this build and names `cargo xtask dist`.
 
-**Risk:** Ratzilla is young. Before planning, verify that it renders Braille canvas (the core
-rings and the oscilloscope), handles mouse input and tracks a compatible ratatui version. The
-fallback is the web terminal, which is part of v1 anyway.
+The server's HTTP and WebSocket layer is `axum` 0.8.9 with its `ws` feature, and TLS is
+`axum-server` 0.8.0 (`tls-rustls`). One consequence is worth writing down rather than discovering:
+`axum` pins `tokio-tungstenite` **0.29** while the native `--connect` client keeps **0.30**, so two
+copies of `tungstenite` are compiled into the one executable (spec W1).
+
+**Ratzilla is no longer a risk: the gate was answered `PASS`** on 2026-10-11. The spike verified all
+four questions and all four items that had been left `UNVERIFIED` — the Braille canvas (the core
+rings and the oscilloscope) renders, mouse input is handled, the ratatui version tracks — and
+`WebGl2Backend` is the recommendation, because the DOM backend is ~2.4× slower on a real GPU, panics
+at an 18 px font, and `CanvasBackend` mis-maps clicks by a row and a column
+(`.superpowers/sdd/plan-3-research/ratzilla-spike-verdict.md`). The web terminal is part of v1
+either way.
 
 ## Server internals
 
@@ -160,14 +170,21 @@ boundary: `server.token` below remains the only real requirement.
 
 The server spends the user's API keys and listens to their microphone, so:
 
-- It binds to `127.0.0.1` by default.
-- Exposing it to the local network is opt-in and requires a token generated on first run.
-- API keys, configuration and conversation history never leave the server; clients never see a
-  key.
+- It binds to `127.0.0.1` by default, `serve` refuses to start on any other address without a token,
+  and the token is 128 bits of OS entropy as 32 lowercase hex characters, generated on the first run.
+- API keys, configuration and conversation history never leave the server; clients never see a key.
+  The one case where a secret travels *towards* the server is setting a new key, and `SetKey` is
+  refused with `insecure_transport` unless that connection is loopback or TLS.
 - Both web routes (`/` and `/terminal`) require the token when the server is exposed to the LAN.
   The web terminal grants full control of the application, so it is never reachable without it.
-- Browsers only allow mic access on `localhost` or over HTTPS, so remote web clients (e.g. a phone
-  on the LAN) need HTTPS with a self-signed certificate.
+- `serve --tls` encrypts the connection: that is what makes the token and a new key safe on a LAN.
+  It does **not** by itself unlock `getUserMedia` on another machine — loopback over plain HTTP is
+  already a secure context, and a certificate the browser has not been told to trust is not one. The
+  microphone from another device needs a certificate that device trusts (`--tls-cert`/`--tls-key`).
+- The log is written through a scrubber, on the file and on the `--verbose` copy alike: the token, a
+  key value the process resolved and any sample dump of recorded audio are removed before a line is
+  written, and the level cap is `DEBUG` so the `trace!` request line a socket crate logs can never be
+  reached.
 
 ## Run modes
 
