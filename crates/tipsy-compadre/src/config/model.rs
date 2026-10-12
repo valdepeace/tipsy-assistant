@@ -41,7 +41,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     pub bind: String,
@@ -51,6 +51,22 @@ pub struct ServerConfig {
     /// in. It is *our* bearer token, not a provider key, so the file is its home — and it still
     /// never belongs in an event, a notice or a log line.
     pub token: String,
+}
+
+/// Hand-written for the one field that is a secret, in the same shape as `Settings`' own formatter
+/// (`server/mod.rs`): the derived one printed `token` verbatim, and a `Debug` line reaches a log more
+/// often than anyone intends (spec §9.6). `Settings`' `Debug` was fixed for exactly this reason and
+/// worked around this type's derive; this closes the sibling it was working around, so printing a
+/// whole `Config` — whose derive delegates here — is safe as well as unusual. Nothing prints a
+/// `Config` today, which is what makes it latent rather than live.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("bind", &self.bind)
+            .field("lan", &self.lan)
+            .field("token", &if self.token.trim().is_empty() { "<none>" } else { "<set>" })
+            .finish()
+    }
 }
 
 impl ServerConfig {
@@ -323,5 +339,30 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.listening.silence_ms, 1000);
         assert_eq!(config.realtime, realtime, "a default config carries the default section");
+    }
+
+    /// **F11's latent sibling, and the reason it is called latent.** `Settings`' hand-written `Debug`
+    /// was fixed because the derived one printed the token; `Config`'s derive printed it the same
+    /// way, through this type, and no site prints a `Config`'s `Debug` today. The cheap treatment is
+    /// the one where the secret lives: `ServerConfig`'s formatter is hand-written and `Config`'s
+    /// derive stays, delegating to it.
+    #[test]
+    fn server_config_debug_never_prints_the_token() {
+        let server = ServerConfig { bind: "127.0.0.1:7070".into(), lan: false, token: "correct-horse".into() };
+
+        let line = format!("{server:?}");
+        assert!(!line.contains("correct-horse"), "the token reached a `Debug` line: {line}");
+        assert!(line.contains(r#"token: "<set>""#), "and the line still says whether one is set: {line}");
+        assert!(line.contains("127.0.0.1:7070"), "and keeps what describes the run: {line}");
+
+        // The shape a log line would actually carry: the whole configuration, whose derive delegates
+        // to the formatter above. This is the assertion that makes the fix about `Config` and not
+        // only about the section.
+        let whole = format!("{:?}", Config { server, ..Config::default() });
+        assert!(!whole.contains("correct-horse"), "a whole `Config`'s `Debug` prints it too: {whole}");
+
+        // An empty token still reads as one, so a line cannot be mistaken for "set".
+        let none = format!("{:?}", ServerConfig { token: String::new(), ..ServerConfig::default() });
+        assert!(none.contains(r#"token: "<none>""#), "{none}");
     }
 }
