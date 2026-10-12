@@ -15239,11 +15239,17 @@ exactly as it is (the server still judges, `server.token` is still the only door
 
 - **§1, the non-goals list** — the bullet that reads "**A Login tab** in the configuration screen.
   The section is hand-edited in `config.toml`, like `[[profiles]]`, and the configuration screen must
-  carry it through untouched (§5)." (`:47-48`). Replace its first sentence with "**Hand-editing
-  `config.toml` as the only way to change the section.** Plan 3 added a Login tab: Task 1.1 extended
-  `LoginSettingsView` with `enabled` and `allowed`, so the configuration screen shows and edits `[login]`
-  over the wire (§13)." and leave the second sentence's requirement standing — the file round trip of
-  §5.3 is still what keeps a hand-written allowlist alive.
+  carry it through untouched (§5)." (`:47-48`). **Corrected 2026-10-12, before it was executed: this
+  instruction used to say "Plan 3 added a Login tab", and that is false.** The tree has no Login tab —
+  `ConfigTab` has exactly four variants (`Providers`, `Listening`, `Profiles`, `Server`) — and Task 1.1
+  put the section on the **wire** as `ConfigView.login`; it added no tab. **The same false claim opens
+  §5.3's instruction below** ("The configuration screen's Login tab is Plan 3's"). What both phrases
+  needed was the true amendment, which is now in the login spec: the screen still has no Login tab, the
+  section is still authored by hand in `config.toml`, and a client entitled to the token can now read
+  **and change** the allowlist over the socket. The §5.3 requirement stands — the file round trip is
+  still what keeps a hand-written allowlist alive. **This is the fourth statement in this plan to
+  conflate "crosses the wire" with "exists in the interface"; a reader should distrust the pattern, not
+  just the line.**
 - **§2, the decisions log, the L2 row** (`:62`) — "the allowlist never leaves it" becomes "the
   allowlist travels only inside `ConfigView`, which a client receives when it is entitled to the
   token (§4.3, Task 1.1's extension)". The *decision* is the row's first half and does not move:

@@ -45,7 +45,11 @@ changes its behaviour because this screen exists.
 - **Security.** No passwords, no accounts, no lockout, no rate limiting, no per-person tokens, no
   interaction with `server.token`, no attempt to make the phrase a secret.
 - **A Login tab** in the configuration screen. The section is hand-edited in `config.toml`, like
-  `[[profiles]]`, and the configuration screen must carry it through untouched (§5).
+  `[[profiles]]`, and the configuration screen must carry it through untouched (§5). **Amended
+  2026-10-12**: the screen still has no Login tab — `ConfigTab` has four variants and `Login` is not
+  one of them — but the section now **travels in `ConfigView`** (Plan 3's Task 1.1), so a client that is
+  entitled to the token *sees the allowlist* and can change it by sending `UpdateConfig`. What is
+  unbuilt is the tab, not the wire.
 - **Configurable copy** (`[login.copy]`). All interface copy lives in the two static tables of
   `tipsy-ui`; a per-user or per-profile version needs a home on the wire, which `LoginView` (§4) is
   shaped to take later — see §13.
@@ -59,7 +63,7 @@ changes its behaviour because this screen exists.
 | # | Decision | Alternatives considered |
 |---|---|---|
 | L1 | The login is a ritual; `server.token` stays the only real requirement | Replacing the token with the keywords (rejected: a shared phrase is weaker *and* would have to travel in a URL) |
-| L2 | The **server** judges the answer; the allowlist never leaves it | Matching in `tipsy-ui` (rejected: the keywords would have to reach the web client, where anyone could read them off the wire) |
+| L2 | The **server** judges the answer; the allowlist leaves it only inside `ConfigView`, to a client entitled to the token | Matching in `tipsy-ui` (rejected: the keywords would have to reach the web client, where anyone could read them off the wire) — **amended 2026-10-12**: Plan 3's Task 1.1 put the section on the wire as `ConfigView.login`, so the allowlist *does* reach a client now (§4.3). What the decision still guarantees is that the **judging** never leaves the server, and that a client which never fetches the configuration never sees the allowlist |
 | L3 | Voice is on by default, and only speech the local detector confirms is ever transcribed | Always-on streaming (rejected: cost, and it breaks the "nothing leaves until it is speech" promise); typing only (rejected: the ritual is spoken) |
 | L4 | Voice gets its own capture path and its own messages | Reusing `ListenStart`/`ListenStop` (rejected outright: `TurnInput::Utterance` transcribes **and then answers with the LLM**, speaking a reply nobody asked for and writing the login into the conversation history) |
 | L5 | The screen is a widget over a veiled HUD, not a full-screen form | A full screen like the configuration screen (rejected: the user asked for the dashboard behind, pixelated) |
@@ -244,9 +248,12 @@ table above.
 
 ### 5.3 The section survives a save
 
-The configuration screen has no Login tab, but it **rewrites the whole file** on save, so
-`config/form.rs` must carry `[login]` through untouched: a save that dropped a hand-written allowlist
-would be data loss, and the store's round-trip test covers it exactly as it covers `token` today.
+The configuration screen has no Login tab — still true, and `ConfigTab`'s four variants are why — but it
+**rewrites the whole file** on save, so `config/form.rs` must carry `[login]` through untouched: a save
+that dropped a hand-written allowlist would be data loss, and the store's round-trip test covers it
+exactly as it covers `token` today. Since 2026-10-12 the section also **crosses the wire** inside
+`ConfigView`, so the round trip is no longer the only thing keeping a hand-written allowlist alive; the
+file is still the only place it is *authored*.
 
 ## 6. The screen
 
@@ -503,6 +510,15 @@ changing it changes no code path.
      never leaves it" no longer true as written. The *judging* stays server-side and the token stays
      the only door, so the decision itself survives; what has to change is the sentence. Amend both
      when Plan 3 lands, and say in Plan 3's own record that it made the section editable.
+
+   **Landed 2026-10-12, in Plan 3's Task 1.1.** The section is on the wire as `ConfigView.login`, of
+   type **`LoginSettingsView`** — not `LoginView`, which is `Welcome`'s login-*screen* payload and
+   already existed; the two are different things and the name was the first thing the implementer
+   could not compile past. The configuration screen's *tab* is **not** built: the screen carries
+   `[login]` through untouched, and a client with the token can read and change the section over the
+   socket. The browser wiring of §13's item 1 above is Plan 3's **Task 3.7**, in Phase 3, and the
+   once-per-run rule it must honour lives in `UiState::show_login`'s return value rather than in a bit
+   the browser keeps for itself.
 - **One manual check before release.** With the system microphone disabled, the screen must open
   typing-only and say `Sin micro: escribe, que también vale`. The *decision* is tested — a failed
   `Mic::start` leaves no capture and the line above — but the *device* is not: nothing on this machine
