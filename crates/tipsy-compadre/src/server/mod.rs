@@ -592,8 +592,8 @@ fn origin_authority(origin: &str) -> Option<(String, Option<u16>, u16)> {
     };
     // An origin is `scheme://host[:port]` with nothing after it. A path, a query or a fragment is not
     // part of one, and reading past it cannot make a foreign host match, so it is ignored rather than
-    // refused.
-    let authority = rest.split(|c: char| c == '/' || c == '?' || c == '#').next().unwrap_or("");
+    // refused. The array pattern is also what keeps clippy at its seven pre-existing findings.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let (name, port) = authority_parts(authority)?;
     Some((name, port, default_port))
 }
