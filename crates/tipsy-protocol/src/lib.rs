@@ -228,6 +228,111 @@ impl ConfigView {
     }
 }
 
+/// `[server]` as a **client** may send it: the two fields a client may move.
+///
+/// **There is deliberately no `token`.** The door password is the server's alone — whoever can write
+/// it knows it, which is a takeover rather than an edit — and spec §13.6 already promises that the
+/// Server tab's Regenerate row is inert over the wire. A client that types a token into its own
+/// screen therefore sends a configuration that does not carry it, and the server keeps its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientServerView {
+    pub bind: String,
+    pub lan: bool,
+}
+
+/// One row of the Providers tab as a **client** may send it: which connector, and which model.
+///
+/// **`base_url` and `key_name` are missing on purpose.** The server attaches its own resolved key as
+/// `Authorization: Bearer …` to whatever address the configuration names, so a client that could send
+/// an address could redirect that key to a host of its choosing without ever reading the value —
+/// which defeats §4.3's "a client never sees a key value" by moving the key instead of reading it.
+/// `key_name` is the same lever one step further from the socket: naming a different store entry is
+/// choosing which of the server's secrets it spends. The server keeps both, and the type makes
+/// sending either one impossible rather than refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientProviderView {
+    pub capability: Capability,
+    pub kind: String,
+    pub model: String,
+}
+
+/// The editable configuration **as a client may send it**: the payload of `Command::UpdateConfig`.
+///
+/// It is [`ConfigView`] with three things taken out — each provider's `base_url` and `key_name`, and
+/// `server.token` — and every other field is exactly where it is in the full view, so the two shapes
+/// cannot drift: [`ClientConfigView::merged_into`] is the only way back, and it takes those three
+/// from the server's own configuration rather than from the sender.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientConfigView {
+    pub active_profile: String,
+    pub providers: Vec<ClientProviderView>,
+    pub listening: ListeningView,
+    pub realtime: RealtimeView,
+    pub login: LoginSettingsView,
+    pub profiles: Vec<ProfileEntryView>,
+    pub server: ClientServerView,
+}
+
+impl ClientConfigView {
+    /// The whole view this one describes, given the server's own.
+    ///
+    /// Every field the client may send replaces what the server had; the three it cannot carry keep
+    /// the server's value, which is the whole point of the two types: a client's save can move the
+    /// bind address, the listening mode, the profiles and the connector *kind* and *model*, and it
+    /// cannot move where a provider is reached, which key a provider spends, or the server's token.
+    ///
+    /// The server's rows are the authority on the provider list, so a row the client did not send
+    /// (or a capability this server does not have) keeps the server's values and the server's order;
+    /// `config_of` then refuses anything that does not describe a configuration, as it always did.
+    pub fn merged_into(&self, server: ConfigView) -> ConfigView {
+        ConfigView {
+            active_profile: self.active_profile.clone(),
+            providers: server
+                .providers
+                .into_iter()
+                .map(|server_row| match self.providers.iter().find(|row| row.capability == server_row.capability) {
+                    Some(client_row) => ProviderView {
+                        kind: client_row.kind.clone(),
+                        model: client_row.model.clone(),
+                        ..server_row
+                    },
+                    None => server_row,
+                })
+                .collect(),
+            listening: self.listening.clone(),
+            realtime: self.realtime.clone(),
+            login: self.login.clone(),
+            profiles: self.profiles.clone(),
+            server: ServerView { bind: self.server.bind.clone(), lan: self.server.lan, token: server.server.token },
+        }
+    }
+}
+
+/// A client that holds the full view — one that has just read `Event::Config` — wants the shape it
+/// may send. The three fields that cannot travel are dropped here, which is the only conversion this
+/// direction needs.
+impl From<&ConfigView> for ClientConfigView {
+    fn from(view: &ConfigView) -> Self {
+        Self {
+            active_profile: view.active_profile.clone(),
+            providers: view
+                .providers
+                .iter()
+                .map(|row| ClientProviderView {
+                    capability: row.capability,
+                    kind: row.kind.clone(),
+                    model: row.model.clone(),
+                })
+                .collect(),
+            listening: view.listening.clone(),
+            realtime: view.realtime.clone(),
+            login: view.login.clone(),
+            profiles: view.profiles.clone(),
+            server: ClientServerView { bind: view.server.bind.clone(), lan: view.server.lan },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
@@ -256,12 +361,19 @@ pub enum Command {
     /// The configuration screen saving. The server replaces the editable configuration, persists it,
     /// re-derives every session's brain and broadcasts `Event::ConfigChanged` (spec §4.2).
     ///
+    /// **The payload is [`ClientConfigView`], not [`ConfigView`]**, and that is §4.3's rule written as
+    /// a shape instead of a check: a client may edit this configuration, and it may not move a
+    /// provider's `base_url`, a provider's `key_name` or the server's `token`, so the view it sends
+    /// does not carry them. The server merges what it receives into its own configuration
+    /// ([`ClientConfigView::merged_into`]).
+    ///
     /// **Boxed on purpose**, and so is `Event::Config`. `ConfigView` carries seven section views and is
     /// large enough that clippy's `large_enum_variant` fires on `Command`, on `Event`, and on every
     /// enum that carries either of them — `ToServer`, `ToClient` and `UiAction` — which is five
-    /// findings out of one payload. Serde sees through a `Box`, so the wire JSON is byte-identical and
-    /// `tests/roundtrip.rs` pins that. Do not unbox these two fields without re-measuring the lint.
-    UpdateConfig { config: Box<ConfigView> },
+    /// findings out of one payload. Serde sees through a `Box`, so the wire JSON keeps its shape and
+    /// `tests/roundtrip.rs` pins the fields that cross. Do not unbox these two fields without
+    /// re-measuring the lint.
+    UpdateConfig { config: Box<ClientConfigView> },
     /// A new API key for the *server's* credential store. Refused unless the connection is loopback
     /// or TLS (spec §9.4), and answered with `Event::ConfigChanged` when it is accepted.
     SetKey { name: String, value: String },
@@ -388,10 +500,22 @@ impl Frame {
 }
 
 /// Anything a client sends to the server.
+///
+/// This is a **channel** payload, not a wire message: it has no serde implementation, and the two
+/// variants a socket can produce are `Command` (a JSON text frame) and `Audio` (a binary one). The
+/// third is the server talking to itself and never crosses a socket.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToServer {
     Command(Command),
     Audio(Frame),
+    /// **The hub has just persisted a new configuration; re-derive yourself from it.**
+    ///
+    /// Server-internal, and it exists because `Command::UpdateConfig` is a *client's* message and may
+    /// no longer carry the whole configuration (it is a [`ClientConfigView`]: no provider address, no
+    /// key name, no token). A session that re-derived itself from such a view would keep whatever
+    /// addresses it happened to hold, so the fan-out carries no payload at all and each session reads
+    /// the configuration from the hub — the one owner — with `Hub::config`.
+    Reconfigure,
 }
 
 /// Anything the server sends to a client.

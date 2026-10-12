@@ -6,8 +6,8 @@
 //! what a key or a click does to it.
 
 use tipsy_protocol::{
-    AllowedPersonView, Capability, ConfigView, ListeningMode, ListeningView, LoginSettingsView, ProfileEntryView,
-    ProviderView, RealtimeView, ServerView, UiLanguage,
+    AllowedPersonView, Capability, ClientConfigView, ClientProviderView, ClientServerView, ConfigView, ListeningMode,
+    ListeningView, LoginSettingsView, ProfileEntryView, ProviderView, RealtimeView, ServerView, UiLanguage,
 };
 
 use crate::state::KeyInput;
@@ -334,6 +334,68 @@ impl From<&ConfigForm> for ConfigView {
                 lan: form.server.lan,
                 token: form.server.token.clone(),
             },
+        }
+    }
+}
+
+/// The form as the shape a **client** may send (`Command::UpdateConfig`): the same conversion as
+/// `ConfigView`, with each provider's `base_url` and `key_name` and the server's `token` left out.
+/// Those three are the fields a client may not move, and leaving them out here is what makes that a
+/// property of the message rather than a check the server has to remember to make.
+impl From<&ConfigForm> for ClientConfigView {
+    fn from(form: &ConfigForm) -> Self {
+        Self {
+            active_profile: form.active_profile.clone(),
+            providers: form
+                .providers
+                .iter()
+                .map(|row| ClientProviderView {
+                    capability: row.capability,
+                    kind: row.kind.clone(),
+                    model: row.model.clone(),
+                })
+                .collect(),
+            listening: ListeningView {
+                mode: form.listening.mode,
+                silence_ms: form.listening.silence_ms.clone(),
+                mic_gain: form.listening.mic_gain.clone(),
+                mic_device: form.listening.mic_device.clone(),
+            },
+            realtime: RealtimeView {
+                enabled: form.realtime.enabled,
+                model: form.realtime.model.clone(),
+                key_name: form.realtime.key_name.clone(),
+                voice: form.realtime.voice.clone(),
+                max_minutes: form.realtime.max_minutes,
+            },
+            login: LoginSettingsView {
+                enabled: form.login.enabled,
+                voice: form.login.voice,
+                allowed: form
+                    .login
+                    .allowed
+                    .iter()
+                    .map(|entry| AllowedPersonView {
+                        name: entry.name.clone(),
+                        keywords: entry.keywords.clone(),
+                    })
+                    .collect(),
+            },
+            profiles: form
+                .profiles
+                .iter()
+                .map(|profile| ProfileEntryView {
+                    id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    language: profile.language.clone(),
+                    prompt: profile.prompt.clone(),
+                    voice_instructions: profile.voice_instructions.clone(),
+                    greeting: profile.greeting.clone(),
+                    wake_word: profile.wake_word.clone(),
+                    voices: profile.voices.clone(),
+                })
+                .collect(),
+            server: ClientServerView { bind: form.server.bind.clone(), lan: form.server.lan },
         }
     }
 }

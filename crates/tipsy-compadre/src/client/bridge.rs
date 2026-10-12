@@ -247,6 +247,10 @@ async fn shuttling(
                 }
                 // Every sender is gone: the client is quitting.
                 None => return Ending::ClientGone,
+                // Server-internal, and unreachable from here: the hub's fan-out is on the other
+                // machine, and a client's own save is `Command::UpdateConfig` on the wire. Nothing is
+                // sent for it — there is no wire message this could mean.
+                Some(ToServer::Reconfigure) => {}
             },
         }
     }

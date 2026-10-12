@@ -224,7 +224,7 @@ mod tests {
 
     use super::*;
     use crate::config::{ListeningConfig, LoginEntry, ProviderConfig, ProvidersConfig, ServerConfig};
-    use tipsy_protocol::ListeningMode;
+    use tipsy_protocol::{ClientConfigView, ListeningMode};
 
     /// A configuration with every kind of value the screen can change, so the round trip has
     /// something to lose: three connectors of three kinds, both `Option` shapes, a token, a user
@@ -440,6 +440,50 @@ mod tests {
         assert!(json.contains(r#""key_name":"openrouter""#), "{json}");
         assert!(json.contains(r#""key_name":"elevenlabs""#), "{json}");
         assert!(json.contains(r#""key_name":"openai-realtime""#), "{json}");
+    }
+
+    /// §4.3 and §13.6 as a property of the message a client sends: the view inside
+    /// `Command::UpdateConfig` has no field that could hold a provider's address, a key *name* or the
+    /// server's token, so none of them can cross in a save whatever the screen does. The full view
+    /// still carries all three, which is what the server *tells* a client it is entitled to see.
+    ///
+    /// The negative assertions are over values that really are in the fixture — the token and a
+    /// `base_url` — rather than over strings that occur in no input, which is what made the older
+    /// neighbour of this test unfalsifiable (review V2).
+    #[test]
+    fn the_view_a_client_sends_carries_no_provider_address_key_name_or_token() {
+        let config = config();
+        let full = serde_json::to_string(&view_of(&config)).unwrap();
+        assert!(full.contains("0123456789abcdef0123456789abcdef"), "the full view carries the token: {full}");
+        assert!(full.contains("generativelanguage.test"), "and the providers' addresses: {full}");
+
+        let client = serde_json::to_string(&ClientConfigView::from(&view_of(&config))).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&client).unwrap();
+
+        // The sections, and the fields of the two the rule is about, so a new field cannot be added
+        // in silence. Sorted, because `serde_json`'s map is ordered by key and not by this file.
+        let sections = sorted_keys(&value);
+        assert_eq!(
+            sections,
+            ["active_profile", "listening", "login", "profiles", "providers", "realtime", "server"]
+        );
+        assert_eq!(sorted_keys(&value["server"]), ["bind", "lan"]);
+        for row in value["providers"].as_array().expect("the rows are a list") {
+            assert_eq!(sorted_keys(row), ["capability", "kind", "model"], "{row}");
+        }
+
+        // …and the values are not in the message at all, not merely missing from one field.
+        assert!(!client.contains("0123456789abcdef0123456789abcdef"), "the token crossed: {client}");
+        assert!(!client.contains("generativelanguage.test"), "a provider's address crossed: {client}");
+        assert!(!client.contains("google"), "and so did a key name: {client}");
+    }
+
+    /// The keys of a JSON object, sorted: `serde_json`'s map is a `BTreeMap` without its
+    /// `preserve_order` feature, so a comparison has to be order-independent or it is a test of serde.
+    fn sorted_keys(value: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
     }
 
     /// §4.3's second half, and the shape Task 1.3 needs: the token is the one thing the view carries

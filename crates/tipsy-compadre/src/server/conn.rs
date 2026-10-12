@@ -8,14 +8,15 @@
 //! variant: axum 0.8.9 pins `tokio-tungstenite ^0.29` while the native client keeps 0.30, so both
 //! enums are compiled into this binary (W1, `web-transport-and-terminal.md:161-167`).
 //!
-//! **And this is the one place a command from a socket is routed to the hub instead of to the
-//! session** (Shared interface contract, last bullet). `UpdateConfig` is the hub's to apply — the hub
-//! is the only writer of the configuration — and the fan-out the hub then performs is what each
-//! session's own arm applies. A session that wrote as well would be a second writer, which is exactly
-//! what made Task 1.3's first implementation spin for ever at full CPU (`session.rs:590-608`); the
-//! `SetProfile`, `SetListeningMode` and `SetKey` arms do route to the hub, from the session, and each
-//! of them stops there for a reason of its own. `UpdateConfig` could not, because the hub's fan-out
-//! *is* `Command::UpdateConfig`, so its route has to be here, one hop earlier.
+//! **And every command from a socket goes to the session, `UpdateConfig` included.** The hub is the
+//! only writer of the configuration (Shared interface contract), but the *route* to it is the
+//! session's own `Command::UpdateConfig` arm, because the session is the only thing that knows
+//! whether this client was admitted: a bridge that wrote the hub itself let a socket that had not
+//! said `Hello` persist a configuration change while its session was still refusing it. The arm is
+//! behind the handshake, so no config-writing command can run unadmitted. The hub's own fan-out is
+//! `ToServer::Reconfigure`, a different message with no payload, which is what keeps the client route
+//! and the fan-out from calling each other — Task 1.3's spin — and keeps a client's view (no provider
+//! address, no key name, no token) from ever being taken for the whole configuration.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -137,7 +138,7 @@ pub async fn serve_with(
                 Some(Ok(Message::Close(_))) => ending = Some(Ending::ClosedByClient),
                 // axum answers ping and the close handshake itself (`:221-228`).
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(message)) => match inbound(message, &to_server, &hub, peer, tls).await {
+                Some(Ok(message)) => match inbound(message, &to_server, peer, tls).await {
                     Inbound::Nothing => {}
                     // The session's end of the channel is gone: the session is over. That is the
                     // server stopping, not this peer saturating anything — `Saturated` is for the
@@ -193,12 +194,14 @@ pub async fn serve_with(
 /// Decodes one inbound frame and hands it to the session — **except for the one command the bridge
 /// answers itself.**
 ///
-/// `UpdateConfig` goes to the hub and never to the session. The hub is the only writer of the
-/// configuration (Shared interface contract, last bullet): it replaces the value, writes the file,
-/// re-derives every session through the fan-out that *is* `Command::UpdateConfig`, and broadcasts
-/// `ConfigChanged` — spec §4.2's four verbs, in that order. The session's own arm is the receiving
-/// half of that fan-out, and a bridge that handed the command straight to the session would leave a
-/// client's save applied to one session, unpersisted and invisible to every other client.
+/// `UpdateConfig` is handed to the session and **not** written to the hub here. The hub is still the
+/// only writer of the configuration (Shared interface contract), but the session is the only place
+/// that knows whether this client was admitted, and the bridge does not: a connection that has not
+/// said `Hello` yet has a session that is still refusing it, and the earlier shape of this function
+/// let exactly that socket persist a configuration change while its session was refusing it. The
+/// session's own `Command::UpdateConfig` arm is behind the handshake, so it is the one route that
+/// cannot run unadmitted; it calls `Hub::update_config_from_view`, which merges the fields a client's
+/// view does not carry, writes the file and fans the change out as `ToServer::Reconfigure`.
 ///
 /// **And this is where §9.4's rule is enforced**, one step before the same place anything else is
 /// handed over: a `SetKey` on a connection that is neither loopback nor TLS is answered with
@@ -214,21 +217,11 @@ pub async fn serve_with(
 ///
 /// A malformed command or audio frame is an `Error` event on the wire and **not** a panic and
 /// **not** a dropped connection (spec §10).
-async fn inbound(
-    message: Message,
-    to_server: &mpsc::UnboundedSender<ToServer>,
-    hub: &Hub,
-    peer: SocketAddr,
-    tls: bool,
-) -> Inbound {
+async fn inbound(message: Message, to_server: &mpsc::UnboundedSender<ToServer>, peer: SocketAddr, tls: bool) -> Inbound {
     match message {
         // axum answers ping, pong and the close handshake itself; the close is handled by the loop.
         Message::Ping(_) | Message::Pong(_) | Message::Close(_) => Inbound::Nothing,
         Message::Text(text) => match serde_json::from_str::<Command>(&text) {
-            Ok(Command::UpdateConfig { config }) => {
-                hub.update_config_from_view(*config);
-                Inbound::Nothing
-            }
             Ok(command) => {
                 let message = ToServer::Command(command);
                 if let Some(refusal) = crate::server::tls::refuse_set_key(&message, peer, tls) {
@@ -388,7 +381,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::{SinkExt, StreamExt};
-    use tipsy_protocol::{ClientKind, Command, ErrorCode, Event, Frame, PROTOCOL_VERSION};
+    use tipsy_protocol::{ClientConfigView, ClientKind, Command, ErrorCode, Event, Frame, PROTOCOL_VERSION};
     use tokio::net::TcpStream;
     use tokio_tungstenite::tungstenite::{Message as ClientMessage, Utf8Bytes};
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -516,12 +509,13 @@ mod tests {
     /// The registry a test's route shares, built on the fakes. The **shared slot** is the fourth
     /// argument of `Hub::new`, so `Hub::spawn` clones the fakes into each session and the only
     /// difference between this and a plain `serve` is which connectors sit in that slot. The policy
-    /// is the connection's, and this listener is loopback with no token, so the permissive one is
-    /// what the tests pass.
+    /// is the connection's: a test that needs the handshake to be the *only* gate passes
+    /// `SessionPolicy::exposed`, and every other test passes the permissive one.
     #[derive(Clone)]
     struct ServeTest {
         hub: Hub,
         options: ConnOptions,
+        policy: SessionPolicy,
     }
 
     /// The `/ws` route's own handler. The `WebSocketUpgrade` extractor takes the last slot and
@@ -537,15 +531,14 @@ mod tests {
     ) -> axum::response::Response {
         let hub = state.hub.clone();
         let options = state.options;
+        let policy = state.policy.clone();
         let peer: SocketAddr = "127.0.0.1:54123".parse().expect("a literal loopback address parses");
         upgrade
             .write_buffer_size(options.write_buffer_size)
             .max_write_buffer_size(options.max_write_buffer_size)
             .on_upgrade(move |socket| async move {
                 // The hub's entry point: it allocates the session id, attaches the session before
-                // `Welcome` can be missed, and clones the fakes in its slot into the session. This
-                // listener is on loopback and holds no token, so the policy needs neither.
-                let policy = SessionPolicy::local();
+                // `Welcome` can be missed, and clones the fakes in its slot into the session.
                 let ends = hub.spawn(policy);
                 serve_with(socket, ends, hub.clone(), ClientKind::Web, options, peer, false).await;
             })
@@ -557,7 +550,7 @@ mod tests {
     /// The handle is a second name for the same hub — `Hub` is `Clone` and every one of its fields is
     /// a handle — which is what lets the routing test look at the configuration the hub *wrote*
     /// rather than only at what the socket carried.
-    async fn server_with_hub(chat: Arc<FakeChat>, options: ConnOptions) -> (SocketAddr, Hub) {
+    async fn server_with_policy(chat: Arc<FakeChat>, options: ConnOptions, policy: SessionPolicy) -> (SocketAddr, Hub) {
         let (config, config_path) = config();
         let hub = Hub::new(
             config,
@@ -569,7 +562,7 @@ mod tests {
                 transcribe: Arc::new(FakeTranscribe),
             }),
         );
-        let state = ServeTest { hub: hub.clone(), options };
+        let state = ServeTest { hub: hub.clone(), options, policy };
         let app = axum::Router::new()
             .route("/ws", axum::routing::get(handler_with_state))
             .with_state(state);
@@ -579,6 +572,11 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         (addr, hub)
+    }
+
+    /// The same listener with the permissive policy every test but the admission one needs.
+    async fn server_with_hub(chat: Arc<FakeChat>, options: ConnOptions) -> (SocketAddr, Hub) {
+        server_with_policy(chat, options, SessionPolicy::local()).await
     }
 
     /// The same listener, for the tests that only need somewhere to connect to.
@@ -930,19 +928,22 @@ mod tests {
         wait_for_the_floor(&mut first).await;
         wait_for_the_floor(&mut second).await;
 
-        // What a screen holds, exactly as its save sends it back.
+        // What a screen holds, exactly as its save sends it back: the full view it was told, turned
+        // into the shape a client may send (`ClientConfigView`), which is the conversion
+        // `Client::save_remote` makes.
         send_command(&mut first, Command::GetConfig).await;
         let mut view = match event_until(&mut first, |e| matches!(e, Event::Config { .. })).await {
-            Event::Config { config } => config,
+            Event::Config { config } => *config,
             other => panic!("`GetConfig` answers with the configuration, got {other:?}"),
         };
         assert_eq!(view.server.bind, "127.0.0.1:7070", "the editable configuration, as it stands");
         view.server.bind = "127.0.0.1:7171".into();
-        send_command(&mut first, Command::UpdateConfig { config: view }).await;
+        let client_view = ClientConfigView::from(&view);
+        send_command(&mut first, Command::UpdateConfig { config: Box::new(client_view) }).await;
 
         // The hub's own announcement, to the client that saved and to the one that did not. Nothing
-        // else in the process sends this event: the session's `UpdateConfig` arm is the fan-out half
-        // and only re-derives the brain it holds.
+        // else in the process sends this event: the session's arm calls the hub, and the hub's own
+        // fan-out is `ToServer::Reconfigure`, which is not an event at all.
         event_until(&mut first, |e| matches!(e, Event::ConfigChanged)).await;
         event_until(&mut second, |e| matches!(e, Event::ConfigChanged)).await;
 
@@ -951,6 +952,89 @@ mod tests {
         assert_eq!(hub.config().server.bind, "127.0.0.1:7171", "the hub remembered the new value");
         let on_disk = store::load_or_create(hub.path()).unwrap().config;
         assert_eq!(on_disk.server.bind, "127.0.0.1:7171", "and it is in the file, not only in memory");
+    }
+
+    /// **F3, over a real socket.** A client's save may move the editable configuration and may not
+    /// move where a provider is reached, which key name it spends, or the server's token. The *shape*
+    /// makes sending them impossible (`ClientConfigView` has no such field); what this pins is the
+    /// other half — the server's own values are still there afterwards, on disk and in the hub,
+    /// because the merge takes them from the server rather than from the sender.
+    ///
+    /// The server's values are deliberately not the defaults: a `base_url` of its own, a key name of
+    /// its own and a token, so a merge that quietly dropped or reset one of them is visible.
+    #[tokio::test]
+    async fn a_clients_save_cannot_move_a_provider_address_a_key_name_or_the_token() {
+        let (addr, hub) = server_with_hub(FakeChat::new(vec![]), ConnOptions::default()).await;
+        // The server's own configuration, written through the hub the way an operator's file is.
+        let mut owned = hub.config();
+        owned.server.token = "the-servers-own-token".into();
+        owned.providers.chat.base_url = "https://the-servers-own-host.test/v1".into();
+        owned.providers.chat.key = "the-servers-own-key-name".into();
+        assert!(hub.apply_config(owned.clone()), "the server's configuration is written");
+
+        let mut socket = connect(addr).await;
+        wait_for_the_floor(&mut socket).await;
+        send_command(&mut socket, Command::GetConfig).await;
+        let view = match event_until(&mut socket, |e| matches!(e, Event::Config { .. })).await {
+            Event::Config { config } => *config,
+            other => panic!("`GetConfig` answers with the configuration, got {other:?}"),
+        };
+        assert_eq!(view.server.token, "the-servers-own-token", "an admitted client is told the token");
+
+        // The save a screen would send: the same view, with the fields a client *may* move edited —
+        // and the three it may not move are not in this shape to edit.
+        let mut edited = ClientConfigView::from(&view);
+        edited.listening.silence_ms = "4321".into();
+        send_command(&mut socket, Command::UpdateConfig { config: Box::new(edited) }).await;
+        event_until(&mut socket, |e| matches!(e, Event::ConfigChanged)).await;
+
+        let on_disk = store::load_or_create(hub.path()).unwrap().config;
+        assert_eq!(on_disk.listening.silence_ms, 4321, "the field a client may move did move");
+        assert_eq!(on_disk.server.token, "the-servers-own-token", "the door password is the server's");
+        assert_eq!(
+            on_disk.providers.chat.base_url, "https://the-servers-own-host.test/v1",
+            "the address the server sends its key to is the server's"
+        );
+        assert_eq!(on_disk.providers.chat.key, "the-servers-own-key-name", "and so is which key it spends");
+    }
+
+    /// **F4.** No config-writing command may run before the client was admitted. The bridge used to
+    /// hand `UpdateConfig` straight to the hub, which is *before* the session's handshake — so a
+    /// socket that never said `Hello` persisted a configuration change while its own session was
+    /// refusing it. The route is the session's now, and its command loop is behind the prelude, so
+    /// the write cannot happen: the socket is refused exactly as any other ungreeted first message is.
+    #[tokio::test]
+    async fn an_unadmitted_socket_cannot_write_the_configuration() {
+        let (addr, hub) = server_with_policy(
+            FakeChat::new(vec![]),
+            ConnOptions::default(),
+            SessionPolicy::exposed("the-token"),
+        )
+        .await;
+        let before = std::fs::read(hub.path()).expect("the hub's file exists");
+
+        // No `Hello`: the very first frame is the save an attacker would send.
+        let mut socket = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await.unwrap().0;
+        let mut view = ClientConfigView::from(&crate::config::form::view_of(&hub.config()));
+        view.server.bind = "0.0.0.0:7070".into();
+        view.server.lan = true;
+        send_command(&mut socket, Command::UpdateConfig { config: Box::new(view) }).await;
+
+        // The session refuses the frame as a first message that is not a `Hello`…
+        match event_until(&mut socket, |e| matches!(e, Event::Error { .. })).await {
+            Event::Error { code, recoverable, .. } => {
+                assert_eq!(code, ErrorCode::ProtocolVersion, "an ungreeted first message is not a handshake");
+                assert!(!recoverable, "and the session ends rather than serving it");
+            }
+            other => panic!("the refusal is an error event, got {other:?}"),
+        }
+        // …and nothing was written: the hub still holds what it held, and so does the file.
+        assert_eq!(hub.config().server.bind, "127.0.0.1:7070", "the hub must not have taken the write");
+        assert_eq!(
+            std::fs::read(hub.path()).expect("the hub's file is still there"),
+            before,
+            "an unadmitted socket's save must not reach config.toml"
+        );
     }
 
     /// Review Focus line 3's third leak, and §9.4's whole rule **wired in** rather than merely
@@ -971,13 +1055,10 @@ mod tests {
         let command = Command::SetKey { name: "openrouter".into(), value: FIXTURE.into() };
         let text = Message::Text(serde_json::to_string(&command).unwrap().into());
 
-        // A hub nothing is asked of: the refusal must happen before the guard would ever read it.
-        let (_, hub) = server_with_hub(FakeChat::new(vec![]), ConnOptions::default()).await;
-
         // Off this machine, over plaintext: the session must never see it, and the screen must be
         // told why on the same channel every other server answer uses.
         let (to_server, mut reached) = mpsc::unbounded_channel();
-        match inbound(text.clone(), &to_server, &hub, lan, false).await {
+        match inbound(text.clone(), &to_server, lan, false).await {
             Inbound::Send(ToClient::Event(Event::Error { code, message, recoverable })) => {
                 assert_eq!(code, ErrorCode::InsecureTransport, "the machine meaning a client branches on");
                 assert!(recoverable, "the same save works once the connection is TLS");
@@ -991,7 +1072,7 @@ mod tests {
         // The same command on loopback: forwarded, not refused — a client on this machine is this
         // machine, however it reached us.
         let (to_server, mut reached) = mpsc::unbounded_channel();
-        assert!(matches!(inbound(text.clone(), &to_server, &hub, loopback, false).await, Inbound::Nothing));
+        assert!(matches!(inbound(text.clone(), &to_server, loopback, false).await, Inbound::Nothing));
         assert!(
             matches!(reached.try_recv(), Ok(ToServer::Command(Command::SetKey { .. }))),
             "a client on this machine may set a key"
@@ -999,7 +1080,7 @@ mod tests {
 
         // And over TLS, from anywhere: the other half of the same rule.
         let (to_server, mut reached) = mpsc::unbounded_channel();
-        assert!(matches!(inbound(text, &to_server, &hub, lan, true).await, Inbound::Nothing));
+        assert!(matches!(inbound(text, &to_server, lan, true).await, Inbound::Nothing));
         assert!(matches!(reached.try_recv(), Ok(ToServer::Command(Command::SetKey { .. }))));
     }
 }

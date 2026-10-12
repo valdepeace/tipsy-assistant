@@ -11,7 +11,9 @@ use ratatui::crossterm::event::{
     self, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use tipsy_protocol::{Capability, ClientKind, Command, ConfigView, Event, Frame, PROTOCOL_VERSION, ToClient, ToServer};
+use tipsy_protocol::{
+    Capability, ClientConfigView, ClientKind, Command, Event, Frame, PROTOCOL_VERSION, ToClient, ToServer,
+};
 use tipsy_ui::{
     ClockView, ConfigEffect, ConfigForm, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw,
 };
@@ -784,7 +786,20 @@ impl Client {
             ConfigEffect::Save => self.save(to_server),
             // The Test needs the sender now: over a socket the probe runs on the server.
             ConfigEffect::Test(capability) => self.test_provider(capability, to_server, events),
-            ConfigEffect::RegenerateToken => self.regenerate_token(),
+            // The token row is **native-only**, and now it says so instead of editing a value the
+            // wire will not carry: a client's `UpdateConfig` has no `server.token` field at all
+            // (spec §13.6 — the row stays inert over the wire, by design), so minting one here would
+            // show the user a fresh password that the server never learns and that they cannot use.
+            ConfigEffect::RegenerateToken => {
+                if self.attachment.is_remote() {
+                    self.config_notice(
+                        NoticeKind::Warning,
+                        "the token belongs to the server; regenerate it on the machine running `serve`",
+                    );
+                    return;
+                }
+                self.regenerate_token();
+            }
         }
     }
 
@@ -925,8 +940,14 @@ impl Client {
     /// below is a statement about what was *sent*, never a claim that it was saved.
     fn save_remote(&mut self, to_server: &UnboundedSender<ToServer>) {
         let Some(form) = self.state.config_form.as_ref() else { return };
-        // Two shapes, one conversion out: the screen's form is not the wire's view (§4.3).
-        let config = ConfigView::from(form);
+        // Two shapes, one conversion out: the screen's form is not the wire's view (§4.3), and the
+        // view the wire carries is the shape a **client** may send — no provider `base_url`, no
+        // provider `key_name`, no `server.token`. Those three rows are still editable on this screen,
+        // and a remote save simply does not carry them (`ClientConfigView`), which is the rule rather
+        // than a check the server has to make. The server's own answer to `ConfigChanged` puts the
+        // server's values back on the screen, so an edit that did not cross is visible rather than
+        // mysterious.
+        let config = ClientConfigView::from(form);
         let _ = to_server.send(ToServer::Command(Command::UpdateConfig { config: Box::new(config) }));
         if let Some(form) = self.state.config_form.as_mut() {
             form.dirty = false;

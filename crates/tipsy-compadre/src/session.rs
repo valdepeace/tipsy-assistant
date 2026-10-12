@@ -21,7 +21,6 @@ use crate::audio::device::MIC_SAMPLE_RATE;
 use crate::audio::pcm::{i16_to_f32, Pcm};
 use crate::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use crate::config::Config;
-use crate::config::form::config_of;
 use crate::providers::{ChatMessage, ProviderSlot, Role};
 use crate::server::Hub;
 use crate::vad::{Scorer, VadEvent, VadState};
@@ -343,8 +342,10 @@ impl Session {
         };
         let admitted = match &first {
             ToServer::Command(hello) => self.policy.admits(hello),
-            // Not a command at all, so it is not the `Hello` that has to come first.
-            ToServer::Audio(_) => Err(ErrorCode::ProtocolVersion),
+            // Not a command at all, so it is not the `Hello` that has to come first. `Reconfigure` is
+            // server-internal and can never be a connection's first message, but a session that
+            // answered `Ok` to it would be admitting a handshake nobody sent.
+            ToServer::Audio(_) | ToServer::Reconfigure => Err(ErrorCode::ProtocolVersion),
         };
         self.token_presented = self.policy.loopback || admitted.is_ok();
         if let Err(code) = admitted {
@@ -525,6 +526,15 @@ impl Session {
                 ControlFlow::Continue(())
             }
             ToServer::Audio(Frame::Speech { .. }) => ControlFlow::Continue(()),
+            // The hub's fan-out: the configuration it has just persisted is now the one this session
+            // runs, and the session reads it from the hub rather than from the message — the message
+            // carries nothing, which is what keeps a client's view (no provider address, no key name,
+            // no token) from ever being mistaken for the whole configuration.
+            ToServer::Reconfigure => {
+                let config = self.hub.config();
+                self.reconfigure(config);
+                ControlFlow::Continue(())
+            }
         }
     }
 
@@ -688,23 +698,18 @@ impl Session {
                 ControlFlow::Continue(())
             }
             Command::UpdateConfig { config } => {
-                // `config_of` is the same refusal, by the same row names, that the configuration
-                // screen's own save makes (`config/form.rs:142-144`): a view that does not describe a
-                // configuration is refused here, before anything is written.
+                // **The client's save, and the one route a configuration change takes in.** The
+                // session's own loop is behind the handshake, so this arm is unreachable until the
+                // client was admitted — which is why the bridge hands this command here instead of
+                // writing the hub itself (an unadmitted socket could otherwise persist a
+                // configuration while its session was still refusing it).
                 //
-                // The hub is **not** called back: by the time this message exists the hub has already
-                // written the file, remembered the value and fanned the same view out to every
-                // session, so this arm's whole job is the session's own half of the change. Calling
-                // `Hub::update_config` here is what made a single `SetListeningMode` spin for ever:
-                // the hub would write, fan out, and every session would call the hub back with the
-                // same view for the hub to write and fan out again.
-                // A view that does not describe a configuration is refused with nothing written and
-                // nothing re-derived: the client's own screen shows the row it could not parse,
-                // exactly as it does for a local save. `Err` is deliberately silent, which is why this
-                // is an `if let` and not a `match` with an empty arm.
-                if let Ok(config) = config_of(*config) {
-                    self.reconfigure(config);
-                }
+                // The hub is the only writer (Shared interface contract): it replaces the value,
+                // merges the three fields a client's view does not carry from its own configuration,
+                // writes the file and fans the change out to every session as
+                // `ToServer::Reconfigure`. A view that does not describe a configuration is refused
+                // there with nothing written, exactly as a local save is.
+                let _ = self.hub.update_config_from_view(*config);
                 ControlFlow::Continue(())
             }
             Command::SetKey { name, value } => {

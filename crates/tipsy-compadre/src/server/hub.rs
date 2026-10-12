@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tipsy_protocol::{Command, ConfigView, Event, ListeningMode, ToClient, ToServer};
+use tipsy_protocol::{ClientConfigView, Command, ConfigView, Event, ListeningMode, ToClient, ToServer};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::brain::BrainConfig;
@@ -172,10 +172,13 @@ impl Hub {
             }
             Err(_) => false,
         };
-        let view = view_of(&config);
         let live = self.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for session in live.values() {
-            let _ = session.to_server.send(ToServer::Command(Command::UpdateConfig { config: Box::new(view.clone()) }));
+            // No payload: `Command::UpdateConfig` is a *client's* message and carries only the fields
+            // a client may move, so a session cannot re-derive itself from it. The hub is the one owner
+            // of the configuration and each session reads it back with `Hub::config` — which also
+            // means no copy of the token travels on an internal channel.
+            let _ = session.to_server.send(ToServer::Reconfigure);
         }
         replaced
     }
@@ -232,10 +235,14 @@ impl Hub {
         true
     }
 
-    /// `UpdateConfig` as the wire carries it. The refusal is `config_of`'s, by the configuration
-    /// screen's own row names, and a refused view writes nothing.
-    pub fn update_config_from_view(&self, view: ConfigView) -> usize {
-        match config_of(view) {
+    /// `UpdateConfig` as the wire carries it: the fields a client may move, merged into the server's
+    /// own configuration. **The merge is where the security rule lives** — each provider's `base_url`
+    /// and `key_name` and the server's `token` are not in the client's shape at all, so they come from
+    /// the server's value here (`ClientConfigView::merged_into`). The refusal is `config_of`'s, by the
+    /// configuration screen's own row names, and a refused view writes nothing.
+    pub fn update_config_from_view(&self, view: ClientConfigView) -> usize {
+        let merged = view.merged_into(view_of(&self.config()));
+        match config_of(merged) {
             Ok(config) => self.update_config(config),
             Err(_) => 0,
         }
@@ -410,9 +417,10 @@ mod tests {
         assert_eq!(hub.session_ids(), vec![2, 11]);
     }
 
-    /// `apply_config` writes the file and remembers the value — and hands `Command::UpdateConfig` to
-    /// every session, which is the command and not an event: it is the session's own brain that is
-    /// re-derived, and the client-facing `ConfigChanged` is a separate decision (spec §5.2).
+    /// `apply_config` writes the file and remembers the value — and hands every session
+    /// `ToServer::Reconfigure`, which is the message and not an event: it is the session's own brain
+    /// that is re-derived, from the configuration the hub now holds, and the client-facing
+    /// `ConfigChanged` is a separate decision (spec §5.2).
     #[test]
     fn applying_a_configuration_persists_it_and_commands_every_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -433,13 +441,13 @@ mod tests {
         edited.server.bind = "127.0.0.1:7171".into();
         assert!(hub.apply_config(edited.clone()), "the file must be written");
 
+        // The fan-out carries no payload on purpose: a client's `UpdateConfig` may not carry a
+        // provider's address, a key name or the token, so a session re-derives itself from the hub
+        // rather than from the message — and the hub is the only thing that may hand out the token.
         for rx in [&mut first_commands, &mut second_commands] {
             match rx.try_recv().unwrap() {
-                ToServer::Command(Command::UpdateConfig { config }) => {
-                    assert_eq!(config.server.bind, "127.0.0.1:7171");
-                    assert_eq!(config.listening.mode, ListeningMode::Push);
-                }
-                other => panic!("a configuration change is a command to the session, got {other:?}"),
+                ToServer::Reconfigure => {}
+                other => panic!("a configuration change is a `Reconfigure` to the session, got {other:?}"),
             }
         }
         assert_eq!(store::load_or_create(&path).unwrap().config.server.bind, "127.0.0.1:7171");
