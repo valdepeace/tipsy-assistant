@@ -490,7 +490,9 @@ and `lan`, and the server **persists** it — so the *next* `serve` binds the LA
 therefore refuses, with **`403`**, a request whose `Origin` header is present and is not the host the
 request arrived on; "the host the request arrived on" is that request's own `Host` header, never a
 hard-coded `127.0.0.1` or `localhost`, so a page served from either spelling is compared against the
-name it was served under. A CLI client sends no `Origin` at all and is unaffected, which is what keeps
+name it was served under, and the web client (Task 3.x) must therefore open its socket against that
+same name — `location.host` — because the two loopback spellings are different authorities whatever
+they resolve to. A CLI client sends no `Origin` at all and is unaffected, which is what keeps
 the documented `--connect ws://127.0.0.1:7070/ws` attach working; a page served from this listener's
 own `/` sends this listener's own origin and is allowed. An `Origin` that is present but unreadable —
 `null` from a sandboxed frame or a `file://` page, another scheme, no authority — is refused rather
