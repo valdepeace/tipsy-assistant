@@ -177,13 +177,29 @@ mod tests {
 
     /// `asset` is `None` for anything the bundle does not hold, and an unknown path is not a licence
     /// to walk out of the folder.
+    ///
+    /// **V3, and the reason this test says which case it is in.** With no `web/` in the tree the embed
+    /// is empty, so `asset` answers `None` for *every* input and the three assertions below hold for
+    /// any implementation of it whatsoever: the traversal property is `rust-embed`'s (an exact lookup
+    /// in release, a `canonicalize` check in debug) and not this function's until a bundle exists. The
+    /// gate is the honest half — when the bundle *is* there, a known file must be found, which is what
+    /// makes the negatives mean something; when it is not, the test says so instead of passing
+    /// silently as coverage it is not.
     #[test]
     fn an_unknown_asset_is_nothing() {
-        // The real embed is empty in this checkout, so every path misses — including the two that
-        // would be dangerous if they did not.
         assert_eq!(asset("nope.js"), None);
         assert_eq!(asset("../config.toml"), None);
         assert_eq!(asset(""), None);
+
+        if web_bundle() {
+            // There was something for a lookup to find and a traversal to reach, so the three answers
+            // above are a property of `asset` rather than of an empty folder.
+            assert!(asset(PAGE_CLIENT).is_some(), "a build with a bundle must serve its own page");
+        } else {
+            // Nothing to bite: recorded here so no reader mistakes this for coverage of the traversal
+            // rule. Phase 2 and Phase 3 land `web/`, and this branch is what says the gate flipped.
+            assert!(Bundle::get(PAGE_CLIENT).is_none(), "an empty embed is why the assertions above hold today");
+        }
     }
 
     /// The explanation page says which command builds the bundle and what is missing, and says
