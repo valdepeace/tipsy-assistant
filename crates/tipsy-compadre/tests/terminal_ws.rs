@@ -337,16 +337,27 @@ impl Terminal {
             .expect("the terminal socket must accept a text message");
     }
 
-    /// The page's opening padding frame: 256 bytes of ASCII `tipsterm-hello-pad…`, which is how a
-    /// browser learns that its own socket is really open at the server. The pump must ignore it rather
-    /// than write it to the PTY — 256 characters typed into a TUI is a visible defect — so the bytes
-    /// are the documented ones and the round-trip test looks for them by name.
+    /// The page's opening padding frame, **byte for byte and frame for frame**: the page writes
+    /// `new TextEncoder().encode("tipsterm-hello-pad".padEnd(256, "-"))` — `tipsterm-hello-pad` is
+    /// **18** ASCII bytes (`tipsterm` 8, `-` 1, `hello` 5, `-` 1, `pad` 3), `padEnd` fills to 256 with
+    /// `-`, so the value is those 18 bytes and 238 dashes — and `ws.send` sends a `Uint8Array` as a
+    /// **binary** frame.
+    ///
+    /// **Both halves of that were wrong here before, and Finding 1 of the phase review is why.** The
+    /// page sent the same string with `ws.send(string)`, which the browser's own API sends as a
+    /// **text** frame: the route's `Message::Binary` arm — the only arm that frame has — was never
+    /// reached by the page, and the pad survived only because the text branch drops unparseable JSON.
+    /// This helper padded by *repeating* the text to 256, so even its bytes were not the page's past
+    /// the eighteenth. A shape the page does not send is not a shape this test may pin.
+    ///
+    /// The round-trip assertion in `raw_bytes_round_trip_in_both_directions` is what makes this frame
+    /// worth sending at all: the terminal's own output must never contain `tipsterm-hello-pad`.
     async fn send_padding(&mut self) {
         let mut padding = Vec::with_capacity(256);
-        while padding.len() < 256 {
-            padding.extend_from_slice(b"tipsterm-hello-pad");
-        }
-        padding.truncate(256);
+        padding.extend_from_slice(b"tipsterm-hello-pad");
+        padding.resize(256, b'-');
+        assert_eq!(padding.len(), 256, "the wire table's own number");
+        assert_eq!(padding[18], b'-', "the eighteenth byte is where the dashes start");
         self.socket
             .send(Message::Binary(padding.into()))
             .await

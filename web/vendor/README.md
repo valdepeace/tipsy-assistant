@@ -32,12 +32,22 @@ The two digests were taken on 2026-10-12 with `Get-FileHash -Algorithm SHA256` o
 exact URLs served, and cross-checked against the registry's own published digests for those versions
 (`dist.shasum`, sha1, and `dist.integrity`, sha512) — both agree with the bytes on this machine.
 
+**The three digests below are pinned in the source as well, and checked on every run.** They are the
+*extracted* files' hashes, not the tarballs': `b336ec65a086c056d4804b3d4c2347da5663d3f23c3f25be866467bd8857ad59`
+(`xterm.mjs`), `854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6` (`xterm.css`) and
+`2d87e1bddc73be9111de8beee5370c3bb7aac9c94e18e6f245f02ca741ef1769` (`addon-fit.mjs`).
+A tarball digest can only prove the archive a download returned, once; it says nothing about the file
+sitting in `web/vendor/` afterwards, so `is_file()` alone accepted a truncated or hand-edited asset and
+embedded it on every later build while the fetch printed "already fetched and verified". `xtask` now
+runs `verify_extracted` on every `dist` — the first thing a second run does and the last step of a
+real fetch — and a mismatch is a **refusal**, not a re-download: it names the file, the digest on disk
+and the pinned one, and extracts nothing. A silent re-fetch would erase the only evidence that the
+embedded file was ever wrong, and the network is not something `dist` may require twice. Delete the
+named file and run `cargo run -p xtask -- dist` again.
+
 To check this table against the tree without touching the network:
 
 ```powershell
 Get-FileHash web/vendor/xterm.mjs, web/vendor/xterm.css, web/vendor/addon-fit.mjs -Algorithm SHA256
 ```
 
-Those are the *extracted* files' digests, not the tarballs': `b336ec65a086c056d4804b3d4c2347da5663d3f23c3f25be866467bd8857ad59`
-(`xterm.mjs`), `854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6` (`xterm.css`) and
-`2d87e1bddc73be9111de8beee5370c3bb7aac9c94e18e6f245f02ca741ef1769` (`addon-fit.mjs`).

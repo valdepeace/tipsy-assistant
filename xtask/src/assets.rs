@@ -19,7 +19,23 @@ pub const XTERM: Component = Component {
     // `@xterm/xterm@6.0.0`, both of which agree with these bytes. Recorded in
     // `web/vendor/README.md`. Never edited by hand.
     sha256: "908e66e04af6c8dc6b00dd3b54de088e2e81e5ed866284fd6c2fb3c2d1c7a3f6",
-    files: &[("package/lib/xterm.mjs", "xterm.mjs"), ("package/css/xterm.css", "xterm.css")],
+    // (member, file name, sha256 of the *extracted* file). The third field is not decoration: the
+    // tarball's digest proves the archive and never the file on disk, so without it a truncated or
+    // hand-edited `xterm.mjs` was accepted by `is_file()` and embedded on every later build. These
+    // two are the digests `web/vendor/README.md` records, measured with `Get-FileHash -Algorithm
+    // SHA256` over the files this fetch wrote.
+    files: &[
+        (
+            "package/lib/xterm.mjs",
+            "xterm.mjs",
+            "b336ec65a086c056d4804b3d4c2347da5663d3f23c3f25be866467bd8857ad59",
+        ),
+        (
+            "package/css/xterm.css",
+            "xterm.css",
+            "854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6",
+        ),
+    ],
     license: "MIT",
 };
 
@@ -31,7 +47,11 @@ pub const ADDON_FIT: Component = Component {
     // Same provenance as `XTERM`'s: this file's own hash, and the registry's `dist.shasum` and
     // `dist.integrity` over it, all agree.
     sha256: "26003b4517a132b64e4ff228fd88a5fda3fff5e606c76093f6dcff772e9ecec0",
-    files: &[("package/lib/addon-fit.mjs", "addon-fit.mjs")],
+    files: &[(
+        "package/lib/addon-fit.mjs",
+        "addon-fit.mjs",
+        "2d87e1bddc73be9111de8beee5370c3bb7aac9c94e18e6f245f02ca741ef1769",
+    )],
     license: "MIT",
 };
 
@@ -41,10 +61,13 @@ pub struct Component {
     pub name: &'static str,
     pub version: &'static str,
     pub tarball: &'static str,
-    /// Lowercase hex. A mismatch is a **build failure**, not a warning.
+    /// Lowercase hex. A mismatch is a **build failure**, not a warning. This is the **tarball's**
+    /// digest, checked once on the bytes the download returned, before anything is extracted.
     pub sha256: &'static str,
-    /// (member path inside the tarball, file name under `web/vendor/`).
-    pub files: &'static [(&'static str, &'static str)],
+    /// (member path inside the tarball, file name under `web/vendor/`, sha256 of the **extracted**
+    /// file). The third field is what [`verify_extracted`] compares against on every run — see the
+    /// note on [`have_assets`] for why the tarball's own digest cannot stand in for it.
+    pub files: &'static [(&'static str, &'static str, &'static str)],
     /// The licence the registry's metadata reports for this version — read by [`verify`], which names
     /// it in a refusal, and written into `web/vendor/README.md`, which is the record spec §2 W5 asks
     /// for. The fetch itself does not otherwise need it.
@@ -132,24 +155,68 @@ pub fn expected_assets(vendor: &Path) -> Vec<std::path::PathBuf> {
     COMPONENTS
         .iter()
         .flat_map(|component| component.files.iter())
-        .map(|(_, name)| vendor.join(name))
+        .map(|(_, name, _)| vendor.join(name))
         .collect()
 }
 
+/// The extracted files checked against **their own** pinned digests.
+///
+/// **A file's presence is not evidence that it is the file this project verified, and this is the
+/// function that stops pretending otherwise.** The pins above are *tarball* digests: they prove the
+/// archive a download returned, once, and they cannot say anything about the four bytes-to-350-KiB
+/// files sitting in `web/vendor/` afterwards. `is_file()` therefore accepted a truncated or
+/// hand-edited `xterm.mjs` and embedded it on every later build, while `fetch_all` printed
+/// "already fetched and verified" — a claim about the bytes that nothing had checked.
+///
+/// **A mismatch is a refusal, not a re-fetch.** The reasoning is the tarball verifier's own, one step
+/// further down: a silent re-download would erase the only evidence that the embedded file was ever
+/// wrong, and the network is not something `dist` may require twice — `serve` is a LAN tool that may
+/// run with none. So this names the file, the digest on disk and the pinned one, says which file to
+/// delete, and extracts nothing.
+pub fn verify_extracted(component: &Component, vendor: &Path) -> Result<(), String> {
+    for (_, name, pinned) in component.files {
+        let path = vendor.join(name);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let actual = sha256_of(&bytes);
+        if actual != *pinned {
+            return Err(format!(
+                "{} {} ({}): {} is not the file this project verified. Its sha256 is {actual} and the \
+                 one pinned in xtask/src/assets.rs — and recorded in web/vendor/README.md — is {pinned}. \
+                 Nothing is embedded, because the file on disk is not the file this project checked. \
+                 Recover by deleting {} and running `cargo run -p xtask -- dist` again, and do not re-pin \
+                 until you know why the two differ.",
+                component.name,
+                component.version,
+                component.license,
+                path.display(),
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Either the bundle's files are **all there and all the bytes this project pinned**, or this names
+/// what is wrong. `have_assets` is the only gate `fetch_all` has, so making it verify rather than
+/// merely look is what turns `already fetched and verified` into a true sentence.
 pub fn have_assets(vendor: &Path) -> Result<(), String> {
     for path in expected_assets(vendor) {
         if !path.is_file() {
             return Err(format!("{} is missing", path.display()));
         }
     }
+    for component in &COMPONENTS {
+        verify_extracted(component, vendor)?;
+    }
     Ok(())
 }
 
-/// Fetches one component unless its files are all there already. A second run therefore does not
-/// re-download what is present and verified.
+/// Fetches one component unless its files are all there **and are the ones this project pinned**. A
+/// second run therefore does not re-download what is present and verified, and a file that is present
+/// and wrong is refused by [`verify_extracted`] instead of being re-fetched over.
 pub fn fetch(component: &Component, vendor: &Path) -> Result<(), String> {
-    if component.files.iter().all(|(_, name)| vendor.join(name).is_file()) {
-        return Ok(());
+    if component.files.iter().all(|(_, name, _)| vendor.join(name).is_file()) {
+        return verify_extracted(component, vendor);
     }
     std::fs::create_dir_all(vendor).map_err(|e| format!("{}: {e}", vendor.display()))?;
     let archive = vendor.join(format!(".{}-{}.tgz", component.name.replace('/', "-"), component.version));
@@ -159,13 +226,17 @@ pub fn fetch(component: &Component, vendor: &Path) -> Result<(), String> {
     let extracted = extract_members(&archive, component.files, vendor);
     let _ = std::fs::remove_file(&archive);
     extracted?;
+    // The last step of a real fetch, and the first thing a second run checks: the extracted bytes
+    // against the digests above. A `tar` that wrote a short file is caught here and not by a page
+    // that renders nothing.
+    verify_extracted(component, vendor)?;
 
     // The CSS is the member most likely to be dropped, and it is the one that points at more files.
     // Reading its `url(...)` references is what turns a silently unstyled terminal into a list of
     // names a later reviewer can check. (`@xterm/xterm@6.0.0`'s `css/xterm.css` names none: measured,
     // it is 7112 bytes with no `url(` in it, so this prints nothing for that package. The reader is
     // kept because the check is what a *changed* pin needs, and its own test exercises it.)
-    if let Some((_, name)) = component.files.iter().find(|(_, name)| name.ends_with(".css")) {
+    if let Some((_, name, _)) = component.files.iter().find(|(_, name, _)| name.ends_with(".css")) {
         let path = vendor.join(name);
         let css = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         for reference in css_references(&css) {
@@ -220,7 +291,7 @@ fn download(url: &str) -> Result<Vec<u8>, String> {
 /// partial state the pinned digest exists to prevent. The staging is an implementation detail and
 /// [`have_assets`] is the only gate, so nothing else notices it; that is the reason to clear it here
 /// rather than to rely on the next run's `remove_dir_all`.
-fn extract_members(archive: &Path, members: &[(&str, &str)], vendor: &Path) -> Result<(), String> {
+fn extract_members(archive: &Path, members: &[(&str, &str, &str)], vendor: &Path) -> Result<(), String> {
     let staging = vendor.join(".staging");
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
@@ -233,11 +304,11 @@ fn extract_members(archive: &Path, members: &[(&str, &str)], vendor: &Path) -> R
 /// cleanup and cannot skip it on an early return.
 fn extract_into(
     archive: &Path,
-    members: &[(&str, &str)],
+    members: &[(&str, &str, &str)],
     staging: &Path,
     vendor: &Path,
 ) -> Result<(), String> {
-    for (member, _) in members {
+    for (member, ..) in members {
         let status = Command::new("tar")
             .arg("-xzf")
             .arg(archive)
@@ -250,7 +321,7 @@ fn extract_into(
             return Err(format!("tar could not extract {member} from {}", archive.display()));
         }
     }
-    for (member, name) in members {
+    for (member, name, _) in members {
         let from = staging.join(member);
         let to = vendor.join(name);
         std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
@@ -293,6 +364,13 @@ mod tests {
     /// two commands in Step 1, never to relax the assertion.
     const FIXTURE_TGZ_SHA256: &str =
         "e3ec7d757fd4066a41e602aec5cb602d67e62912bd20e8c9d06d0893c8d9a91e";
+
+    /// The digest of the fixture's **extracted** member: the five bytes `hello` that `tar` writes out
+    /// of `pkg/a.txt`. Printed by `[System.Security.Cryptography.SHA256]::Create().ComputeHash(…)`
+    /// over those five bytes, so it is measured rather than recalled — and it is what lets the
+    /// no-download path be proved with real bytes instead of with a placeholder word.
+    const FIXTURE_MEMBER_SHA256: &str =
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 
     fn fixture() -> Vec<u8> {
         // `base64` is not a dependency of this workspace and must not become one: this is the one
@@ -387,19 +465,60 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vendor = dir.path().join("vendor");
         std::fs::create_dir_all(&vendor).unwrap();
-        assert!(have_assets(&vendor).is_err(), "an empty directory is missing both components");
-        // `&COMPONENTS`, not `COMPONENTS`: an array iterates by value in edition 2024, which hands
-        // `fetch` a `Component` where its signature takes `&Component` and does not compile at all.
+        assert!(have_assets(&vendor).is_err(), "an empty directory is missing every component");
+
+        // The fixture's own member, with the fixture's own bytes. **`b"present"` used to sit here**,
+        // and that is Finding 5 of the phase review in one line: `is_file()` was the whole check on
+        // the no-download path, so any five bytes under the right name passed for a verified asset.
+        // The fixture's `tarball` is the empty string and `download` refuses anything that is not
+        // `https://`, so this call succeeding *is* the proof that nothing was downloaded.
+        std::fs::write(vendor.join("a.txt"), b"hello").unwrap();
+        assert!(fetch(&FIXTURE, &vendor).is_ok(), "a present, verified component must not be fetched again");
+    }
+
+    /// **Finding 5 of the phase review, on real pins.** A file that exists, has the right name and the
+    /// wrong bytes is refused with the file, both digests and the licence named — the same shape as
+    /// the tarball verifier's refusal, one step further down. The digests are `COMPONENTS`' own, so
+    /// this fails if a pin and the fetched file in `web/vendor/` ever disagree.
+    ///
+    /// **A refusal and not a re-fetch.** A silent re-download would erase the only evidence that the
+    /// embedded file was ever wrong, and it would need the network for a tree that already has its
+    /// bytes; the recovery is one `Remove-Item` and the message says so.
+    #[test]
+    fn a_corrupted_extracted_file_is_refused_with_both_digests_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
         for component in &COMPONENTS {
-            for (_, name) in component.files {
-                std::fs::write(vendor.join(name), b"present").unwrap();
+            for (_, name, _) in component.files {
+                std::fs::write(vendor.join(name), b"truncated").unwrap();
             }
         }
-        assert!(have_assets(&vendor).is_ok(), "every expected file is there");
-        // `fetch` checks `have_assets` first, so a second run does not download anything: the pinned
-        // URL would fail here (there is no network in this test) and the call still succeeds.
-        for component in &COMPONENTS {
-            assert!(fetch(component, &vendor).is_ok(), "{} was fetched again", component.name);
+
+        // `XTERM` is verified first, and its first member is the one that fails.
+        let (_, first_name, first_pin) = XTERM.files[0];
+        let refused = have_assets(&vendor).unwrap_err();
+        assert!(refused.contains(first_name), "the refusal names the file: {refused}");
+        assert!(refused.contains(first_pin), "and the digest this project pinned: {refused}");
+        assert!(
+            refused.contains(&sha256_of(b"truncated")),
+            "and the digest of the bytes on disk: {refused}"
+        );
+        assert!(refused.contains(XTERM.license), "and the licence of the package: {refused}");
+        assert!(refused.contains("dist"), "and how to recover from it: {refused}");
+
+        // The other half: the *fetched* files in this checkout, when there are any, verify against
+        // these same pins — which is what makes them a statement about `web/vendor/` and not about a
+        // tempdir. A checkout that has never run `dist` skips, exactly as the page's asset test does.
+        let fetched = crate::repo_root().join("web").join("vendor");
+        if have_assets(&fetched).is_ok() {
+            for component in &COMPONENTS {
+                assert!(
+                    verify_extracted(component, &fetched).is_ok(),
+                    "{} must verify against the pins in this file",
+                    component.name
+                );
+            }
         }
     }
 
@@ -411,10 +530,14 @@ mod tests {
         let archive = dir.path().join("fixture.tgz");
         std::fs::write(&archive, fixture()).unwrap();
 
-        extract_members(&archive, &[("pkg/a.txt", "a.txt")], &vendor).expect("tar must extract the member");
+        extract_members(&archive, &[("pkg/a.txt", "a.txt", FIXTURE_MEMBER_SHA256)], &vendor)
+            .expect("tar must extract the member");
         let extracted = std::fs::read_to_string(vendor.join("a.txt")).unwrap();
         assert_eq!(extracted, "hello");
         assert!(!vendor.join("pkg").exists(), "only the named members leave the archive");
+        // And the member the fetch just wrote is what the digest pins, which is the pair of facts
+        // `verify_extracted` compares on every later run.
+        assert_eq!(sha256_of(extracted.as_bytes()), FIXTURE_MEMBER_SHA256);
     }
 
     /// A member the archive does not hold is refused rather than skipped: `tar` exits non-zero, and
@@ -428,7 +551,8 @@ mod tests {
         let archive = dir.path().join("fixture.tgz");
         std::fs::write(&archive, fixture()).unwrap();
 
-        let refused = extract_members(&archive, &[("pkg/nope.txt", "nope.txt")], &vendor).unwrap_err();
+        let refused =
+            extract_members(&archive, &[("pkg/nope.txt", "nope.txt", FIXTURE_MEMBER_SHA256)], &vendor).unwrap_err();
         assert!(refused.contains("pkg/nope.txt"), "{refused}");
         assert!(!vendor.join("nope.txt").exists(), "a refused member leaves no file");
         assert!(!vendor.join(".staging").exists(), "and no staging directory");
@@ -448,7 +572,7 @@ mod tests {
     fn the_pins_carry_the_mjs_and_the_separate_css() {
         assert_eq!(XTERM.files.len(), 2, "the module and the stylesheet are two files in the tarball");
         assert!(
-            XTERM.files.iter().any(|(member, name)| member.ends_with(".css") && name.ends_with(".css")),
+            XTERM.files.iter().any(|(member, name, _)| member.ends_with(".css") && name.ends_with(".css")),
             "the CSS is a member of the package and must be carried"
         );
         for component in COMPONENTS {
@@ -465,6 +589,20 @@ mod tests {
                 "{}'s pin is lowercase hex, because that is what sha256_of returns",
                 component.name
             );
+            // Every member carries its **own** digest as well, and it is not the tarball's: that is
+            // the pin `verify_extracted` compares on every run, and a copy-paste of the tarball's hash
+            // into this field would make every later build fail with a refusal it cannot explain.
+            for (member, name, digest) in component.files {
+                assert_eq!(digest.len(), 64, "{name}'s extracted pin is a sha256");
+                assert!(
+                    digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                    "{name}'s extracted pin is lowercase hex, because that is what sha256_of returns"
+                );
+                assert_ne!(
+                    *digest, component.sha256,
+                    "{name} is extracted from {member} and is not that member: its digest is its own"
+                );
+            }
         }
     }
 
@@ -475,7 +613,7 @@ mod tests {
         version: "fixture",
         tarball: "",
         sha256: FIXTURE_TGZ_SHA256,
-        files: &[("pkg/a.txt", "a.txt")],
+        files: &[("pkg/a.txt", "a.txt", FIXTURE_MEMBER_SHA256)],
         license: "MIT",
     };
 }

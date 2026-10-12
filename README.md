@@ -14,8 +14,10 @@ terminal client and its configuration screen all work, and nine profiles ship wi
 three listening modes work: `push`, where you open and close the microphone by hand, and `auto`,
 where a voice detector decides what is an utterance. The server and the remote client work too:
 `tipsy-compadre serve` listens, and `tipsy-compadre --connect <ws-url>` attaches a terminal to it.
-Still to come: `hands_free` (it waits for the wake word), the web client and the web terminal (the
-last two phases of the same plan), plus CI and releases.
+The **web terminal** works as well — `/terminal` runs that same TUI in a browser tab over a socket of
+raw PTY bytes (Phase 2 of the web tier) — and the **web client**, the real browser HUD at `/`, is the
+phase after it. Still to come: `hands_free` (it waits for the wake word), the web client, plus CI and
+releases.
 
 ## Quick start
 
@@ -311,9 +313,17 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   embeds, and what the embed reads is the repository's `web/` directory — so a plain `cargo build`
   already serves the checked-in `web/terminal/index.html`, and `web/vendor/` has to be fetched
   (`cargo run -p xtask -- dist`) or the page loads with no xterm.js and renders as a blank black
-  rectangle. Until Phase 3 lands `web/client/index.html`, `/` answers with a page that names that
-  command. **`cargo xtask dist` is not a working spelling**: cargo looks for `cargo-xtask` on `PATH`,
-  and the long form above is the one that works.
+  rectangle. **Run that command from somewhere inside the repository** — its root, or any crate
+  directory. It resolves `web/vendor/` from the `xtask` crate's own location and not from the
+  directory you are standing in, so the fetched files always land where the embed reads them, and it
+  prints the absolute path it wrote. (Before that correction it used a relative path: run from
+  `crates/tipsy-compadre` it printed `web/vendor is ready` while writing
+  `crates/tipsy-compadre/web/vendor/`, which nothing reads — a blank terminal from a command that
+  reported success.) Each run also re-checks the fetched files against the sha256 recorded in
+  `web/vendor/README.md`, and refuses with both digests if one has been truncated or edited. Until
+  Phase 3 lands `web/client/index.html`, `/` answers with a page that names the command.
+  **`cargo xtask dist` is not a working spelling**: cargo looks for `cargo-xtask` on `PATH`, and the
+  long form above is the one that works.
 - `--connect` runs the TUI and nothing else: it starts no server, builds no provider and reads no
   API key, because every provider call happens in the server process.
 - `--verbose` also writes the log to stderr. The log file is `tipsy-compadre.log`, beside
@@ -437,7 +447,10 @@ is verified by hand, once, with these steps. Everything a test can reach is in `
 tests: that the page is the one the bundle serves, that every asset it names is embedded, and that it
 is behind the same token rule the socket is.
 
-1. `cargo run -p xtask -- dist` and then `cargo run -p tipsy-compadre -- serve`. `serve` records where
+1. `cargo run -p xtask -- dist` and then `cargo run -p tipsy-compadre -- serve`. Start the first one
+   from inside the repository — its root or any crate directory, it does not matter which, because
+   `dist` writes to the repository's own `web/vendor/` and prints the path it used; a shell standing
+   outside the workspace cannot find the package at all. `serve` records where
    it is listening in `tipsy-compadre.log`; `--verbose` prints the bound address too. It spawns its
    web terminal's child as **its own running binary** (`std::env::current_exe()`), never as
    `tipsy-compadre` looked up in `PATH`: do not start a child by hand for this check, and if you do,
@@ -462,8 +475,11 @@ is behind the same token rule the socket is.
    once per line and the server debounces the resize by 100 ms, so the new width shows up on the
    child's next line of output rather than instantly.
 6. `Ctrl+C` at the prompt that started the server stops it; the browser shows `[disconnected]`. The
-   server's last frame is `{"type":"exit","code":N}` carrying the child's own exit code, and it is the
-   only text frame this socket ever sends.
+   server's last frame is `{"code":N,"type":"exit"}` carrying the child's own exit code, and it is the
+   only text frame this socket ever sends. **The keys are in that order and not the other one**: the
+   server builds the frame with `serde_json::json!`, whose `Value` is a sorted map, so `code` precedes
+   `type` on the wire. Nothing that parses JSON can tell, which is exactly why the bytes are written
+   out here rather than the shape.
 7. After step 6, `tasklist | Select-String tipsy-compadre` lists nothing. If a `tipsy-compadre.exe`
    is still there after the tab is closed, the teardown in `server/conn.rs` is leaking a child.
 

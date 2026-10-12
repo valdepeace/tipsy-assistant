@@ -64,7 +64,15 @@
       // own socket is open at the other end. The payload is a padding frame and nothing else: it is
       // **exactly 256 ASCII bytes** (the wire table's own number) and the server ignores every binary
       // frame on this route rather than writing it to the child's stdin.
-      ws.send("tipsterm-hello-pad".padEnd(256, "-"));
+      //
+      // **`new TextEncoder().encode(…)` and not the bare string, and that one call is the whole
+      // frame's type.** `WebSocket.send` sends a *string* as a **text** frame and anything else as a
+      // **binary** one: with the string, this frame arrived on the route's text branch, where
+      // unparseable JSON is dropped — so the binary branch was production-dead code, and the test
+      // that exists to pin "the pad never reaches the TUI" was sending a frame shape this page never
+      // sent. The wire table spells this frame **Binary**; this is the shape it names.
+      const pad = new TextEncoder().encode("tipsterm-hello-pad".padEnd(256, "-"));
+      ws.send(pad);
     };
 
     ws.onmessage = (event) => {
