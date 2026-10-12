@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tipsy-compadre terminal</title>
+  <!-- xterm.css is a separate file in @xterm/xterm@6.0.0 ("style":"css/xterm.css"): without it the
+       terminal renders with no layout at all. The three /assets/ paths below are bundle-relative:
+       the binary embeds the repository's web/ directory, so this page's own path is
+       terminal/index.html there and the vendored files sit beside it in vendor/. -->
+  <link rel="stylesheet" href="/assets/vendor/xterm.css">
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #101014; }
+    /* The TUI needs the whole viewport and the keyboard: `tabindex` is what lets a click land on the
+       canvas and every following keystroke reach the terminal instead of the page. */
+    #terminal { width: 100vw; height: 100vh; outline: none; }
+  </style>
+</head>
+<body>
+  <div id="terminal" tabindex="0"></div>
+
+  <script type="module">
+    // The "module" builds of the two packages: "module":"lib/xterm.mjs" and
+    // "module":"lib/addon-fit.mjs" in their own registry metadata (Task 2.3).
+    import { Terminal } from "/assets/vendor/xterm.mjs";
+    import { FitAddon } from "/assets/vendor/addon-fit.mjs";
+
+    // The token travelled to this page as a query parameter, because a browser navigation cannot
+    // send an Authorization header (spec §9.2). The server never injects it into the HTML.
+    const token = new URLSearchParams(location.search).get("token") ?? "";
+
+    const term = new Terminal({
+      convertEol: false,
+      cursorBlink: true,
+      // The TUI repaints a whole screen at a time; a scrollback of its own history is enough.
+      scrollback: 2000,
+      fontFamily: "Consolas, \"DejaVu Sans Mono\", monospace",
+      fontSize: 15,
+      theme: { background: "#101014" },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+
+    // `open`'s own doc requires the container to be visible and sized when it is called, so the
+    // stylesheet above sizes it and `fit()` runs immediately after.
+    term.open(document.getElementById("terminal"));
+    fit.fit();
+    // A full-screen TUI is driven by the keyboard, and a canvas that never took focus swallows it.
+    term.focus();
+
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const query = token ? `?token=${encodeURIComponent(token)}` : "";
+    // **`location.host`, not a host written here.** The server admits an `Origin` only when it is the
+    // `Host` the request arrived on, so a page loaded from `localhost:PORT` must open
+    // `ws://localhost:PORT/…` and one loaded from `127.0.0.1:PORT` must open that — the two are
+    // different authorities however they resolve.
+    const ws = new WebSocket(`${scheme}//${location.host}/terminal/ws${query}`);
+    // Binary frames arrive as Blob by default (MDN, quoted in research note §6.4), and the PTY's
+    // bytes are not what we want to hand a text reader. This one line is the difference.
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      // The first frame tells the server this connection is real; a browser cannot ask whether its
+      // own socket is open at the other end. The payload is a padding frame and nothing else: it is
+      // **exactly 256 ASCII bytes** (the wire table's own number) and the server ignores every binary
+      // frame on this route rather than writing it to the child's stdin.
+      ws.send("tipsterm-hello-pad".padEnd(256, "-"));
+    };
+
+    ws.onmessage = (event) => {
+      if (typeof event.data === "string") {
+        // The only text frame this socket carries is the child's exit notice.
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === "exit") {
+            term.write(`\r\n[the terminal's process ended (code ${message.code})]\r\n`);
+          }
+        } catch {
+          // Not our envelope: ignore it rather than corrupt the screen with it.
+        }
+        return;
+      }
+      // Raw PTY bytes. xterm.js treats a Uint8Array as UTF-8 (research note §6.3), which is what a
+      // PTY sends, and the escape sequences are for xterm.js's own parser — nothing is stripped.
+      term.write(new Uint8Array(event.data));
+    };
+
+    ws.onclose = () => {
+      term.write("\r\n[disconnected]\r\n");
+    };
+
+    // Keystrokes and paste. Escape sequences are ASCII, and a JS string on a text frame preserves
+    // them byte for byte.
+    term.onData((data) => send({ type: "data", data }));
+
+    // The non-UTF-8 channel: xterm.js's own wording is that `onBinary` "is currently only used for a
+    // certain type of mouse reports that happen to be not UTF-8 compatible". This is a latin-1 byte
+    // string, one `charCode` per byte, and it goes over a **text** frame as such — the server turns
+    // each char back into its low byte, which is the only lossless way through JSON.
+    term.onBinary((data) => send({ type: "mouse", data }));
+
+    // `resize`'s own doc: "It's best practice to debounce calls to resize" (research note §6.3). The
+    // server debounces its own side by the same 100 ms, so a burst of window drags becomes one resize.
+    let resizeTimer = 0;
+    term.onResize(({ cols, rows }) => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => send({ type: "resize", cols, rows }), 100);
+    });
+
+    // The window changed size: refit, which resizes the terminal and therefore fires `onResize`
+    // above. The `100` ms in that handler is the debounce; repeating `fit()` here is harmless because
+    // xterm.js's `resize` is a no-op when the dimensions did not change.
+    const observer = new ResizeObserver(() => fit.fit());
+    observer.observe(document.getElementById("terminal"));
+
+    // A page with an open WebSocket may not enter the bfcache (research note §7, trap 9), so the
+    // socket is closed on the way out; the server's own teardown does the rest.
+    addEventListener("beforeunload", () => ws.close());
+
+    function send(message) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(message));
+      }
+    }
+  </script>
+</body>
+</html>

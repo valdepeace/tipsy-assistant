@@ -1,8 +1,7 @@
 //! The bundle the binary carries, and the page that says so when it carries none.
 //!
-//! `#[allow_missing = true]` is the whole mechanism: with `web/` absent the embed is empty, every
-//! lookup is `None`, and the two page routes fall back to [`fallback`]. No `build.rs` gate is
-//! needed (spec §5.4; research `web-transport-and-terminal.md:365-386`).
+//! The one directory this whole file is relative to is the repository's `web/`, and [`Bundle`] says
+//! why the attribute that names it is spelled `../../web/` from here.
 //!
 //! **Task 1.4 created this file as a placeholder and pinned two names in it**: its router and four of
 //! its six tests call [`resolve`] and [`fallback`], so those keep their names and their shapes and
@@ -11,18 +10,43 @@
 
 use rust_embed::RustEmbed;
 
-/// What `cargo xtask dist` produces. Hashed filenames may be cached; the two pages may not.
+/// The embedded bundle: the two pages, the vendored xterm.js, and the generated WebAssembly output
+/// under `dist/`. Hashed filenames may be cached; the two pages may not.
 ///
-/// The folder is relative to `crates/tipsy-compadre/Cargo.toml` — `rust-embed` bases a relative
-/// `folder` on `CARGO_MANIFEST_DIR` in both modes — and it does not exist until Phase 2 and Phase 3
-/// write `web/`, which is what `allow_missing` is for.
+/// **The folder is `../../web/`, and that spelling is load-bearing rather than decorative.**
+/// `rust-embed` bases a *relative* `folder` on `CARGO_MANIFEST_DIR` (`rust-embed-impl` 8.13.0,
+/// `src/lib.rs:466-471`), so the literal this attribute used to carry — `"web/dist/"` — named
+/// `crates/tipsy-compadre/web/dist/`: a directory the repository does not have and no task builds.
+/// The bundle root is the **repository's own `web/`**, which holds the pages
+/// (`terminal/index.html`, `client/index.html`), the vendored `vendor/` and the generated `dist/`
+/// that the xtask's `--out-dir web/dist` writes — so from this crate's manifest directory the embed
+/// reads up two levels and into `web/`.
+///
+/// Every other path in this file is relative to that root, and that is the check which settles it:
+/// [`PAGE_TERMINAL`] is `terminal/index.html` and [`PAGE_CLIENT`] is `client/index.html`, the pages
+/// are at `web/terminal/index.html` and `web/client/index.html`, the pages load `/assets/vendor/…`
+/// and `/assets/dist/…`, and `vendor/`, `dist/` and both pages live under the one `web/`. A folder of
+/// `web/dist/` made every one of those a second `dist/` or `vendor/` deep, and made the pages
+/// unreachable entirely.
+///
+/// The folder does not have to exist. `allow_missing = true` is the whole mechanism: with no `web/`
+/// the embed is empty, every lookup is `None`, and the two page routes fall back to [`fallback`]. No
+/// `build.rs` gate is needed (spec §5.4; research `web-transport-and-terminal.md:365-386`).
 #[derive(RustEmbed)]
-#[folder = "web/dist/"]
+#[folder = "../../web/"]
 #[allow_missing = true]
 struct Bundle;
 
 /// What a user runs to build the bundle this binary does not carry.
-pub const DIST_COMMAND: &str = "cargo xtask dist";
+///
+/// **`cargo run -p xtask -- dist`, never `cargo xtask dist`.** Cargo resolves `cargo <name>` by
+/// looking for a `cargo-<name>` binary on `PATH`, and this workspace's own binary target is not
+/// there, so the short form fails with `error: no such command: 'xtask'` and suggests installing a
+/// package that does not exist. That string is rendered by [`fallback`] — the page a user sees
+/// *exactly* when the bundle is missing, which is the one moment the command has to be right.
+/// Measured, not recalled. A `.cargo/config.toml` `[alias]` would make the short form work, but
+/// `.cargo/` is git-ignored in this checkout and never ships, so the long form is the one that ships.
+pub const DIST_COMMAND: &str = "cargo run -p xtask -- dist";
 
 /// The web client's host page. Phase 3's Task 3.6 fills it.
 pub const PAGE_CLIENT: &str = "client/index.html";
@@ -33,7 +57,7 @@ const HTML: &str = "text/html; charset=utf-8";
 const OCTET: &str = "application/octet-stream";
 
 /// Whether this binary carries a bundle at all — the truth `Welcome.web_bundle` reports
-/// (spec §5.4), so a plain `cargo build` and a `cargo xtask dist` differ.
+/// (spec §5.4), so a plain `cargo build` and a `cargo run -p xtask -- dist` differ.
 pub fn web_bundle() -> bool {
     embedding(PAGE_CLIENT).is_some_and(|bytes| !bytes.is_empty())
 }

@@ -307,8 +307,13 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   three are not in the message a client sends (`Command::UpdateConfig` carries `ClientConfigView`),
   and the server keeps its own values. Everything else on the screen — the bind address, the
   listening settings, the profiles, each connector's kind and model — does cross.
-- `/` is the web client and `/terminal` the web terminal. A plain `cargo build` embeds no bundle:
-  both routes then answer with a page that says to build it with `cargo xtask dist`.
+- `/` is the web client and `/terminal` the web terminal. Both are served from the bundle the binary
+  embeds, and what the embed reads is the repository's `web/` directory — so a plain `cargo build`
+  already serves the checked-in `web/terminal/index.html`, and `web/vendor/` has to be fetched
+  (`cargo run -p xtask -- dist`) or the page loads with no xterm.js and renders as a blank black
+  rectangle. Until Phase 3 lands `web/client/index.html`, `/` answers with a page that names that
+  command. **`cargo xtask dist` is not a working spelling**: cargo looks for `cargo-xtask` on `PATH`,
+  and the long form above is the one that works.
 - `--connect` runs the TUI and nothing else: it starts no server, builds no provider and reads no
   API key, because every provider call happens in the server process.
 - `--verbose` also writes the log to stderr. The log file is `tipsy-compadre.log`, beside
@@ -422,6 +427,45 @@ export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '^/usr/bin$' | paste -sd:)"
 ```
 
 In PowerShell no change is needed.
+
+## How to verify the web terminal
+
+The web terminal runs the real TUI in a browser over a socket that carries raw PTY bytes and no
+protocol of its own. **There is no browser in this repository's test harness**, so what a browser and
+only a browser adds — rendering, xterm.js's `onData` and `onBinary`, `FitAddon` and `ResizeObserver` —
+is verified by hand, once, with these steps. Everything a test can reach is in `server::conn`'s own
+tests: that the page is the one the bundle serves, that every asset it names is embedded, and that it
+is behind the same token rule the socket is.
+
+1. `cargo run -p xtask -- dist` and then `cargo run -p tipsy-compadre -- serve`. `serve` records where
+   it is listening in `tipsy-compadre.log`; `--verbose` prints the bound address too. It spawns its
+   web terminal's child as **its own running binary** (`std::env::current_exe()`), never as
+   `tipsy-compadre` looked up in `PATH`: do not start a child by hand for this check, and if you do,
+   give it an absolute path. A `PATH` entry that is empty, relative, or points into this checkout could
+   otherwise plant the program that runs with your authority.
+2. Open `http://127.0.0.1:7070/terminal`. When the configuration holds a token, append
+   `?token=<the value the Server tab shows>` to that URL: the page reads it out of its own query
+   string and puts it on the socket's URL as well, because a browser can set neither a header on a
+   navigation nor one on a WebSocket handshake. **Reach the page under the host name you type and
+   nothing else** — the route refuses a socket whose `Origin` is not the `Host` the request arrived
+   on, and `localhost:7070` and `127.0.0.1:7070` are different authorities.
+3. The HUD appears: the header with the profile's name, the two rings, the oscilloscope, the status
+   line and the log panel. A blank black rectangle means `web/vendor/` was never fetched (step 1); a
+   page that says the web UI is not available in this build means the binary was built before
+   `web/terminal/index.html` existed.
+4. Click the **⚙ gear at the right edge of the header**, or the mode word immediately to its left.
+   Those two are the only clickable controls on that row and they open the configuration screen; the
+   profile's own badge (`◉ NÚCLEO`) is not clickable. This step is the proof that a mouse position
+   arrives as the cell the TUI thinks it is.
+5. Drag the browser window's edge. The TUI reflows to the new size — the panels take the new width and
+   the header stays one line — instead of keeping its old width. The child reads its console width
+   once per line and the server debounces the resize by 100 ms, so the new width shows up on the
+   child's next line of output rather than instantly.
+6. `Ctrl+C` at the prompt that started the server stops it; the browser shows `[disconnected]`. The
+   server's last frame is `{"type":"exit","code":N}` carrying the child's own exit code, and it is the
+   only text frame this socket ever sends.
+7. After step 6, `tasklist | Select-String tipsy-compadre` lists nothing. If a `tipsy-compadre.exe`
+   is still there after the tab is closed, the teardown in `server/conn.rs` is leaking a child.
 
 ## Release checklist
 
