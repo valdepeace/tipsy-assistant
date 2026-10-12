@@ -798,6 +798,13 @@ impl Session {
         let profile = self.config.active();
         self.profile = profile.view();
         self.ui_language = UiLanguage::from_bcp47(&profile.language);
+        // **The greeting is the one fact a profile owns that `turn_profile` does not carry.** The
+        // voice, the prompt, the voice instructions and the language all reach the brain through
+        // `turn_profile`, which this rebuilds; the greeting is this struct's own field, read once when
+        // the session was built. A profile switch that skipped it left a session introducing itself in
+        // the *previous* profile's words while the header already showed the new name — which is what
+        // "the profile does not change" looked like from the screen.
+        self.greeting = profile.greeting.clone();
         self.brain = Arc::new(Brain::new(
             self.providers.clone(),
             turn_profile(&self.config),
@@ -1213,6 +1220,31 @@ mod tests {
         async fn transcribe(&self, _pcm: Pcm, _language: &str) -> Result<String, ProviderError> {
             Ok(self.0.to_string())
         }
+    }
+
+    /// **A profile switch has to move everything the profile owns, and the greeting was the one it
+    /// left behind.** The voice, the prompt, the voice instructions and the language travel to the
+    /// brain through `turn_profile`, which `reconfigure` rebuilds; the greeting is this struct's own
+    /// field, read once when the session was built — so switching profiles mid-run left a session
+    /// introducing itself in the *previous* profile's words while the header already showed the new
+    /// name.
+    #[test]
+    fn reconfiguring_to_another_profile_moves_its_greeting() {
+        let config = Config { active_profile: "compae".into(), ..Config::default() };
+        let (mut session, _rx, _calls) = login_session(config.clone(), "", Vec::new());
+        assert_eq!(session.profile.id, "compae");
+        let compae_greeting = session.greeting.clone();
+        assert_eq!(compae_greeting, session.config.active().greeting);
+
+        session.reconfigure(Config { active_profile: "bloke".into(), ..config });
+
+        assert_eq!(session.profile.id, "bloke", "the header's own fact");
+        assert_ne!(session.greeting, compae_greeting, "not the previous profile's greeting");
+        assert_eq!(
+            session.greeting,
+            session.config.active().greeting,
+            "but the active profile's"
+        );
     }
 
     /// A session whose transcriber answers `transcript`, whose chat and speech providers count their
