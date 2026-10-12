@@ -279,10 +279,12 @@ fn config_view() -> ConfigView {
 }
 
 /// The three commands this tier adds, each in both directions, with a fully populated `ConfigView`.
+/// `UpdateConfig` carries the **client's** shape, built here from the full one with the same
+/// conversion the native client uses.
 #[test]
 fn the_configuration_commands_roundtrip() {
     roundtrip_command(Command::GetConfig);
-    roundtrip_command(Command::UpdateConfig { config: Box::new(config_view()) });
+    roundtrip_command(Command::UpdateConfig { config: Box::new(ClientConfigView::from(&config_view())) });
     roundtrip_command(Command::SetKey { name: "openrouter".into(), value: "sk-or-v1-…a1b2".into() });
 }
 
@@ -321,22 +323,42 @@ fn the_configuration_messages_spell_their_tags_as_the_spec_says() {
 
     // `UpdateConfig` is the one shape whose whole payload is nested, so it is read apart in full:
     // the field name is `config`, and the view's own field names are the form's, unchanged.
-    let json = serde_json::to_string(&Command::UpdateConfig { config: Box::new(config_view()) }).unwrap();
+    //
+    // It is the **client's** shape, and what is missing from it is the point: no provider carries a
+    // `base_url` or a `key_name` and the server carries no `token`, so a save from a client cannot
+    // move where the server sends its key, which key it spends, or its door password (spec §4.3,
+    // §13.6). Every field a client *may* move is asserted present.
+    let json = serde_json::to_string(&Command::UpdateConfig { config: Box::new(ClientConfigView::from(&config_view())) })
+        .unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["type"], "update_config");
     assert_eq!(value["config"]["active_profile"], "compae");
     assert_eq!(value["config"]["listening"]["mode"], "auto");
     assert_eq!(value["config"]["providers"][0]["capability"], "chat");
-    assert_eq!(value["config"]["providers"][0]["key_name"], "openrouter");
+    assert_eq!(value["config"]["providers"][0]["kind"], "openai_compat");
+    assert_eq!(value["config"]["providers"][0]["model"], "google/gemini-2.5-flash");
     assert_eq!(value["config"]["server"]["bind"], "127.0.0.1:7070");
+    assert_eq!(value["config"]["server"]["lan"], false);
     assert_eq!(value["config"]["realtime"]["key_name"], "openai-realtime");
     assert_eq!(value["config"]["login"]["allowed"][0]["name"], "Andrés");
     assert_eq!(value["config"]["profiles"][0]["voices"][0][0], "elevenlabs");
+
+    for row in value["config"]["providers"].as_array().expect("the providers are a list") {
+        assert!(row.get("base_url").is_none(), "a client may not move a provider's address: {row}");
+        assert!(row.get("key_name").is_none(), "a client may not choose which key the server spends: {row}");
+    }
+    assert!(
+        value["config"]["server"].get("token").is_none(),
+        "a client may not move the door password: {}",
+        value["config"]["server"]
+    );
 
     let json = serde_json::to_string(&Event::Config { config: Box::new(config_view()) }).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["type"], "config");
     assert_eq!(value["config"]["server"]["token"], "0123456789abcdef0123456789abcdef");
+    assert_eq!(value["config"]["providers"][0]["base_url"], "https://openrouter.ai/api/v1");
+    assert_eq!(value["config"]["providers"][0]["key_name"], "openrouter");
 }
 
 /// The five `ErrorCode` variants this tier adds. The spelling is the point and the reason they exist
