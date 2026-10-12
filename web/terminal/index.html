@@ -34,7 +34,15 @@
       cursorBlink: true,
       // The TUI repaints a whole screen at a time; a scrollback of its own history is enough.
       scrollback: 2000,
-      fontFamily: "Consolas, \"DejaVu Sans Mono\", monospace",
+      // **`DejaVu Sans Mono` first, and it is not a preference.** The HUD draws with box-drawing,
+      // block and geometric glyphs — the core's `◉`, the ring's arcs, the oscilloscope — and
+      // `Consolas` does not carry all of them. xterm.js then falls back **per glyph**, the fallback's
+      // advance differs from the cell width it measured from the primary font, and every frame and
+      // ring comes out misaligned ("todo descolocado", reported from a real browser). Measured on this
+      // machine: the Phase 3 spike's own glyph table found `◉` and `⚙` take exactly one monospace
+      // advance in `DejaVu Sans Mono`, and that font is installed here. The plan's list had `Consolas`
+      // first, which is where this came from.
+      fontFamily: "\"DejaVu Sans Mono\", Consolas, monospace",
       fontSize: 15,
       theme: { background: "#101014" },
     });
