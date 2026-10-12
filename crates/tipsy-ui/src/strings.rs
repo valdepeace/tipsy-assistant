@@ -118,6 +118,27 @@ pub struct Strings {
     pub web_offline: &'static str,
     /// The socket is up again, which is what the session's own `Welcome` proves.
     pub web_online: &'static str,
+    /// The browser gate's button. The v1 spec asks for it in as many words: "In the browser, audio
+    /// capture requires a user gesture; the web client shows a 'press to start' screen until then"
+    /// (`docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md:193-194`).
+    pub mic_start: &'static str,
+    /// The line beside that button while the microphone can be offered at all.
+    pub mic_hint: &'static str,
+    /// `navigator.mediaDevices` is not there at all — it is `undefined` in an insecure context, which
+    /// is why this is a *capability* reason and not a permission one, and why it is the message that
+    /// tells the user to reach the page on loopback or over a certificate the browser trusts (MDN,
+    /// quoted at `ratzilla-and-wasm-audio.md` §4.1; web-tier spec §9.5).
+    pub mic_no_api: &'static str,
+    /// The capture opened: the frames are flowing.
+    pub mic_granted: &'static str,
+    /// "Listening disabled with a warning; typing still works" — v1 spec §12 `:418`.
+    pub mic_denied: &'static str,
+    pub mic_nodevice: &'static str,
+    pub mic_busy: &'static str,
+    /// The rest of the ways a capture fails — the worklet refused to load, the browser ignored the
+    /// constraints, a transient rejection. One message, because the user's next move is the same for
+    /// all three, and because "everything else" is not a set worth naming one string per member.
+    pub mic_failed: &'static str,
 }
 
 pub static ES: Strings = Strings {
@@ -201,6 +222,14 @@ pub static ES: Strings = Strings {
     err_handshake: "No se pudo completar el saludo con el servidor.",
     web_offline: "Sin conexión: reintentando…",
     web_online: "Conexión restablecida",
+    mic_start: "Pulsa para empezar",
+    mic_hint: "El navegador pedirá permiso para el micrófono",
+    mic_no_api: "Este navegador no da acceso al micrófono aquí: abre la página en localhost o por HTTPS.",
+    mic_granted: "Micrófono abierto",
+    mic_denied: "Micrófono denegado: revisa el permiso del sitio. Puedes escribir.",
+    mic_nodevice: "No hay micrófono conectado. Puedes escribir.",
+    mic_busy: "El micrófono está ocupado por otra aplicación. Puedes escribir.",
+    mic_failed: "No se pudo abrir el micrófono. Puedes escribir.",
 };
 
 pub static EN: Strings = Strings {
@@ -284,6 +313,16 @@ pub static EN: Strings = Strings {
     err_handshake: "The handshake with the server could not be completed.",
     web_offline: "Connection lost: retrying…",
     web_online: "Connection restored",
+    mic_start: "Press to start",
+    mic_hint: "The browser will ask for the microphone",
+    // The plan's own Step 6 English table stops one field short of the Spanish one — this line is the
+    // one it lost, and it is the reason the capability probe can answer in English at all.
+    mic_no_api: "This browser gives this page no microphone access: open it on localhost or over HTTPS.",
+    mic_granted: "Microphone open",
+    mic_denied: "Microphone denied: check the site's permission. You can still type.",
+    mic_nodevice: "No microphone connected. You can still type.",
+    mic_busy: "The microphone is in use by another application. You can still type.",
+    mic_failed: "The microphone could not be opened. You can still type.",
 };
 
 pub fn strings(lang: UiLanguage) -> &'static Strings {
@@ -322,5 +361,37 @@ mod tests {
         }
         assert_ne!(strings(UiLanguage::Es).web_offline, strings(UiLanguage::En).web_offline);
         assert_ne!(strings(UiLanguage::Es).web_online, strings(UiLanguage::En).web_online);
+    }
+
+    /// The browser gate's copy, in both tables and in both directions: the gate's own two lines, the
+    /// five reasons `MicAvailability` can hand back, and the pass notice. **This is the test the plan's
+    /// own Step 6 table would have failed**: its English block lists seven of the eight fields, so the
+    /// `EN` table would not have compiled — and a missing `mic_no_api` is the one reason an insecure
+    /// context can produce, which is exactly the state the capability probe exists for.
+    #[test]
+    fn the_microphone_copy_is_complete_in_both_languages() {
+        for table in [strings(UiLanguage::Es), strings(UiLanguage::En)] {
+            for (name, text) in [
+                ("mic_start", table.mic_start),
+                ("mic_hint", table.mic_hint),
+                ("mic_no_api", table.mic_no_api),
+                ("mic_granted", table.mic_granted),
+                ("mic_denied", table.mic_denied),
+                ("mic_nodevice", table.mic_nodevice),
+                ("mic_busy", table.mic_busy),
+                ("mic_failed", table.mic_failed),
+            ] {
+                assert!(!text.trim().is_empty(), "{name} has to say something");
+            }
+            // "typing still works" is the promise the v1 spec makes for every disabled microphone
+            // (§12), so each refusal says so rather than leaving the user to guess.
+            for text in [table.mic_denied, table.mic_nodevice, table.mic_busy, table.mic_failed] {
+                assert!(text.contains("escribir") || text.contains("type"), "{text}");
+            }
+            assert!(table.mic_no_api.contains("HTTPS"), "the insecure-context reason names the fix");
+        }
+        assert_ne!(strings(UiLanguage::Es).mic_start, strings(UiLanguage::En).mic_start);
+        assert_ne!(strings(UiLanguage::Es).mic_no_api, strings(UiLanguage::En).mic_no_api);
+        assert_ne!(strings(UiLanguage::Es).mic_granted, strings(UiLanguage::En).mic_granted);
     }
 }

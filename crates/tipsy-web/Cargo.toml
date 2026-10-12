@@ -31,4 +31,17 @@ features = [
   # The socket and the page's own location.
   "Window", "Location", "UrlSearchParams", "Document", "Element", "HtmlElement", "Node", "console",
   "WebSocket", "BinaryType", "MessageEvent",
+  # Task 3.3: the microphone. Every name was checked against web-sys 0.3.106's own generated
+  # bindings and its feature list, and the three the plan's list carries that are *not* here are
+  # absent on purpose: **`AudioNode`** is where `connect_with_audio_node` lives — the plan omits it and
+  # the source-to-node connection cannot be spelled without it; **`PermissionDescriptor` and
+  # `PermissionName`** cannot be used at all, because `PermissionName` has no `Microphone` variant in
+  # 0.3.106 and `Permissions::query` takes a `&js_sys::Object` (`gen_Permissions.rs`); and
+  # **`CssStyleDeclaration`** is for styling the gate, which is Task 3.5's look and not this task's.
+  "Navigator", "MediaDevices", "MediaStream", "MediaStreamConstraints", "MediaTrackConstraints",
+  "AudioContext", "AudioContextOptions", "BaseAudioContext", "AudioWorklet", "Worklet",
+  "AudioWorkletNode", "AudioWorkletNodeOptions", "AudioNode", "MediaStreamAudioSourceNode",
+  "MessagePort", "Permissions", "PermissionStatus", "PermissionState",
+  # Task 3.3: the gate's own DOM. `disabled` lives on the button element, not on `HtmlElement`.
+  "HtmlButtonElement",
 ]
