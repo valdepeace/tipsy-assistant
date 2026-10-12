@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/tipsy-protocol", "crates/tipsy-ui", "crates/tipsy-compadre", "xtask"]
+members = ["crates/tipsy-protocol", "crates/tipsy-ui", "crates/tipsy-compadre", "crates/tipsy-web", "xtask"]
 
 [workspace.package]
 version = "0.1.0"

@@ -48,18 +48,51 @@ struct Bundle;
 /// `.cargo/` is git-ignored in this checkout and never ships, so the long form is the one that ships.
 pub const DIST_COMMAND: &str = "cargo run -p xtask -- dist";
 
-/// The web client's host page. Phase 3's Task 3.6 fills it.
+/// The web client's own page. Phase 3's Task 3.6 fills it.
 pub const PAGE_CLIENT: &str = "client/index.html";
+/// The script that page imports, as `cargo run -p xtask -- dist` writes it (`web/dist/`) and as
+/// `/assets/dist/tipsy_web.js`.
+pub const PAGE_CLIENT_SCRIPT: &str = "dist/tipsy_web.js";
 /// The xterm.js host page. Phase 2's Task 2.4 fills it.
 pub const PAGE_TERMINAL: &str = "terminal/index.html";
 
 const HTML: &str = "text/html; charset=utf-8";
 const OCTET: &str = "application/octet-stream";
 
-/// Whether this binary carries a bundle at all — the truth `Welcome.web_bundle` reports
+/// **Whether this binary can serve the web client at all** — the truth `Welcome.web_bundle` reports
 /// (spec §5.4), so a plain `cargo build` and a `cargo run -p xtask -- dist` differ.
+///
+/// **The flag is the page *and* the script it loads, and that is a correction rather than the original
+/// reading.** It used to be "is [`PAGE_CLIENT`] in the embed?", and the page is **committed** while
+/// `web/dist/` is not: on any checkout that has never run `cargo run -p xtask -- dist`, the flag said
+/// `true` while `/assets/dist/tipsy_web.js` answered 404 — a browser got a page whose `import init`
+/// fails and draws nothing — and the HUD's own message ("the web UI is not available in this build",
+/// the only consumer of this flag) could never appear, because the HUD that draws it is the very
+/// bundle that is missing. The question that message asks is the one below: a page **and** the script
+/// it imports. It is also exactly what [`resolve`] can serve and what `xtask`'s `REQUIRED` list gates
+/// the release build on (`xtask/src/dist.rs` refuses the host build when either file is missing), so a
+/// binary built by `cargo run -p xtask -- dist` answers `true` and a plain `cargo build` answers
+/// `false`.
+///
+/// **The residual, named rather than implied**: `/` still answers the committed page on such a build
+/// — the route's own fallback is for a binary with no page at all — so a browser there shows a blank
+/// canvas and a 404 in its console, while a client that speaks the protocol is told the truth. Making
+/// the route itself fall back when the script is missing is a decision for a later task; the flag is
+/// what this one fixed.
 pub fn web_bundle() -> bool {
-    embedding(PAGE_CLIENT).is_some_and(|bytes| !bytes.is_empty())
+    bundle_is_here(embedded(PAGE_CLIENT), embedded(PAGE_CLIENT_SCRIPT))
+}
+
+/// The flag's own rule as a value, so the conjunction has a test that bites in every checkout: a tree
+/// where `cargo run -p xtask -- dist` has been run has both halves and cannot tell `page && script`
+/// from `page` by inspecting the embed alone.
+fn bundle_is_here(page: bool, script: bool) -> bool {
+    page && script
+}
+
+/// One file of the embed, present and non-empty.
+fn embedded(path: &str) -> bool {
+    Bundle::get(path).is_some_and(|file| !file.data.is_empty())
 }
 
 /// The page for a route: the embedded file, or the explanation page when this binary carries none.
@@ -191,12 +224,43 @@ mod tests {
         assert!(resolve("/nope").is_none(), "a route that is not a page has no page");
     }
 
-    /// With the folder absent, `web_bundle()` is `false`, which is what `Welcome.web_bundle`
-    /// reports and what the HUD's message is for (spec §5.4). The assertion is the property, so it
-    /// holds in a `cargo xtask dist` tree too.
+    /// **The flag is the page *and* the script it loads** (spec §5.4), which is the question the HUD's
+    /// "the web UI is not available in this build" message asks. It used to be the page alone — and the
+    /// page is committed while `web/dist/` is not, so a checkout that has never run
+    /// `cargo run -p xtask -- dist` reported a bundle while `/assets/dist/tipsy_web.js` 404'd: the one
+    /// state that message exists for, and the one in which the message itself could never appear,
+    /// because the HUD that draws it is the missing bundle. The name is Task 1.5's; the agreement it
+    /// asserts is with both halves of the embed now.
+    ///
+    /// **It asks the property and prints the case**, because this tree's answer differs from a fresh
+    /// clone's and the Phase 2 lesson is that a test green in exactly one of them is not a test. With
+    /// `web/dist/` fetched the line reads `page=true script=true`; in a fresh clone — where only the
+    /// page is committed — it reads `page=true script=false` and the flag is `false`.
     #[test]
     fn the_bundle_flag_agrees_with_the_embed() {
-        assert_eq!(web_bundle(), embedding(PAGE_CLIENT).is_some_and(|bytes| !bytes.is_empty()));
+        assert_eq!(web_bundle(), bundle_is_here(embedded(PAGE_CLIENT), embedded(PAGE_CLIENT_SCRIPT)));
+        // **The rule itself, over all four states.** The page alone is not a web UI, and this half
+        // bites in every checkout — including one where `web/dist/` has been built, where both halves
+        // of the embed are present and a mutation of the conjunction would otherwise hide behind them.
+        assert!(bundle_is_here(true, true), "the page and the script it imports are the web UI");
+        assert!(!bundle_is_here(true, false), "a page whose `import init` 404s is not a web UI");
+        assert!(!bundle_is_here(false, true), "and a script with no page is not one either");
+        assert!(!bundle_is_here(false, false));
+        println!(
+            "web_bundle={} (page embedded={}, script embedded={})",
+            web_bundle(),
+            embedded(PAGE_CLIENT),
+            embedded(PAGE_CLIENT_SCRIPT)
+        );
+        if embedded(PAGE_CLIENT) {
+            // The half the correction is about: the page alone is not a web UI, and a build that has
+            // it and not the script answers `false` rather than claiming one.
+            assert_eq!(
+                web_bundle(),
+                embedded(PAGE_CLIENT_SCRIPT),
+                "with the page committed, the script is what decides the flag"
+            );
+        }
     }
 
     /// `asset` is `None` for anything the bundle does not hold, and an unknown path is not a licence
@@ -215,10 +279,10 @@ mod tests {
         assert_eq!(asset("../config.toml"), None);
         assert_eq!(asset(""), None);
 
-        if web_bundle() {
+        if embedded(PAGE_CLIENT) {
             // There was something for a lookup to find and a traversal to reach, so the three answers
             // above are a property of `asset` rather than of an empty folder.
-            assert!(asset(PAGE_CLIENT).is_some(), "a build with a bundle must serve its own page");
+            assert!(asset(PAGE_CLIENT).is_some(), "a build with the client page must serve it");
         } else {
             // Nothing to bite: recorded here so no reader mistakes this for coverage of the traversal
             // rule. Phase 2 and Phase 3 land `web/`, and this branch is what says the gate flipped.

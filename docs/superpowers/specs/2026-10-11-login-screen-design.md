@@ -427,10 +427,17 @@ changing it changes no code path.
 - **The microphone opens with the screen** when `voice = true`, and the widget says so: a red `● rec`
   in its own title, which is the v1 rule about a visible indicator kept without a header. `Tab` closes
   it, `Esc` leaves, and `voice = false` means no audio ever leaves the machine.
-- **Nothing reaches the provider until the local detector confirms speech.** The login capture runs
-  `VadState` in front of the transcriber exactly as `auto` mode does: the silence, the room tone and
-  the chair creak before the first syllable are dropped, and only what was confirmed as the user's
-  speech is uploaded. That is a stronger guarantee than push-to-talk gives today.
+- **Nothing reaches the provider until the local detector confirms speech — and it is the *server's*
+  detector that says so.** The login capture runs `VadState` (`session.rs`'s `login_vad`) in front of
+  the transcriber exactly as `auto` mode does: the silence, the room tone and the chair creak before
+  the first syllable are dropped, and only what was confirmed as the user's speech reaches the
+  provider. That is a stronger guarantee than push-to-talk gives it. **In the browser the wording is
+  "reaches the provider", not "leaves the machine"**: `tipsy-web` has no detector at all, so every
+  20 ms frame its open capture produces is uploaded to `/ws` — the same frames push-to-talk uploads —
+  and the server's own VAD is what keeps the silence out of the transcription call. A client that
+  wanted to filter its own uploads would have to bring a detector with it; what the browser does owe,
+  and enforces, is that no frame leaves the page while no capture is open, and that a frame the door
+  refuses is dropped rather than kept (the phase review's finding 6, which corrected this bullet).
 - **One transcription call per finished utterance**, capped at 15 s each, and only the transcribe
   key is spent: no chat call and no speech call happens before the HUD. That is precisely why
   `TurnInput::Utterance` was rejected (L4) — reusing it would have answered the login out loud and
@@ -504,6 +511,21 @@ changing it changes no code path.
      `Welcome.login`, drive its own capture (`getUserMedia` → `Frame::Mic`) in step with
      `LoginState::open`, send the same three commands and honour the once-per-run rule. None of Plan
      3's Phase 3 tasks (3.2–3.6) mentions it, so it needs a task or an explicit extension of one.
+
+     **Landed 2026-10-12, in Plan 3's Task 3.7.** `tipsy-web`'s `login_door.rs` is the engine around
+     the screen `tipsy-ui` already owns, and none of the screen is reimplemented: `Welcome.login` goes
+     through `UiState::show_login` — which *is* the once-per-run rule, so the browser keeps no bit of
+     its own and a re-sent `Welcome` cannot put the veil back — the capture is reconciled on
+     `LoginState::open`'s edges exactly as the native client reconciles its own, and the three
+     commands need no browser-specific code at all: `Tab`, the third refusal and a returned-to-empty
+     box already raise `UiAction::Send(LoginStart | LoginStop)` and a typed answer
+     `UiAction::Send(LoginAnswer { text })` from `UiState::on_key`, down the same socket path as every
+     other command. The one thing the browser had to answer for itself is the frame gate, and the
+     answer is a single predicate: `Door::sends_frames` reads the screen's own `voice` and `open` and
+     is the only thing between the captured frames and `Outbox::send`, so **no captured frame leaves
+     the page while the door is shut** — which closes the window §10's first hop used to have, where
+     the press-to-start click set the HUD's microphone flag before `Welcome` even arrived and room
+     tone travelled to `/ws` from that press on.
   2. **Two sentences of this spec that Plan 3 supersedes.** Its Task 1.1 extends `LoginView` with
      `enabled` and `allowed` (for `ConfigView`, so the configuration screen can show and edit the
      section over the wire). That makes §1's "no Login tab" non-goal and the L2 sentence "the allowlist
@@ -525,6 +547,15 @@ changing it changes no code path.
   can make a device fail to open, and push-to-talk's own refusal has never had a test either. Also
   worth a human eye, because no test can see it: the veil's look on a real terminal (`Veil::Dim` is the
   escape hatch if `▒`/`░` land badly), and the core's pulse following the voice while the door is shut.
+- **The same check in a browser, and it is Plan 3's Task 3.7's to hand over.** The web client's login
+  door is wired by the same state machine, so the *decisions* are tested; the *device*, the *font* and
+  the *pulse* are not, and no browser has ever loaded this code. The recipe and the checklist are in
+  the README's **Release checklist** ("The login door in the browser"), and the one ordering that
+  matters is that the typing-only path is checked **first**, with the microphone really taken away from
+  the OS: that is the branch no test can reach. Record the browser and its version, whether the
+  typing-only line appeared, whether the veil was readable, and whether the core pulsed — and if
+  `Veil::Dim` had to be switched on, say so, because both strengths are tested and the constant is the
+  only thing that changes.
 - **A change the user has asked for, not yet designed (2026-10-12).** On a **correct** answer the screen
   should come down and the veil should lift **at once**, with no `Enter` in between — the opposite of
   §6.2's "The screen stays until `Enter`". The argument is §7's own: the veil exists to hide the HUD

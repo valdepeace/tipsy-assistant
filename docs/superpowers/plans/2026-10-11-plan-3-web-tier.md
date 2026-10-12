@@ -14431,8 +14431,12 @@ does:
    audio the spec promises never leaves the machine", `mic_route`'s `(false, _, _) => MicRoute::Drop`
    at `:795-802`). The browser has the same shape of hole unless it is closed on purpose: a frame
    handler that posts to the socket unconditionally puts room tone on the wire from the moment the
-   page's gate was pressed, which breaks §9's promise ("Nothing reaches the provider until the local
-   detector confirms speech") at its first hop.
+   page's gate was pressed. **What that breaks is narrower than this note first said, and the phase
+   review's finding 6 corrected it**: §9's promise ("Nothing reaches the provider until the local
+   detector confirms speech") is kept by the *server's* `login_vad` in front of the transcriber, and
+   `tipsy-web` has no detector at all — every frame its open capture produces is uploaded, exactly as
+   push-to-talk uploads them. What the browser owes is that **no frame leaves the page while no
+   capture is open**, and that a frame the door refuses is dropped rather than kept.
 2. **A second `Welcome` reopening a door that was passed.** The server re-sends `Welcome` on
    `SetProfile` and `SetListeningMode` — `Hub::resend_welcome` exists for exactly that
    (`docs/superpowers/plans/2026-10-11-plan-3-web-tier.md:2425-2435`) — so a client that treats every
@@ -15028,11 +15032,18 @@ things in that code are load-bearing and are explained where they sit:
    second `Welcome` and the native client all ask, so the rule is asked there and the browser's answer
    is not a second opinion — the `passed: bool` this body used to build is exactly the duplicate home
    `b9f2402` removed.
-2. **`sends_frames` and `capture_open` are the same expression today, deliberately.** They are two
-   questions and they diverge the moment a second reason to capture exists (the HUD's own
-   push-to-talk is a native-only path in this tier, spec §8.2); naming both keeps a later reader from
-   widening the frame guard to cover the badge. Do **not** merge them, and do not make one call the
-   other if the two answers ever differ.
+2. **`sends_frames` and `capture_open` are two questions, and the fix wave made them differ.** They
+   were one expression when this task was written, and the parenthetical this plan gave for it — "the
+   HUD's own push-to-talk is a native-only path in this tier, spec §8.2" — is **wrong twice over**:
+   §8.2 is the spec's table of the three jobs a browser does (capture, playback, transport) and says
+   nothing about push-to-talk, and the tier's own success criterion 5 (`:52-53`), this plan's Phase 3
+   row (`:86`) and `README.md` all promise a user who *talks to the assistant from the browser*. **The
+   phase review's Blocker 1**: the predicate was the screen's expression alone, so with
+   `login == None` — after `LoginDone`, and in every build with no door at all — no frame could ever
+   leave the page. `sends_frames` is the frame path and has two cases (the screen's `voice && open`
+   while a screen is up, the HUD's `state.mic_open` while none is); `capture_open` is the login's own
+   capture, which is the `● rec` badge and the `LoginStart`/`LoginStop` edges. Do **not** merge them,
+   and do not make one call the other. The code and its tests now say all of this.
 3. **`sync` returns a `ToServer`, not an action of its own.** The login's commands are the same three
    `Command`s every HUD command is, and Task 3.5's `dispatch` already sends a `ToServer::Command` to
    Task 3.2's `Outbox`; a second way to reach the socket is the drift the front matter's contract
