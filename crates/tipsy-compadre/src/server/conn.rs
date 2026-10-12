@@ -47,7 +47,25 @@ pub struct ConnOptions {
     /// may not grow with a peer that stopped reading.
     pub write_buffer_size: usize,
     pub max_write_buffer_size: usize,
+    /// The largest inbound message the socket will assemble, in bytes — and, because the upgrade sets
+    /// `max_frame_size` from the same number, the largest single frame too. axum's default is **64
+    /// MiB** and `Frame::decode` caps nothing (`tipsy-protocol/src/lib.rs:465-480`), so without this a
+    /// single binary message could hand a session a payload the size of a small file. See
+    /// [`READ_CEILING`] for the arithmetic behind the value.
+    pub max_message_size: usize,
 }
+
+/// The largest message a client may send, and why it is this number.
+///
+/// A microphone frame is 16 kHz mono i16 over 20 ms: 320 samples, 640 bytes, 641 with its kind byte
+/// (`audio/device.rs:20`, `tipsy-protocol/src/lib.rs:446-463`). 256 KiB is **400 frames** — over eight
+/// seconds of audio in one message, when a client sends one frame per 20 ms — so a legitimate client
+/// cannot come near it even if it batches; and it is 256 times below axum's 64 MiB default, so the
+/// most a peer can make a session hold in one step is a quarter of a megabyte. The largest text
+/// message in this protocol is a `ClientConfigView`: a whole configuration, with the providers' key
+/// *names* and none of their addresses. The default `config.toml` is a few KiB, and even a hand-written
+/// one with several long prompts is an order of magnitude below this ceiling.
+pub const READ_CEILING: usize = 256 * 1024;
 
 impl Default for ConnOptions {
     fn default() -> Self {
@@ -56,6 +74,7 @@ impl Default for ConnOptions {
             queue: WRITE_QUEUE,
             write_buffer_size: 128 * 1024,
             max_write_buffer_size: 1024 * 1024,
+            max_message_size: READ_CEILING,
         }
     }
 }
@@ -536,6 +555,8 @@ mod tests {
         upgrade
             .write_buffer_size(options.write_buffer_size)
             .max_write_buffer_size(options.max_write_buffer_size)
+            .max_message_size(options.max_message_size)
+            .max_frame_size(options.max_message_size)
             .on_upgrade(move |socket| async move {
                 // The hub's entry point: it allocates the session id, attaches the session before
                 // `Welcome` can be missed, and clones the fakes in its slot into the session.
@@ -781,6 +802,43 @@ mod tests {
         }
     }
 
+    /// **F5, the socket half of the read side.** axum's `max_message_size` default is **64 MiB** and
+    /// `Frame::decode` caps nothing, so one inbound message could hand a session tens of megabytes in
+    /// a single step. The ceiling is explicit now (`READ_CEILING`) and it bites: a frame over it ends
+    /// the connection, while a frame under it is answered normally. This test's ceiling is small so
+    /// the frame is cheap; the two lines that apply the value are in `server::ws` and in this file's
+    /// test handler.
+    #[tokio::test]
+    async fn a_message_over_the_read_ceiling_ends_the_connection_and_a_smaller_one_does_not() {
+        let options = ConnOptions { max_message_size: 4096, ..ConnOptions::default() };
+        // The chat fake is never asked: nothing here is a turn, and the greeting is a `Say`.
+        let addr = server(FakeChat::new(vec![]), options).await;
+        let mut socket = connect(addr).await;
+        wait_for_the_floor(&mut socket).await;
+
+        // Under the ceiling: a frame with an unknown kind is a recoverable error, so this is proof
+        // that the connection really was alive and being read a moment before the next assertion.
+        socket.send(ClientMessage::Binary(vec![0x7f, 0x00, 0x00].into())).await.unwrap();
+        event_until(&mut socket, |e| matches!(e, Event::Error { .. })).await;
+
+        // Over it: eight thousand samples are 16 KB of perfectly well-formed `Frame::Mic` payload, and
+        // the ceiling is what refuses it.
+        let oversized = Frame::Mic(vec![0i16; 8192]).encode();
+        assert!(oversized.len() > options.max_message_size, "the frame has to be over the ceiling to prove it");
+        socket.send(ClientMessage::Binary(oversized.into())).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!left.is_zero(), "a message over the read ceiling must end the connection");
+            match tokio::time::timeout(left, socket.next()).await {
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => panic!("the connection survived a message over the read ceiling"),
+            }
+        }
+    }
+
     /// Review Focus line 2, first half: the bridge's own queue is **bounded**. The client stops
     /// reading the moment it has connected, the greeting is a megabyte per sentence, and the writer
     /// therefore takes one frame, blocks inside the socket write and stays blocked. What is asserted
@@ -855,6 +913,7 @@ mod tests {
             write_timeout: Duration::from_millis(200),
             write_buffer_size: 1024,
             max_write_buffer_size: 4096,
+            max_message_size: READ_CEILING,
         };
         let chat = FakeChat::new(vec![Ok(vec!["una frase bastante larga para llenar el búfer."])]);
         let addr = server(chat, options).await;

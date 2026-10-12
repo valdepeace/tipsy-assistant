@@ -135,6 +135,34 @@ const GUARD: Duration = Duration::from_millis(300);
 /// has ended it: a login answer is a sentence, and a transcription bill is not a joke (spec §4.1).
 const LOGIN_MAX_UTTERANCE_SAMPLES: usize = MIC_SAMPLE_RATE as usize * 15;
 
+/// Samples of microphone audio one utterance may hold, in every mode that buffers without a detector
+/// to end it. **This is a bound and not a policy**: a client that never stops streaming — the default
+/// `push` mode's microphone, or `auto`'s detector held open by continuous noise — would otherwise grow
+/// the session's buffer for as long as it stayed connected, and a `Frame` says nothing about how much
+/// audio it may carry (`tipsy-protocol/src/lib.rs:465-480` gives the frame, not a ceiling).
+///
+/// 16 kHz mono i16, so this is **30 seconds**, about 960 KB. A push-to-talk sentence is a few seconds;
+/// thirty is longer than anyone speaks into a walkie-talkie key, and it is far below the read ceiling
+/// the socket enforces (`server::conn::READ_CEILING`, 256 KiB per message but unbounded across
+/// messages). Past it the **oldest** audio goes, so what the user just said is what is transcribed:
+/// dropping the newest would lose the question and keeping the first thirty seconds would answer the
+/// wrong one.
+const UTTERANCE_MAX_SAMPLES: usize = MIC_SAMPLE_RATE as usize * 30;
+
+/// Appends one frame to an utterance buffer, keeping at most `max` samples by dropping the oldest.
+///
+/// One function for both buffers (`mic` in `push`/`hands_free`, `utterance` in `auto`) because the
+/// rule is the same one and a second copy of it is a second place to forget. `Vec::drain` moves what
+/// is left, which is at most 960 KB per frame once the ceiling is reached — a memmove of well under a
+/// millisecond, and the alternative (a ring buffer) would rewrite both call sites for it.
+fn push_utterance(buffer: &mut Vec<i16>, samples: &[i16], max: usize) {
+    buffer.extend_from_slice(samples);
+    if buffer.len() > max {
+        let excess = buffer.len() - max;
+        buffer.drain(..excess);
+    }
+}
+
 /// Starts a session on its own task and returns the two ends of its channels.
 pub fn spawn_session(
     config: Config,
@@ -520,8 +548,12 @@ impl Session {
                     // confirmed is ever transcribed.
                     ListeningMode::Auto => self.detect(&samples),
                     // `push`, and `hands_free` until Plan 4 implements it: the client's frames are
-                    // the utterance, and `ListenStop` transcribes them.
-                    ListeningMode::Push | ListeningMode::HandsFree => self.mic.extend_from_slice(&samples),
+                    // the utterance, and `ListenStop` transcribes them. Capped, because nothing else
+                    // ends it: a client that streams for ever would otherwise grow this buffer for
+                    // ever (see [`UTTERANCE_MAX_SAMPLES`]).
+                    ListeningMode::Push | ListeningMode::HandsFree => {
+                        push_utterance(&mut self.mic, &samples, UTTERANCE_MAX_SAMPLES);
+                    }
                 }
                 ControlFlow::Continue(())
             }
@@ -555,18 +587,20 @@ impl Session {
                 // Nothing was kept before this frame: not the room tone and not the silence the
                 // user started speaking through.
                 self.utterance.clear();
-                self.utterance.extend_from_slice(samples);
+                push_utterance(&mut self.utterance, samples, UTTERANCE_MAX_SAMPLES);
             }
             VadEvent::SpeechEnded => {
                 self.heard = false;
                 // The frame that reports the end is the last of the hangover: it is part of the
                 // utterance, which is why it is pushed before the turn starts.
-                self.utterance.extend_from_slice(samples);
+                push_utterance(&mut self.utterance, samples, UTTERANCE_MAX_SAMPLES);
                 self.utterance_ended();
             }
             VadEvent::None => {
                 if self.heard {
-                    self.utterance.extend_from_slice(samples);
+                    // Capped like `push` mode's buffer: a detector held open by continuous noise
+                    // never ends this utterance, so nothing else would bound it.
+                    push_utterance(&mut self.utterance, samples, UTTERANCE_MAX_SAMPLES);
                 }
             }
         }
@@ -1262,6 +1296,53 @@ mod tests {
             // A microphone frame can never break the session: only a refused `Hello` can.
             let _ = session.dispatch(ToServer::Audio(Frame::Mic(vec![0i16; MIC_FRAME_SAMPLES])));
         }
+    }
+
+    /// F5, the session half: a `push` client that opens the microphone and never closes it must not
+    /// grow the session's buffer without bound. The bound is the ceiling, and what it keeps is the
+    /// **newest** audio — the question the user just finished asking, not the first thirty seconds.
+    #[test]
+    fn a_push_utterance_is_capped_and_keeps_the_newest_audio() {
+        let (mut session, _rx, _) = login_session(Config::default(), "unused", Vec::new());
+        let _ = session.command(Command::ListenStart);
+        assert!(session.listening, "the microphone is open");
+
+        let frames = UTTERANCE_MAX_SAMPLES / MIC_FRAME_SAMPLES + 8;
+        speak(&mut session, frames);
+        assert_eq!(
+            session.mic.len(),
+            UTTERANCE_MAX_SAMPLES,
+            "the buffer must stop at its ceiling, held {} samples after {frames} frames",
+            session.mic.len()
+        );
+
+        // And it is the newest audio that survived: the last frame is in there in full.
+        let _ = session.dispatch(ToServer::Audio(Frame::Mic(vec![7i16; MIC_FRAME_SAMPLES])));
+        let tail = &session.mic[session.mic.len() - MIC_FRAME_SAMPLES..];
+        assert!(tail.iter().all(|sample| *sample == 7), "the frame just sent must still be in the buffer");
+    }
+
+    /// The same cap for `auto` mode's confirmed utterance. This drives the buffer the detector fills
+    /// directly: the session's listening detector is the real one, and no amount of zeros opens it.
+    #[test]
+    fn an_auto_utterance_that_never_ends_is_capped_too() {
+        let (mut session, _rx, _) = login_session(Config::default(), "unused", Vec::new());
+        session.heard = true; // as if the detector had confirmed an onset and never confirmed an end
+        let frames = UTTERANCE_MAX_SAMPLES / MIC_FRAME_SAMPLES + 4;
+        for _ in 0..frames {
+            push_utterance(&mut session.utterance, &vec![0i16; MIC_FRAME_SAMPLES], UTTERANCE_MAX_SAMPLES);
+        }
+        assert_eq!(session.utterance.len(), UTTERANCE_MAX_SAMPLES);
+
+        // The helper itself, which is the rule both callers share: at most `max`, newest kept.
+        let mut buffer = vec![0i16; 4];
+        push_utterance(&mut buffer, &[1, 2, 3], 5);
+        assert_eq!(buffer, vec![0, 0, 1, 2, 3], "appending below the ceiling changes nothing");
+        push_utterance(&mut buffer, &[4, 5, 6], 5);
+        assert_eq!(buffer, vec![2, 3, 4, 5, 6], "and past it the oldest samples go");
+        let mut exact = vec![0i16; 5];
+        push_utterance(&mut exact, &[9], 5);
+        assert_eq!(exact, vec![0, 0, 0, 0, 9]);
     }
 
     /// Everything the session sent until the verdict (or until two seconds pass, which fails the test
