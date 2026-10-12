@@ -115,21 +115,40 @@ pub fn subscriber_at(
         .append(true)
         .open(log_path)
         .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    Ok(subscriber_with(file, verbose.then(io::stderr), secrets))
+}
+
+/// The two layers, over sinks the caller names: the file always, and the `--verbose` copy when there
+/// is one.
+///
+/// **This is the function that decides a sink is scrubbed**, which is why it takes the sinks as
+/// parameters rather than building one of them itself: `subscriber_at` only chooses the file and
+/// stderr and hands them here, and a test hands two buffers it can read back. A test that built its
+/// own `ScrubWriter` would prove the writer scrubs (true, and already covered) and say nothing at all
+/// about whether the layer is handed one — which is exactly the mutation the whole-branch review ran
+/// against the earlier version of the test below.
+fn subscriber_with<F, S>(file: F, verbose: Option<S>, secrets: Secrets) -> Box<dyn Subscriber + Send + Sync>
+where
+    F: Write + Send + Sync + 'static,
+    S: Write + Send + Sync + 'static,
+{
     let layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_writer(Mutex::new(ScrubWriter::new(file, secrets.clone())))
         .with_filter(LevelFilter::DEBUG);
     let base = tracing_subscriber::registry().with(layer);
-    if verbose {
-        // The identical writer over stderr: `--verbose` output is a log too, and it is the copy a
-        // user pastes into a bug report. `with_ansi(false)` is deliberately not repeated here —
-        // colour is what a terminal is for, and the scrubber is indifferent to an escape sequence.
-        let stderr = tracing_subscriber::fmt::layer()
-            .with_writer(Mutex::new(ScrubWriter::new(io::stderr(), secrets)))
-            .with_filter(LevelFilter::DEBUG);
-        Ok(Box::new(base.with(stderr)))
-    } else {
-        Ok(Box::new(base))
+    match verbose {
+        None => Box::new(base),
+        Some(sink) => {
+            // The identical writer over the second sink: `--verbose` output is a log too, and it is
+            // the copy a user pastes into a bug report. `with_ansi(false)` is deliberately not
+            // repeated here — colour is what a terminal is for, and the scrubber is indifferent to an
+            // escape sequence.
+            let stderr = tracing_subscriber::fmt::layer()
+                .with_writer(Mutex::new(ScrubWriter::new(sink, secrets)))
+                .with_filter(LevelFilter::DEBUG);
+            Box::new(base.with(stderr))
+        }
     }
 }
 
@@ -340,22 +359,45 @@ mod tests {
         assert!(!written.contains("Mic([3, 3, 3"), "a sample dump reached the log file: {written}");
     }
 
-    /// The same writer over an ordinary buffer, which is the shape stderr takes: the rules belong to
-    /// the writer and not to the file, so the `--verbose` copy is scrubbed exactly as the file is.
+    /// **V1, the vacuous test.** The rules belong to the writer, so the `--verbose` copy is scrubbed
+    /// exactly as the file is — but the earlier version of this test built its own `ScrubWriter` over
+    /// a `Vec<u8>` and never called the subscriber at all, so handing the `--verbose` layer a raw
+    /// `io::stderr` left **every** logging test green. That is the exact regression Task 1.9's ruling
+    /// exists to prevent, and it is why this test drives [`subscriber_with`] — the one function that
+    /// decides a sink is scrubbed — over two sinks it can read back afterwards.
     #[test]
-    fn a_second_sink_is_scrubbed_by_the_same_writer() {
+    fn both_sinks_of_the_real_subscriber_are_scrubbed() {
+        /// A sink this test keeps a handle on, so it can be handed to the subscriber and read after.
+        #[derive(Clone)]
+        struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedSink {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
         let secrets = Secrets::default();
         secrets.add(TOKEN);
-        let mut sink: Vec<u8> = Vec::new();
-        {
-            let mut writer = ScrubWriter::new(&mut sink, secrets);
-            writer.write_all(format!("GET /ws?token={TOKEN} HTTP/1.1\n").as_bytes()).unwrap();
-            writer.flush().unwrap();
+        let file = SharedSink(Arc::new(Mutex::new(Vec::new())));
+        let verbose = SharedSink(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = subscriber_with(file.clone(), Some(verbose.clone()), secrets);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(url = %format!("ws://127.0.0.1:7070/ws?token={TOKEN}"), "connecting");
+        });
+
+        for (which, sink) in [("file", &file), ("--verbose", &verbose)] {
+            let written = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+            assert!(written.contains("connecting"), "the {which} copy must still be a log: {written}");
+            assert!(!written.contains(TOKEN), "the token reached the {which} copy: {written}");
+            assert!(written.contains(REDACTED), "and it is replaced rather than dropped: {written}");
         }
-        let written = String::from_utf8(sink).unwrap();
-        assert!(!written.contains(TOKEN), "a sink is not the file, and the rule is not the file's: {written}");
-        assert!(written.contains(REDACTED), "{written}");
-        assert!(written.contains("GET /ws"), "and the line still says what happened: {written}");
     }
 
     /// The level cap, and why it is the rule rather than a setting: `tokio-tungstenite` logs the

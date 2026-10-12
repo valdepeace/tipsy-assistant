@@ -418,28 +418,38 @@ mod tests {
         }
     }
 
-    /// §4.3's security rule, as a test over bytes: a `ConfigView` carries the key *names* and nothing
-    /// else. The fixture's key values are the ones a store really would hold, so one leak is visible.
+    /// §4.3's rule for the view the server **sends**: it carries the key *names*, one per connector,
+    /// and no field of a row could hold a value.
+    ///
+    /// The earlier version of this test asserted that the JSON did not contain three strings that
+    /// occur in no input at all — a tautology no implementation of `view_of` could fail (review V2;
+    /// replacing them with the names that *are* in the fixture is what turned it red). The property
+    /// worth pinning is a property of the shape, so that is what is asserted here: the rows are
+    /// exactly the five fields the type has, `key_name` among them, and the names the configuration
+    /// holds are the ones that cross. It bites the day a row grows a field a value could ride in.
     #[test]
-    fn a_config_view_carries_no_key_value() {
-        let mut config = config();
-        // Names the screen really shows. The secret values live only here, in this test, and are not
-        // — and must never become — a real key: the rule is that no field may hold one.
-        config.providers.chat.key = "openrouter".into();
-        config.providers.speech.key = "elevenlabs".into();
-        config.realtime.key = "openai-realtime".into();
+    fn a_config_view_carries_key_names_and_no_field_a_value_could_ride_in() {
+        let config = config();
+        let json = serde_json::to_string(&view_of(&config)).unwrap();
 
-        let view = view_of(&config);
-        let json = serde_json::to_string(&view).unwrap();
-
-        for secret in ["sk-or-v1-9e2f", "el-secret-value", "rt-secret-value"] {
-            assert!(!json.contains(secret), "no key value may cross: {secret} in {json}");
+        // The positive half: the names the configuration holds are what crosses, and an empty name is
+        // a name too — the transcribe fixture has none, and it must not become a value.
+        for name in ["google", "elevenlabs", "openai-realtime", ""] {
+            assert!(json.contains(&format!(r#""key_name":"{name}""#)), "`{name}` must cross as a name: {json}");
         }
-        // …and the names are exactly what did cross, so the loop above cannot pass because the field
-        // is missing altogether.
-        assert!(json.contains(r#""key_name":"openrouter""#), "{json}");
-        assert!(json.contains(r#""key_name":"elevenlabs""#), "{json}");
-        assert!(json.contains(r#""key_name":"openai-realtime""#), "{json}");
+
+        // The negative half, as a property of the shape: a value could only ride in a field, and every
+        // field of every row is named here. `key_name` holds whatever the configuration's `key` holds,
+        // so the guard against a value being *in* the configuration is the file's own convention plus
+        // `Secrets` in `logging` — not a needle check over this fixture.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for row in value["providers"].as_array().expect("the rows are a list") {
+            assert_eq!(
+                sorted_keys(row),
+                ["base_url", "capability", "key_name", "kind", "model"],
+                "a provider row's fields are the whole shape of what a client may be told: {row}"
+            );
+        }
     }
 
     /// §4.3 and §13.6 as a property of the message a client sends: the view inside
