@@ -155,11 +155,47 @@ pub struct Outbox {
     socket: Rc<RefCell<Option<web_sys::WebSocket>>>,
     /// The schedule and the two notices.
     connection: Rc<RefCell<Connection>>,
+    /// The user asked to quit. Set by [`Outbox::close`] and read by the reconnect loop, which is the
+    /// only thing that can end the run with a socket still trying to come back.
+    quit: Rc<std::cell::Cell<bool>>,
 }
 
 impl Outbox {
     fn new() -> Self {
-        Self { socket: Rc::new(RefCell::new(None)), connection: Rc::new(RefCell::new(Connection::new())) }
+        Self {
+            socket: Rc::new(RefCell::new(None)),
+            connection: Rc::new(RefCell::new(Connection::new())),
+            quit: Rc::new(std::cell::Cell::new(false)),
+        }
+    }
+
+    /// Closes the socket for good: the user quit, so nothing reconnects and nothing may be sent again.
+    ///
+    /// **This is Task 3.5's one addition to this file, and it exists because the socket's cell is
+    /// private.** Task 3.5's `Shared` wants `UiAction::Quit` to close the connection, and the plan's
+    /// own sketch gave that struct a `web_sys::WebSocket` field to do it with — a field no caller can
+    /// build, because `spawn_connection` keeps the socket in an `Outbox` and a clone shares it across
+    /// a reconnect. Closing through the handle that owns the cell is the only version of that which
+    /// compiles.
+    ///
+    /// The flag matters more than the `close()`: without it the loop below would see the close as one
+    /// more outage, say `web_offline` and dial again on the backoff schedule, for ever. A socket closed
+    /// while still `CONNECTING` may never fire `close` at all (MDN: the connection is failed rather
+    /// than closed), and that is harmless here — the quit flag is already set, so the attempt that
+    /// resolves next still ends the loop.
+    pub fn close(&self) {
+        self.quit.set(true);
+        if let Some(ws) = self.socket.borrow().as_ref() {
+            // The result is not acted on: a socket that is already closing or closed refuses this,
+            // and the flag above is what makes the outcome the same either way.
+            let _ = ws.close();
+        }
+    }
+
+    /// Whether the user asked to quit. Exposed for the render loop, which draws nothing more once it
+    /// is true, and for the tests.
+    pub fn is_quitting(&self) -> bool {
+        self.quit.get()
     }
 
     /// Whether a socket is open right now. `false` while one is still connecting, which is why `send`
@@ -260,6 +296,13 @@ pub fn spawn_connection(
                 Err(error) => {
                     web_sys::console::warn_1(&JsValue::from_str(&format!("tipsy-web: {}", error_text(&error))));
                 }
+            }
+            // The user quit: the run is over, and this is what stops the loop from dialling again on
+            // the backoff schedule. It is asked *before* `closed()`, so a deliberate quit is not
+            // counted as one more failed attempt and says nothing — a `web_offline` notice over a
+            // quit the user asked for would be a lie.
+            if wiring.quit.get() {
+                return;
             }
             let (delay, say_offline) = wiring.connection.borrow_mut().closed();
             if say_offline {
@@ -518,5 +561,20 @@ mod tests {
             Err(WireError::ServerOnly),
             "the hub's own message is refused by name, which is not the same as a closed socket"
         );
+    }
+
+    /// **The quit is a flag before it is a `close()`**, and that half is testable here: a clone sees
+    /// the flag its sibling set, because it is the same `Cell` through the same `Rc` — which is also
+    /// what makes a `Shared` held across the whole run able to end the socket the loop owns. The
+    /// `close()` call itself needs a socket, so it is the browser half; the flag is the half that
+    /// decides whether the loop dials again, and it is this test's.
+    #[test]
+    fn quitting_is_one_flag_that_every_clone_of_the_outbox_sees() {
+        let outbox = Outbox::new();
+        let handle = outbox.clone();
+        assert!(!outbox.is_quitting(), "a fresh client has not quit");
+        assert!(!handle.is_quitting(), "and neither has a clone of it");
+        handle.close();
+        assert!(outbox.is_quitting() && handle.is_quitting(), "one quit, seen by every handle to the socket");
     }
 }
