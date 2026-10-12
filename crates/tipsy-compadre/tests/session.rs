@@ -444,7 +444,19 @@ async fn welcome_then_greeting() {
             assert_eq!(profile.id, "compae");
             assert_eq!(ui_language, UiLanguage::Es);
             assert_eq!(listening_mode, config.listening.mode);
-            assert!(!web_bundle);
+            // **`Welcome.web_bundle` is `assets::web_bundle()`'s answer, and this assertion used to
+            // pin the absence of the client page instead.** It read `assert!(!web_bundle)`, which was
+            // true only while `web/client/index.html` did not exist; Task 3.2 landed that page, and
+            // the debug embed reads the folder from disk, so the flag flipped for every `cargo test`
+            // in this tree and this test went red on the phase's own branch. The wiring is asserted
+            // first, and then the case this tree is in — so neither half can pass by the other being
+            // wrong in the same way.
+            assert_eq!(
+                web_bundle,
+                tipsy_compadre::server::assets::web_bundle(),
+                "the session reports the asset layer's own answer and may not invent one"
+            );
+            assert!(web_bundle, "Task 3.2's client page is committed, so this build carries the bundle");
         }
         other => panic!("the first message must be Welcome, got {other:?}"),
     }

@@ -1,0 +1,34 @@
+[package]
+name = "tipsy-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The browser client: Ratzilla backend, web-sys WebSocket, browser audio"
+
+# `cdylib` is the artifact wasm-bindgen processes; `rlib` is what the host test binary links.
+# Both are needed, and the workspace has no other crate-type (codebase-recon.md §1.1, §11.2).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tipsy-protocol.workspace = true
+tipsy-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Pinned as Task 3.1's verdict recorded them: `=0.3.1` because a bump to ratatui 0.31 while the
+# workspace stays on 0.30 would silently produce two `Frame` types (ratzilla-and-wasm-audio.md:359).
+# The other four are the versions `Cargo.lock` already held when this crate was added, which is why
+# they introduce no new crate resolution (web-transport-and-terminal.md, ratzilla-and-wasm-audio.md).
+ratzilla = "=0.3.1"
+wasm-bindgen = "0.2.129"
+js-sys = "0.3.106"
+wasm-bindgen-futures = "0.4.79"
+
+[dependencies.web-sys]
+version = "0.3.106"
+features = [
+  # The socket and the page's own location.
+  "Window", "Location", "UrlSearchParams", "Document", "Element", "HtmlElement", "Node", "console",
+  "WebSocket", "BinaryType", "MessageEvent",
+]

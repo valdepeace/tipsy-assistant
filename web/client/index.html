@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tipsy-compadre</title>
+    <style>
+      /* No chrome over the terminal, on purpose: the canvas backends put their canvas at (0, 0), so a
+         fixed header bar would cover the HUD's own first row — which is the header with the gear and
+         the mode indicator (`ratzilla-spike-verdict.md` §5.4 point 3). */
+      html, body { margin: 0; height: 100%; background: #001014; }
+      pre, canvas { font-family: Consolas, "Cascadia Mono", "Segoe UI Symbol", monospace; font-size: 16px; }
+    </style>
+  </head>
+  <body>
+    <script type="module">
+      // The bundle is served by this server's own embed, so the path is the absolute one
+      // `crates/tipsy-compadre/src/server/assets.rs` serves: `web/dist/…` under the embedded `web/`
+      // is `/assets/dist/…`. A relative `./tipsy_web.js` would resolve to `/tipsy_web.js`, a route
+      // this router does not have. `cargo run -p xtask -- dist` (Task 3.6) writes the file.
+      import init from "/assets/dist/tipsy_web.js";
+      // `?token=…` is where a token reaches this page (spec §9.2) and `start()` reads it off
+      // `location`; it is never put in the socket's URL.
+      init().catch((error) => console.error("tipsy-web: init failed", error));
+    </script>
+  </body>
+</html>
