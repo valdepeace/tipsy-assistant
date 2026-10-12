@@ -30,13 +30,24 @@
 //! **Which gate is whose, because there are two and only one of them is this file's.** This file's
 //! gate is the *capability and gesture* gate: the page finds out whether it can record at all before
 //! it offers to, and the one click that opens the capture is the user gesture both `getUserMedia` and
-//! the `AudioContext` need. The **login door** — "nothing reaches the provider until the local
-//! detector confirms speech", which is the gate the client inherits from the login screen — is
-//! `login_door.rs`'s: `Door::sends_frames` reads `LoginState { voice, open }`, and [`drain_capture`]
-//! takes the door and calls `Outbox::send` behind it and behind nothing else. **The port handler
-//! sends nothing**: it downmixes, resamples, assembles and appends to [`Capture`]'s queue, and the one
-//! function that may reach the socket is [`drain_capture`], called once per frame. There is one send
-//! site, and the door's predicate is what guards it.
+//! the `AudioContext` need. The **login door** — the gate the client inherits from the login screen —
+//! is `login_door.rs`'s: `Door::sends_frames` reads `LoginState { voice, open }` while a screen is up
+//! and the HUD's own `mic_open` while none is, and [`drain_capture`] takes the door and calls
+//! `Outbox::send` behind it and behind nothing else. **The port handler sends nothing**: it downmixes,
+//! resamples, assembles and appends to [`Capture`]'s queue, and the one function that may reach the
+//! socket is [`drain_capture`], called once per frame. There is one send site, and the door's
+//! predicate is what guards it.
+//!
+//! **What the door is *not* on this client, said plainly because the phase's own phrase got it wrong.**
+//! The login spec's promise to the provider is "nothing reaches the provider until the local detector
+//! confirms speech", and **this crate has no detector at all**: every 20 ms frame the page captures
+//! while its capture is open is uploaded to `/ws`, silence and room tone included, exactly as
+//! push-to-talk uploads them. What keeps the silence away from the provider is the **server's**
+//! `login_vad` (`crates/tipsy-compadre/src/session.rs:935-962`), which runs in front of the transcriber
+//! on the login capture the way `auto` mode runs it. The browser's half of the promise is narrower and
+//! is what [`drain_capture`] enforces: no frame leaves the page while no capture is open, and a frame
+//! the door refuses is dropped rather than kept. A later task that wants the browser to filter its own
+//! uploads has to bring a detector with it.
 //!
 //! **What only a browser can check, named rather than implied.** Whether `getUserMedia` is reachable
 //! on this origin, whether the worklet module loads, whether the context really runs at the rate it
@@ -49,7 +60,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use tipsy_protocol::{Frame, ToServer};
+use tipsy_protocol::{Command, Frame, ToServer};
+use tipsy_ui::{LoginLine, UiState};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
@@ -298,13 +310,71 @@ pub fn rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
-/// The loudness one frame shows in the HUD, from its own samples.
+/// The loudness one frame shows in the HUD, from its own samples and **before the configured gain**.
 ///
 /// The native client's `state.push_mic_level(rms(&i16_to_f32(&samples)) * self.mic_gain)`
-/// (`client.rs:44`) without the gain: `[listening] mic_gain` arrives with the configuration over the
-/// wire, and applying it is the HUD glue's job, not this module's.
+/// (`crates/tipsy-compadre/src/client/mic.rs:44`): this is the `rms` half of that expression, and the
+/// gain is [`MicGain`]'s, applied by [`drain_capture`]. The split is what lets the unscaled twin be
+/// pinned against `pcm.rs`'s own conversion in a test with no configuration anywhere near it.
 pub fn levels_from_samples(samples: &[i16]) -> f32 {
     rms(&i16_to_f32(samples))
+}
+
+/// `[listening] mic_gain`, as the configuration this client has been told spells it.
+///
+/// **Applied, and this is where a browser can get it.** The native client reads the number out of
+/// `config.toml` when it starts (`crates/tipsy-compadre/src/client.rs:186`) and multiplies every level
+/// by it (`client/mic.rs:44`); a browser has no file, so the only source is `Event::Config` — the
+/// answer to the `GetConfig` the configuration screen sends when it opens (`UiAction::OpenConfig`,
+/// spec §4.2's "Reading: `GetConfig` on open"). [`configured_gain`] reads it from that answer and the
+/// frame loop keeps it for the rest of the run, so a save from the screen applies the new gain the way
+/// the native client applies the file. **Before the screen has ever been opened the level is
+/// unscaled**, and that is named rather than implied: this page has not been told the configuration,
+/// and inventing the file's own default would be a number the server never sent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MicGain(f32);
+
+impl Default for MicGain {
+    /// The identity: what a client that has not been told a gain applies. `1.0` and not the file's
+    /// `12.0`, because the value has to come from the server or from nowhere.
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl MicGain {
+    /// The value the form's `mic_gain` row holds. Anything that is not a finite positive number is the
+    /// identity: the row is text the user typed, the form is what validates it before it is saved
+    /// (`config_form.rs`'s `MIC_GAIN_MIN..MAX`), and a client that guessed would scale the level by
+    /// zero or by a `NaN` and draw nothing at all.
+    pub fn of(text: &str) -> Self {
+        Self(text.trim().parse::<f32>().ok().filter(|gain| gain.is_finite() && *gain > 0.0).unwrap_or(1.0))
+    }
+
+    /// The number itself, for a test and for anyone who ever has to draw it.
+    pub fn value(&self) -> f32 {
+        self.0
+    }
+
+    /// The native client's `* self.mic_gain`, in one place.
+    pub fn apply(&self, level: f32) -> f32 {
+        level * self.0
+    }
+}
+
+/// The gain the configuration this client has been given carries, or `None` when it has been told
+/// nothing.
+///
+/// **`filled() && !dirty` is the whole of the rule**, and it is what makes reading it once a frame
+/// honest: a *filled* form is the one the server's `Event::Config` produced
+/// (`UiState::show_config_form` marks it), so the placeholder the screen opens on — whose rows carry
+/// the form's own defaults — is never mistaken for an answer; and a *clean* form is the server's own
+/// values, so an edit the user has not saved is never applied. The native client reads the file at
+/// startup and applies a new gain when the file is written; this is that promise by the only route a
+/// browser has.
+pub fn configured_gain(state: &UiState) -> Option<MicGain> {
+    let form = state.config_form.as_ref()?;
+    (form.filled() && !form.dirty).then(|| MicGain::of(&form.listening.mic_gain))
 }
 
 /// What one turn of the render loop owes the socket and the oscilloscope.
@@ -336,12 +406,12 @@ pub fn drain_frames(queue: &mut VecDeque<Vec<i16>>, sending: bool) -> Drained {
     drained
 }
 
-/// The live capture: the context, the stream, the node, and the frames waiting for a frame.
+/// The live capture: the stream, the node, and the frames waiting for a frame.
 ///
-/// **The context is exposed because Task 3.4 plays the reply through this same one**: a second
-/// `AudioContext` would be a second clock and a second thing to resume, and "sample-rate converters
-/// are not supported" inside one context (`ratzilla-and-wasm-audio.md` §4.3) means the rate the reply
-/// is resampled to is this one's answer.
+/// **The context is held but is no longer the run's own clock**: the one `AudioContext` per run lives
+/// in the [`AudioSlot`] the user's press fills, whether or not this capture opened (the phase review's
+/// finding 4), and this is a handle on the same context — the graph the stream is plugged into cannot
+/// outlive it. The two fields that exist only for their lifetime say so.
 pub struct Capture {
     context: web_sys::AudioContext,
     /// The node the port belongs to, and the closure installed on that port. Neither is read again:
@@ -360,7 +430,8 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// The context this capture runs in — the same one Task 3.4's playback is scheduled on.
+    /// The context this capture runs in — the same one the run's playback is scheduled on, because
+    /// there is exactly one per press and a second would be a second clock.
     pub fn context(&self) -> &web_sys::AudioContext {
         &self.context
     }
@@ -370,6 +441,74 @@ impl Capture {
 /// loop that drains it. `None` until the user's press opens one, which is also the answer to "is a
 /// capture running".
 pub type CaptureSlot = Rc<RefCell<Option<Capture>>>;
+
+/// **The one `AudioContext` per run, and it is not the microphone's.** The user's press creates it
+/// (that gesture is what `resume()` needs) and the reply is scheduled on it, so **playback does not
+/// depend on the capture having succeeded** (the phase review's finding 4): a page whose
+/// `getUserMedia` was refused or whose device is busy still hears the greeting and every reply, and
+/// the microphone is simply one consumer of a context that exists either way. `None` is "the user has
+/// not pressed yet", which is also the only state in which a `Frame::Speech` has nowhere to go.
+pub type AudioSlot = Rc<RefCell<Option<web_sys::AudioContext>>>;
+
+/// Why the microphone will not work, once the page knows — the table value the gate showed, kept for
+/// the whole run.
+///
+/// **The fact has to outlive the press that learned it.** The probe runs when the page loads, before
+/// `Welcome` and therefore before any screen exists, and a capture can fail on a press that happens
+/// while no screen is up either; the login screen that opens afterwards must say `login_no_mic` and
+/// must not claim a `● rec` it does not have. `None` is "nothing has refused yet", which is also the
+/// state of a page whose microphone works.
+pub type MicFailure = Rc<RefCell<Option<&'static str>>>;
+
+/// The one place a refused microphone becomes words the user can read, and the reason the gate can go
+/// away.
+///
+/// **Spec §9's rule, on this client**: with a screen up the line is the screen's own (`login_no_mic`,
+/// "type it, that works too"), and with no screen it is the HUD's notice — the sink that was behind an
+/// opaque full-viewport gate before the fix wave, which is why the gate only leaves once this has
+/// been said. The screen's `voice` switch is turned **off**, which is a decision and not a detail:
+/// `voice = false` is the state in which `UiState`'s own key table makes `Tab` do nothing
+/// (`state.rs:414`), so the screen cannot raise a `LoginStart` for a device that will not open, and
+/// the `● rec` badge (`render_login.rs:212`) stays off. The native client instead retries the device
+/// every frame (`crates/tipsy-compadre/src/client/mic.rs:93-124`); a browser cannot — a second
+/// `getUserMedia` needs a second gesture, and the gate that had the first one is gone — so the honest
+/// answer is the typing-only screen the spec describes.
+pub fn record_no_microphone(state: &mut UiState, reason: &'static str) {
+    state.mic_open = false;
+    if state.login.is_none() {
+        state.notify(reason);
+    }
+    say_no_microphone_on_screen(state);
+}
+
+/// The screen's half of [`record_no_microphone`], for a screen that opens **after** the microphone
+/// refused: the fact is carried by [`MicFailure`] and read once a frame, so a client whose probe
+/// answered at load does not open a login screen claiming a capture it can never have.
+///
+/// It says nothing while no screen is up — there is no second notice to raise, and the HUD has
+/// already been told once — and it is idempotent, so the frame loop may call it every frame.
+pub fn carry_no_microphone(state: &mut UiState) {
+    say_no_microphone_on_screen(state);
+}
+
+/// The screen's line and its two switches, and nothing else: the HUD's notice is only for the moment
+/// the failure happens, because a screen that is up is where the user is looking.
+fn say_no_microphone_on_screen(state: &mut UiState) {
+    // `strings()` hands back a `&'static Strings`, so the borrow of `state` ends with this statement
+    // and the borrow below is free of it — the same pattern the native client's failure arm uses.
+    let no_mic = state.strings().login_no_mic;
+    let Some(login) = state.login.as_mut() else {
+        return;
+    };
+    login.voice = false;
+    login.open = false;
+    // The line says why once. A refusal, an utterance or a `Transcribing` that lands afterwards is
+    // what the user needs next, and `status_line` prefers `Failed` over all of them
+    // (`render_login.rs:237-248`) — so this writes over `Prompt` and nothing else.
+    if matches!(login.line, LoginLine::Prompt) {
+        login.line = LoginLine::Failed(no_mic.to_string());
+    }
+}
 
 /// How much of the live capture the widget's core pulses on, in frames.
 ///
@@ -386,14 +525,17 @@ pub const LOGIN_ENVELOPE_POINTS: usize = 12;
 /// for the whole frame, so a second `borrow_mut()` from inside it would panic.
 ///
 /// **The gate is the login door's predicate, and it is the only one.** `door.sends_frames(state)` is
-/// `LoginState { voice, open }` — the screen's own fields, read here and never cached — so a frame is
-/// refused whenever the door is shut: no screen yet, a `voice = false` screen, `Tab` off, the third
-/// refusal, a failed device, a pass, and the whole of the time after the door. **A refused frame is
-/// dropped, not kept**: keeping it would send it the moment the door opened and the server would
-/// transcribe a sentence said to a closed door as the user's answer (the login plan's review finding
-/// 1, on this client). Until Task 3.7 this boolean was `state.mic_open`, which the "press to start"
-/// click sets before `Welcome` even arrives — so a `voice = false` page uploaded room tone to `/ws`
-/// from the press on. That is the window this predicate closes.
+/// the screen's own `voice && open` while a screen is up, and the HUD's `state.mic_open` while none is
+/// (`login_door.rs`'s own doc says why both cases are the shared state's) — so a frame is refused
+/// whenever the door is shut: a `voice = false` screen, `Tab` off, the third refusal, a failed device,
+/// a pass, and the moments before `Welcome` with the HUD's switch off. **A refused frame is dropped,
+/// not kept**: keeping it would send it the moment the door opened and the server would transcribe a
+/// sentence said to a closed door as the user's answer (the login plan's review finding 1, on this
+/// client).
+///
+/// **The gain is applied here and not in [`levels_from_samples`]**, which is where the native client's
+/// `* self.mic_gain` lands too: `[listening] mic_gain` is the configuration's promise and the
+/// oscilloscope is what shows it (the phase review's finding 7).
 ///
 /// A send that fails because the socket is down is dropped too: the session has no use for a
 /// second-old word, and a queue here would be a delay disguised as reliability.
@@ -402,6 +544,7 @@ pub fn drain_capture(
     door: &crate::login_door::Door,
     state: &mut tipsy_ui::UiState,
     outbox: &Outbox,
+    gain: &MicGain,
 ) {
     // Read once, before the queue is emptied: the door's answer is a function of the state's login
     // fields, which nothing below touches.
@@ -409,7 +552,7 @@ pub fn drain_capture(
     let capturing = door.capture_open(state);
     let drained = drain_frames(&mut capture.frames.borrow_mut(), sending);
     for level in drained.levels {
-        state.push_mic_level(level);
+        state.push_mic_level(gain.apply(level));
     }
     for samples in drained.send {
         let _ = outbox.send(ToServer::Audio(Frame::Mic(samples)));
@@ -459,7 +602,8 @@ fn gate_elements(document: &web_sys::Document, strings: &tipsy_ui::Strings) -> O
     Some(Gate { button, reason })
 }
 
-/// The gate: capability first, and the click is the gesture everything audio needs.
+/// The gate: capability first, the click is the gesture everything audio needs, and **every path out
+/// of here takes the gate off the page**.
 ///
 /// The v1 spec requires the press — "In the browser, audio capture requires a user gesture; the web
 /// client shows a 'press to start' screen until then" (`2026-10-10-tipsy-compadre-design.md:193-194`)
@@ -468,18 +612,42 @@ fn gate_elements(document: &web_sys::Document, strings: &tipsy_ui::Strings) -> O
 /// silent client that looks started (`ratzilla-and-wasm-audio.md` §5.2; the prior art's shipped page
 /// does exactly this, `pet/src/ui/pet.ts:173`, quoted at `codewhale-audio-prior-art.md` §3).
 ///
-/// **The probe runs first and the answer is data.** When it says the microphone cannot work, the
-/// affordance stays on screen with the button **disabled**, the reason on the line and **no click
-/// handler at all** — the prior art's `ok: false` + `reason` shape. When it says it can, the button
-/// becomes the gesture. `Prompt` and `Granted` both leave the gate up, because the button is not only
-/// the permission prompt: it is the gesture the context needs, so a page whose permission is already
-/// granted still gets its click.
+/// **The probe runs first and the answer is data.** When it says the microphone can work, the button
+/// becomes the gesture, and `Prompt` and `Granted` both leave the gate up — the button is not only the
+/// permission prompt, so a page whose permission is already granted still gets its click.
 ///
-/// A failure after the click is answered as data too, with the same shape: the reason is a table
-/// value, the notice says it, and the gate stays up so the user can try again after fixing the
-/// device. The capture is stored in `slot` before the gate goes, so the very next frame the render
-/// loop draws already sees it.
-pub fn press_to_start(state: Rc<RefCell<tipsy_ui::UiState>>, slot: CaptureSlot) {
+/// **When it says the microphone cannot work, the gate becomes the way past itself** (the phase
+/// review's Blocker 2). The reason goes on the gate's own line — the one place in front of the user,
+/// because this overlay is opaque and full-viewport — and the button stays **pressable**: the press
+/// creates and resumes the audio context (the gesture finding 4 needs), records the failure so the
+/// login screen can say `login_no_mic` and the HUD gets its notice, and takes the gate down. What it
+/// no longer does is leave a **disabled** button over the page: that is a HUD, a login screen and a
+/// message nobody can reach, and the v1 spec's §12 row ("listening disabled with a warning; typing
+/// still works") is exactly what the user could not do.
+///
+/// **A failure after the click is the same shape**: the context has already been created and kept
+/// (playback outlives a refused microphone), the reason is recorded for the screen and the HUD, and
+/// the gate comes down. The capture is stored in `slot` before the gate goes, so the very next frame
+/// the render loop draws already sees it.
+///
+/// **And the server is told the microphone is open, because the press is the user's own yes.** The
+/// press sets `state.mic_open` — the HUD's switch, which is the frame path while no screen is up (the
+/// phase review's Blocker 1) — and a switch the server has not been told about is a microphone whose
+/// frames it drops: the session ignores `Frame::Mic` while `!listening`
+/// (`crates/tipsy-compadre/src/session.rs:534-548`), and `listening` is what `Command::ListenStart`
+/// sets. So the press does what `Tab` does when it sets the same flag — the key table raises
+/// `ListenStart` with it (`crates/tipsy-ui/src/state.rs:698-705`) — and the browser's push-to-talk is
+/// then the native one: the microphone is open, you speak, and `Tab` closes it and sends what it
+/// heard. Without this the page uploaded into a void and the user's first `Tab` closed a capture the
+/// server had never opened. A socket that is not open yet loses it, like every other command
+/// (`Outbox::send`'s `NotOpen`), and the console says so when the failure is anything else.
+pub fn press_to_start(
+    state: Rc<RefCell<tipsy_ui::UiState>>,
+    slot: CaptureSlot,
+    audio: AudioSlot,
+    failure: MicFailure,
+    outbox: Outbox,
+) {
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return;
     };
@@ -488,64 +656,138 @@ pub fn press_to_start(state: Rc<RefCell<tipsy_ui::UiState>>, slot: CaptureSlot) 
     };
 
     let state_probe = Rc::clone(&state);
-    let state_click = Rc::clone(&state);
-    let document_click = document.clone();
-    let slot_click = Rc::clone(&slot);
     spawn_local(async move {
+        // `state`, `document`, `slot`, `audio` and `failure` are this block's own. Each click handler
+        // takes a clone of what it needs: `Closure::wrap`'s box is `FnMut` and may run again, so it
+        // cannot move out of what the block still owns.
         let availability = probe_availability(&state_probe).await;
-        let Some(reason) = availability.reason else {
-            let on_click = Closure::wrap(Box::new(move || {
-                let state = Rc::clone(&state_click);
-                let document = document_click.clone();
-                let slot = Rc::clone(&slot_click);
-                spawn_local(async move {
-                    match open_capture().await {
-                        Ok(capture) => {
-                            let granted = {
-                                let mut state = state.borrow_mut();
-                                // The press is the user's own yes. `mic_open` is the HUD's microphone
-                                // switch — what the `VOZ` panel reads — and a click on "press to start"
-                                // is the same statement `Tab` makes, made with the pointer. Without it
-                                // the HUD's red oscilloscope would never come on, which is why the
-                                // plan's own Step 8 check ("the HUD's red oscilloscope moves when you
-                                // speak") could not pass as written. **It is not the frame gate**: since
-                                // Task 3.7 that is `login_door::Door::sends_frames`, which reads the
-                                // login screen's own `voice` and `open` and knows nothing about this
-                                // flag — see `drain_capture`'s doc for why the two are not the same
-                                // question.
-                                state.mic_open = true;
-                                state.strings().mic_granted
-                            };
-                            *slot.borrow_mut() = Some(capture);
-                            if let Some(gate) = document.get_element_by_id(GATE_ID) {
-                                gate.remove();
+        match availability.reason {
+            None => {
+                let on_click = Closure::wrap(Box::new(move || {
+                    let state = Rc::clone(&state);
+                    let document = document.clone();
+                    let slot = Rc::clone(&slot);
+                    let audio = Rc::clone(&audio);
+                    let failure = Rc::clone(&failure);
+                    let outbox = outbox.clone();
+                    spawn_local(async move {
+                        // **The context first, on its own** (finding 4): it is playback's clock, and a
+                        // `getUserMedia` that is refused below leaves a page that still hears the
+                        // greeting and every reply — the microphone is one consumer, not the clock.
+                        let context = match open_context().await {
+                            Ok(context) => context,
+                            Err(name) => {
+                                report_no_microphone(&state, &failure, &name, &document);
+                                return;
                             }
-                            state.borrow_mut().notify(granted);
+                        };
+                        *audio.borrow_mut() = Some(context.clone());
+                        match open_capture(&context).await {
+                            Ok(capture) => {
+                                let granted = {
+                                    let mut state = state.borrow_mut();
+                                    // The press is the user's own yes. `mic_open` is the HUD's
+                                    // microphone switch — what the `VOZ` panel reads — and a click on
+                                    // "press to start" is the same statement `Tab` makes, made with the
+                                    // pointer; since the review's Blocker 1 it is also what lets the
+                                    // browser's push-to-talk reach `/ws` again once no screen is up.
+                                    // Without it the HUD's red oscilloscope would never come on, which
+                                    // is why the plan's own Step 8 check ("the HUD's red oscilloscope
+                                    // moves when you speak") could not pass as written.
+                                    state.mic_open = true;
+                                    state.strings().mic_granted
+                                };
+                                *slot.borrow_mut() = Some(capture);
+                                take_gate_down(&document);
+                                state.borrow_mut().notify(granted);
+                                // The other half of the same statement: the switch the server has to
+                                // hear about, or every frame the gate just made possible is dropped
+                                // (`session.rs:534-548`). `NotOpen` is the ordinary case on a page
+                                // whose socket is still connecting, and the only refusal worth a line
+                                // is the other one.
+                                if let Err(error) = outbox.send(ToServer::Command(Command::ListenStart))
+                                    && !matches!(error, crate::wire::WireError::NotOpen)
+                                {
+                                    web_sys::console::warn_1(&JsValue::from_str(&format!(
+                                        "tipsy-web: {error}"
+                                    )));
+                                }
+                            }
+                            Err(name) => report_no_microphone(&state, &failure, &name, &document),
                         }
-                        // The failure arrives as data too, in the same shape the probe returned. The
-                        // gate stays up, so a device that was busy and is now free can be retried
-                        // without a reload.
-                        Err(name) => {
-                            // `strings()` hands back a `&'static Strings`, so the borrow of `state`
-                            // ends with this statement and the `borrow_mut` below is free of it.
-                            let strings = state.borrow().strings();
-                            let availability = MicAvailability::from_rejection(&name, strings);
-                            let text = availability.reason.unwrap_or(strings.mic_failed);
-                            state.borrow_mut().notify(text);
+                    });
+                }) as Box<dyn FnMut()>);
+                gate.button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+                // The button owns this handler for as long as the page lives: a `Closure` dropped at
+                // the end of this block would be freed memory the browser would still call on a click.
+                on_click.forget();
+            }
+            // Not available. The reason is the affordance's own line from here on — one element, so
+            // the hint and the reason can never be on screen together — and the press is not "start
+            // the microphone" but "start the page without one": the context, the fact, and the way
+            // past the gate.
+            Some(reason) => {
+                gate.reason.set_text_content(Some(reason));
+                let on_click = Closure::wrap(Box::new(move || {
+                    let state = Rc::clone(&state);
+                    let document = document.clone();
+                    let audio = Rc::clone(&audio);
+                    let failure = Rc::clone(&failure);
+                    spawn_local(async move {
+                        // Best effort, and deliberately not fatal: the press is the gesture the
+                        // context needs, and a page with no context is a page with no audio and a HUD
+                        // that still types. The console is where a context that will not start is
+                        // readable.
+                        match open_context().await {
+                            Ok(context) => *audio.borrow_mut() = Some(context),
+                            Err(name) => web_sys::console::warn_1(&JsValue::from_str(&format!(
+                                "tipsy-web: no audio context ({name})"
+                            ))),
                         }
-                    }
-                });
-            }) as Box<dyn FnMut()>);
-            gate.button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
-            // The button owns this handler for as long as the page lives: a `Closure` dropped at the
-            // end of this block would be freed memory the browser would still call on a click.
-            on_click.forget();
-            return;
-        };
-        // Not available: the affordance stays on screen, disabled, with the reason as its line.
-        gate.button.set_disabled(true);
-        gate.reason.set_text_content(Some(reason));
+                        *failure.borrow_mut() = Some(reason);
+                        record_no_microphone(&mut state.borrow_mut(), reason);
+                        take_gate_down(&document);
+                    });
+                }) as Box<dyn FnMut()>);
+                gate.button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+                on_click.forget();
+            }
+        }
     });
+}
+
+/// Takes the gate off the page, and it is the **only** way out of it: the success, the failed press
+/// and the press that continues without a microphone all call this and nothing else.
+///
+/// The overlay is `#tipsy-gate { position: fixed; inset: 0; background: #000 }`
+/// (`web/client/index.html:43-46`, the page's own comment calls it the one positioned element), so a
+/// gate that stayed up is a HUD, a login screen and a failure message that nobody can see. The phase
+/// review's Blocker 2: until this helper existed, the successful capture was the only path that took
+/// it down, the probe's refusal left a disabled button over the page, and a refused press wrote its
+/// reason into a notice behind the overlay.
+fn take_gate_down(document: &web_sys::Document) {
+    if let Some(gate) = document.get_element_by_id(GATE_ID) {
+        gate.remove();
+    }
+}
+
+/// A press that could not open the microphone, in the three places that have to know: the fact for the
+/// run (so a login screen that opens later says its piece), the state the user is looking at, and the
+/// gate, which goes. The exception's own name goes to the console, because a table value is what the
+/// user needs and the name is what a reader needs.
+fn report_no_microphone(
+    state: &Rc<RefCell<tipsy_ui::UiState>>,
+    failure: &MicFailure,
+    name: &str,
+    document: &web_sys::Document,
+) {
+    web_sys::console::warn_1(&JsValue::from_str(&format!("tipsy-web: microphone unavailable ({name})")));
+    // `strings()` hands back a `&'static Strings`, so the borrow of `state` ends with this statement.
+    let strings = state.borrow().strings();
+    let reason = MicAvailability::from_rejection(name, strings).reason.unwrap_or(strings.mic_failed);
+    *failure.borrow_mut() = Some(reason);
+    record_no_microphone(&mut state.borrow_mut(), reason);
+    take_gate_down(document);
 }
 
 /// Reads the two things the capability answer is made of: whether `navigator.mediaDevices` exists at
@@ -611,27 +853,36 @@ fn rejection_name(value: &JsValue) -> String {
         .unwrap_or_else(|| crate::socket::error_text(value))
 }
 
-/// Opens the capture, **inside the click handler**, because both halves of it need the gesture.
+/// The one `AudioContext` per run, created and resumed **inside the click handler**, because the
+/// gesture is what `resume()` needs.
 ///
-/// Returns the exception's `name` on failure, which is exactly what [`MicAvailability::from_rejection`]
-/// consumes, so a failure and a refused probe describe themselves the same way.
-async fn open_capture() -> Result<Capture, String> {
-    // 1. The context, first: `AudioContextOptions.sampleRate` is a *request*, and a browser that
-    //    refuses the rate is not a browser without audio — the resampler does the work either way.
-    //    **`set_sample_rate` and not the plan's `sample_rate`**: the plan's Step 4 table quotes five
-    //    builder methods that web-sys 0.3.106 has since deprecated in favour of the `set_*` form, and
-    //    a deprecated call is a `deprecated` warning and therefore a new clippy finding.
+/// It is its own function since the phase review's finding 4, and that is the whole point: the press
+/// creates it whether or not a microphone follows, so the reply has a clock even on a page whose
+/// `getUserMedia` is refused. `AudioContextOptions.sampleRate` is a *request* — a browser that refuses
+/// the rate is not a browser without audio, because the resampler does the work either way — and
+/// `set_sample_rate` rather than the plan's `sample_rate`, because the deprecated builder is a new
+/// clippy finding (web-sys 0.3.106).
+async fn open_context() -> Result<web_sys::AudioContext, String> {
     let options = web_sys::AudioContextOptions::new();
     options.set_sample_rate(MIC_RATE as f32);
     let context = web_sys::AudioContext::new_with_context_options(&options)
         .or_else(|_| web_sys::AudioContext::new())
         .map_err(|error| rejection_name(&error))?;
-    // A context created outside a gesture starts suspended; awaiting the resume is what makes the
-    // capture actually run.
+    // A context created outside a gesture starts suspended; awaiting the resume is what makes it run.
     let resumed = context.resume().map_err(|error| rejection_name(&error))?;
     JsFuture::from(resumed).await.map_err(|error| rejection_name(&error))?;
+    Ok(context)
+}
 
-    // 2. The stream. Mono, and the browser's own processing left on. **The 16 kHz hint cannot travel
+/// Opens the capture on a context the press has already made, **inside the click handler**, because
+/// `getUserMedia` needs the gesture too.
+///
+/// Returns the exception's `name` on failure, which is exactly what [`MicAvailability::from_rejection`]
+/// consumes, so a failure and a refused probe describe themselves the same way. The context is a
+/// parameter rather than a local since the phase review's finding 4: it belongs to the page, not to
+/// the microphone, and a capture that fails must not take the reply's clock down with it.
+async fn open_capture(context: &web_sys::AudioContext) -> Result<Capture, String> {
+    // 1. The stream. Mono, and the browser's own processing left on. **The 16 kHz hint cannot travel
     //    in these constraints**: `web-sys 0.3.106`'s `MediaTrackConstraints` has no `sample_rate`
     //    accessor at all, which matches MDN's "not Baseline" flag on `sampleRate` — so the rate is
     //    settled by the context and the resampler instead.
@@ -647,23 +898,23 @@ async fn open_capture() -> Result<Capture, String> {
     let stream: web_sys::MediaStream =
         JsFuture::from(promise).await.map_err(|error| rejection_name(&error))?.unchecked_into();
 
-    // 3. The worklet module, as a real file at WORKLET_URL rather than a `Blob` URL: the research
+    // 2. The worklet module, as a real file at WORKLET_URL rather than a `Blob` URL: the research
     //    note could not verify that `addModule` accepts one (`ratzilla-and-wasm-audio.md` §4.4) and
     //    this plan does not bet on an unverified API.
     let worklet = context.audio_worklet().map_err(|error| rejection_name(&error))?;
     let module = worklet.add_module(WORKLET_URL).map_err(|error| rejection_name(&error))?;
     JsFuture::from(module).await.map_err(|error| rejection_name(&error))?;
 
-    // 4. The node. Zero outputs: nothing is played back into the microphone's own graph.
+    // 3. The node. Zero outputs: nothing is played back into the microphone's own graph.
     let node_options = web_sys::AudioWorkletNodeOptions::new();
     node_options.set_number_of_inputs(1);
     node_options.set_number_of_outputs(0);
-    let node = web_sys::AudioWorkletNode::new_with_options(&context, "mic-frames", &node_options)
+    let node = web_sys::AudioWorkletNode::new_with_options(context, "mic-frames", &node_options)
         .map_err(|error| rejection_name(&error))?;
     let source = context.create_media_stream_source(&stream).map_err(|error| rejection_name(&error))?;
     source.connect_with_audio_node(&node).map_err(|error| rejection_name(&error))?;
 
-    // 5. The port. **The handler appends and never sends**: the queue is drained by the render loop,
+    // 4. The port. **The handler appends and never sends**: the queue is drained by the render loop,
     //    which is the one place the state may be borrowed and the one place a socket call belongs.
     let frames: Rc<RefCell<VecDeque<Vec<i16>>>> = Rc::new(RefCell::new(VecDeque::new()));
     // Read back, never assumed: this is what the context actually runs at.
@@ -680,7 +931,7 @@ async fn open_capture() -> Result<Capture, String> {
     }) as Box<dyn FnMut(web_sys::MessageEvent)>);
     port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
-    Ok(Capture { context, node, on_message, stream, frames })
+    Ok(Capture { context: context.clone(), node, on_message, stream, frames })
 }
 
 /// The channels the worklet posted, as plain vectors.
@@ -1010,5 +1261,155 @@ mod tests {
         assert_eq!(round_tripped[320], -166);
         assert_eq!(round_tripped[639], 428);
         assert_eq!(round_tripped[959], -538);
+    }
+
+    /// **`[listening] mic_gain`, applied** (the phase review's finding 7), with the two rules that
+    /// make reading it off the wire safe: a form the server has not answered is not an answer, and an
+    /// edit the user has not saved is not applied. `1.0` before that, because the number has to come
+    /// from the server or from nowhere — a browser has no `config.toml`.
+    #[test]
+    fn the_configured_gain_is_applied_and_only_from_a_filled_clean_form() {
+        // The identity until this client has been told anything, and the native client's arithmetic.
+        assert_eq!(MicGain::default().value(), 1.0);
+        assert_eq!(MicGain::default().apply(0.25), 0.25);
+        assert_eq!(MicGain::of("9.5").apply(0.25), 2.375);
+        assert_eq!(MicGain::of(" 12 ").value(), 12.0, "the row's own text, trimmed");
+        // A row that is empty or nonsense is the identity rather than a zero or a `NaN`: the form
+        // validates what it saves, and this must not draw an oscilloscope at no amplitude.
+        for text in ["", "  ", "doce", "0", "-3", "NaN", "inf"] {
+            assert_eq!(MicGain::of(text).value(), 1.0, "{text:?} is not a gain");
+        }
+
+        let mut state = UiState::new();
+        assert_eq!(configured_gain(&state), None, "a closed screen carries no configuration");
+        // The gear's own path, as the frame loop sees it: the screen opens on the placeholder.
+        assert_eq!(state.on_key(tipsy_ui::KeyInput::F(9)), vec![tipsy_ui::UiAction::OpenConfig]);
+        assert!(state.config_form.is_some(), "the screen is up on the placeholder");
+        assert_eq!(configured_gain(&state), None, "and a placeholder is not an answer");
+
+        // The server's answer, which `show_config_form` is what marks filled.
+        let mut form = tipsy_ui::ConfigForm::default();
+        form.listening.mic_gain = "9.5".into();
+        state.show_config_form(form);
+        assert_eq!(configured_gain(&state), Some(MicGain::of("9.5")));
+
+        // An edit the user has not saved is not the configuration, which is what the form's own
+        // `dirty` flag is for.
+        {
+            let form = state.config_form.as_mut().expect("the screen is up");
+            form.listening.mic_gain = "31".into();
+            form.dirty = true;
+        }
+        assert_eq!(configured_gain(&state), None, "an unsaved edit is not applied");
+    }
+
+    /// **The refused microphone is said where the user is looking, and a screen that opens afterwards
+    /// says it too** (the phase review's Blocker 2). The gate is an opaque full-viewport overlay: before
+    /// the fix, the probe's refusal left a disabled button over the page and a failed press wrote its
+    /// reason into the HUD's notice *behind* that overlay, so the v1 spec's §12 row ("typing still
+    /// works") and login spec §9's own line were both unreachable.
+    #[test]
+    fn a_refused_microphone_is_said_on_the_screen_and_in_the_huds_notice() {
+        let es = tipsy_ui::strings(tipsy_protocol::UiLanguage::Es);
+
+        // No screen: the HUD's notice, which is on top then, and no microphone left claimed.
+        let mut state = UiState::new();
+        state.mic_open = true;
+        record_no_microphone(&mut state, es.mic_denied);
+        assert_eq!(state.notice.as_ref().map(|(text, _)| text.as_str()), Some(es.mic_denied));
+        assert!(!state.mic_open, "a device that did not open is not a microphone the HUD has");
+
+        // A screen is up: its own line, and never the HUD's notice — the veil is in front of that.
+        let mut state = UiState::new();
+        state.show_login(true);
+        state.login.as_mut().expect("the screen is up").open = true;
+        record_no_microphone(&mut state, es.mic_denied);
+        let screen = state.login.as_ref().expect("the screen is up");
+        assert_eq!(screen.line, tipsy_ui::LoginLine::Failed(es.login_no_mic.to_string()));
+        assert!(!screen.voice, "the switch is off, so the screen's `Tab` cannot claim a capture");
+        assert!(!screen.open, "and the `● rec` badge goes with it");
+        assert!(state.notice.is_none(), "a notice behind the veil is not where this belongs");
+
+        // The carried case: the probe answered at load, before `Welcome` and before any screen.
+        let mut state = UiState::new();
+        carry_no_microphone(&mut state);
+        assert!(state.login.is_none(), "there is nothing to say and no screen to say it on");
+        state.show_login(true);
+        assert!(state.login.as_ref().expect("the screen is up").voice, "the server's own switch");
+        carry_no_microphone(&mut state);
+        let screen = state.login.as_ref().expect("the screen is up");
+        assert!(!screen.voice && !screen.open, "the screen cannot claim the capture it was given");
+        assert_eq!(screen.line, tipsy_ui::LoginLine::Failed(es.login_no_mic.to_string()));
+
+        // And it is idempotent without eating a better line: a refusal or an utterance that lands
+        // afterwards is what the user needs next, and `status_line` prefers `Failed` over both.
+        state.login.as_mut().expect("the screen is up").line = tipsy_ui::LoginLine::Refused;
+        carry_no_microphone(&mut state);
+        assert_eq!(
+            state.login.as_ref().expect("the screen is up").line,
+            tipsy_ui::LoginLine::Refused,
+            "the carry may not write over a later line"
+        );
+    }
+
+    /// **Every way out of the gate takes it down, and no path leaves a disabled button behind.**
+    ///
+    /// There is no browser on this machine and `press_to_start` takes a real `Document`, so no host
+    /// test can click it — the same wall `login_door.rs`'s one-send-site pin hits, and the same
+    /// technique: read the committed source and ask about the text. The four paths are the success (the
+    /// gate has done its job), the press whose capture failed, the press whose **context** failed, and
+    /// the press that continues without a microphone at all; each owes the page a gate-free screen,
+    /// because `#tipsy-gate` is `position: fixed; inset: 0` and opaque. The success arm owes the
+    /// **server** one thing more — a `ListenStart`, without which the frames the press made possible
+    /// are dropped. It is falsifiable: deleting one call, putting `set_disabled` back, or dropping the
+    /// command fails it.
+    #[test]
+    fn every_path_out_of_the_gate_takes_it_down() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("mic.rs");
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        // Production only: this test's own text names the strings it counts, so the module that holds
+        // it has to be cut off first.
+        let production = &source[..source.find("#[cfg(test)]").expect("this test's own module follows")];
+        assert_eq!(
+            production.matches("take_gate_down(").count(),
+            4,
+            "the helper and the three arms that call it: the success, the failed press (the context \
+             failure and the capture failure, both through `report_no_microphone`) and the page whose \
+             microphone cannot work at all"
+        );
+        assert!(
+            !production.contains("set_disabled"),
+            "a disabled button is the page nobody can get past: the probe's refusal used to leave one \
+             over a full-viewport overlay (Blocker 2)"
+        );
+
+        let start = source.find("pub fn press_to_start(").expect("`press_to_start` is the gate");
+        let rest = &source[start..];
+        let end = rest.find("\n}").expect("the function's closing brace");
+        let body = &rest[..end];
+        assert_eq!(
+            body.matches("take_gate_down(").count(),
+            2,
+            "the two arms inside the gate itself: the capture that opened, and the page that carries \
+             on without one:\n{body}"
+        );
+        assert_eq!(
+            body.matches("report_no_microphone(").count(),
+            2,
+            "and the two failures a press can hit — no context, no capture — both of which record and \
+             take the gate down:\n{body}"
+        );
+        assert_eq!(
+            body.matches("record_no_microphone(").count(),
+            1,
+            "and the probe's own answer, which is recorded when the user presses past it:\n{body}"
+        );
+        assert!(
+            body.contains("ToServer::Command(Command::ListenStart)"),
+            "and the success arm tells the server the microphone is open, which is what `Tab` does when \
+             it sets the same flag: the session drops every `Frame::Mic` while it is not listening \
+             (`session.rs:534-548`), so a press that did not say so would upload into a void:\n{body}"
+        );
     }
 }

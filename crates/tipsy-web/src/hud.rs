@@ -396,8 +396,13 @@ mod tests {
     /// the header's geometry from the other side, which is what Task 2.4 measured on the terminal page
     /// (two header hits, both `F(9)`, the gear flush right, and the badge drawn but not reported).
     ///
-    /// The whole frame reports five: the header's two come first (`render.rs:131-133`), and the three
-    /// after them are the log panel's `CHAT`/`RED` tabs and its clear button (`render.rs:349-351`).
+    /// The whole frame reports **five**, and the count is asserted rather than a floor (the phase
+    /// review's nit): the header's two come first (`render.rs:131-133`), and the three after them are
+    /// the log panel's `CHAT`/`RED` tabs and its clear button (`render.rs:349-351`), which are on their
+    /// own row and answer `F7`/`F8`/`F4`. A third `F(9)` control on the header row — the shape a
+    /// `hits.len() >= 2` plus "no `F(9)` after the first two" let through — now fails twice over: the
+    /// count and the row check. And the badge is read off the drawn cells, because "reports no hit" is
+    /// not the same statement as "is on screen".
     #[test]
     fn the_header_reports_its_two_controls_and_the_gear_sits_in_the_last_columns() {
         let mut state = UiState::new();
@@ -409,13 +414,24 @@ mod tests {
             .draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, "El Compae"))
             .expect("one frame");
 
-        assert!(hits.len() >= 2, "the header reports its two controls first: {hits:?}");
+        assert_eq!(hits.len(), 5, "the header's two, then the log panel's three: {hits:?}");
         let (mode, gear) = (hits[0], hits[1]);
         assert_eq!(mode.key, KeyInput::F(9), "the mode word is the door key: {mode:?}");
         assert_eq!(gear.key, KeyInput::F(9), "and so is the gear: {gear:?}");
         assert!(
             hits[2..].iter().all(|hit| hit.key != KeyInput::F(9)),
             "the door is the header's key and no pane behind it answers `F9`: {hits:?}"
+        );
+        // The three the frame carries behind the header, named: the log panel's two view tabs and its
+        // clear button, each on a row of its own below the header.
+        assert_eq!(
+            hits[2..].iter().map(|hit| hit.key).collect::<Vec<_>>(),
+            vec![KeyInput::F(7), KeyInput::F(8), KeyInput::F(4)],
+            "`CHAT`, `NETWORK` and the clear button, in the order `render.rs` reports them: {hits:?}"
+        );
+        assert!(
+            hits[2..].iter().all(|hit| hit.area.y > 0),
+            "and none of them is on the header's own row: {hits:?}"
         );
         assert!(
             mode.area.y == 0 && mode.area.height == 1 && gear.area.y == 0 && gear.area.height == 1,
@@ -425,6 +441,18 @@ mod tests {
         assert_eq!(mode.area.right(), gear.area.x, "the mode's rectangle ends where the gear's begins");
         assert_eq!(gear.area.right(), 120, "and the gear is flush against the right edge of the frame");
         assert!(mode.area.width > 0 && gear.area.width > 0, "both are clickable: {mode:?} {gear:?}");
+
+        // **The badge is drawn**, which the hit list alone cannot say: `render.rs:202` renders
+        // ` ◉ EL COMPAE ` in the header's first columns and reports no rectangle for it. The assertion
+        // is on the cells the frame actually painted, so a header that dropped the badge — or painted
+        // it empty — fails here even though nothing about the hits would change.
+        let header: String =
+            (0..terminal.backend().buffer().area.width).map(|x| buffer_symbol(&terminal, x, 0)).collect();
+        assert!(header.contains('◉'), "the badge's marker is on the header row: {header:?}");
+        assert!(
+            header.contains("EL COMPAE"),
+            "and the profile's own name, uppercased, is drawn beside it: {header:?}"
+        );
 
         // The claim the hit test makes, on the frame that was just drawn: the top-left cell of the
         // gear is the gear, and the cell one row below it is nothing at all.
@@ -436,6 +464,13 @@ mod tests {
         for column in [0u16, 5, 12] {
             assert!(hit_at(&hits, column, 0).is_none(), "column {column} is the badge, which is not a control");
         }
+    }
+
+    /// One cell of the drawn frame, as text. A cell that was never written is the empty string, which
+    /// is what makes the badge's own cells readable without a second width table: `◉` occupies one
+    /// cell whatever `drawn_width` measured.
+    fn buffer_symbol(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> String {
+        terminal.backend().buffer()[(x, y)].symbol().to_string()
     }
 
     /// The same frame, clicked: the gear's own cell opens the screen and one row below it does not —

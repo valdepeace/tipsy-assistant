@@ -19,8 +19,10 @@
          author records as "an input result that looked like a Ratzilla capability failure and was in
          fact my page's stacking order"). The canvas is static, so anything positioned above it wins
          the pointer. The one positioned element here is the start gate, and Task 3.3's
-         `press_to_start` **removes** it once the microphone is open (`crates/tipsy-web/src/mic.rs:486`)
-         — after which nothing on the page can intercept a click. The plan's Step 5 is the shape this
+         `press_to_start` **removes** it on every path out of it — the capture that opened, the press
+         that failed, and the press that carries on without a microphone
+         (`crates/tipsy-web/src/mic.rs`, `take_gate_down`) — after which nothing on the page can
+         intercept a click. The plan's Step 5 is the shape this
          rule forbids: it carries `#hud { position: absolute; inset: 0 }`, an empty overlay covering the
          whole viewport, which would swallow every click the HUD's own `hit_at` is waiting for. */
 
@@ -46,9 +48,13 @@
         font: inherit; font-size: 16px; padding: .5rem 1rem; color: #000; background: #00d2ff;
         border: 0; cursor: pointer;
       }
-      /* The probe's own answer, when it says the microphone cannot work at all: the button stays on
-         screen and says so rather than failing on its first press (`mic.rs`'s `MicAvailability`). */
-      #tipsy-gate button:disabled { opacity: .5; cursor: not-allowed; }
+      /* The probe's own answer, when it says the microphone cannot work, goes on the line below the
+         button (`mic.rs`'s `MicAvailability` + `gate.reason`) — and the button stays **pressable**:
+         it is the one gesture this page has, so it creates the audio context (the greeting and every
+         reply play from there on, microphone or not), records the failure for the login screen and
+         the HUD, and takes this overlay down. There is no `:disabled` rule on purpose: a disabled
+         button under an opaque, full-viewport overlay is a page nobody can use, which is what the
+         phase review's second blocker was. */
       #tipsy-gate p { max-width: 32rem; text-align: center; line-height: 1.4; }
 
       /* The font stack, and what it is *not* for.

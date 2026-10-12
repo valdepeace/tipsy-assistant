@@ -17,8 +17,9 @@ where a voice detector decides what is an utterance. The server and the remote c
 The **web terminal** works as well — `/terminal` runs that same TUI in a browser tab over a socket of
 raw PTY bytes (Phase 2 of the web tier) — and so does the **web client**: `cargo run -p xtask -- dist`
 builds the browser HUD into `web/dist/`, the binary embeds it, and `/` renders that HUD from
-WebAssembly with the browser's own microphone and speakers (Phase 3). Still to come: the login door's
-browser wiring, `hands_free` (it waits for the wake word), plus CI and releases.
+WebAssembly with the browser's own microphone and speakers (Phase 3), behind the login door when
+`[login]` is configured. Still to come: `hands_free` (it waits for the wake word), plus CI and
+releases.
 
 ## Quick start
 
@@ -269,8 +270,11 @@ read the allowlist over the socket and send it back changed. The server still do
 The screen is one screen: no second one opens while it is up, `Tab` turns the microphone on and off,
 `Enter` sends what you typed — or, with the box empty after a refusal, re-arms the microphone — `Esc`
 quits, and every other key is part of your answer. The microphone opens with the screen when `voice`
-is true, the top border says so in red while it is open, and `Tab` closes it — and while that capture
-runs, the client shows it by setting the same open-microphone state push-to-talk sets. Three refusals
+is true, the top border says so in red while it is open, and `Tab` closes it. **That capture is the
+screen's own state and not the HUD's microphone switch**: the screen never moves the switch you set
+for yourself, and the two answer different questions — so while the door is up, the frames a page may
+put on the wire are the screen's to allow (a `voice = false` screen allows none), and once the door is
+behind you the HUD's own switch is what decides them again. Three refusals
 in a row stop the automatic listening and the bottom border points you at this file; `Tab` starts it
 again.
 
@@ -324,10 +328,10 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   `crates/tipsy-compadre` it printed `web/vendor is ready` while writing
   `crates/tipsy-compadre/web/vendor/`, which nothing reads — a blank terminal from a command that
   reported success.) Each run also re-checks the fetched files against the sha256 recorded in
-  `web/vendor/README.md`, and refuses with both digests if one has been truncated or edited. Until
-  Phase 3 lands `web/client/index.html`, `/` answers with a page that names the command.
-  **`cargo xtask dist` is not a working spelling**: cargo looks for `cargo-xtask` on `PATH`, and the
-  long form above is the one that works.
+  `web/vendor/README.md`, and refuses with both digests if one has been truncated or edited.
+  `web/dist/` is emptied before `wasm-bindgen` writes it, so a renamed asset from an earlier build is
+  not served for ever. **`cargo xtask dist` is not a working spelling**: cargo looks for
+  `cargo-xtask` on `PATH`, and the long form above is the one that works.
 - `--connect` runs the TUI and nothing else: it starts no server, builds no provider and reads no
   API key, because every provider call happens in the server process.
 - `--verbose` also writes the log to stderr. The log file is `tipsy-compadre.log`, beside
@@ -473,10 +477,14 @@ binary target is not there, so it answers ``error: no such command: `xtask` ``. 
 spell the long form. An `[alias]` in `.cargo/config.toml` would work on your own machine, but `.cargo/`
 is git-ignored here and never ships, so nothing documented may depend on it.
 
-**A plain `cargo build` produces a binary without the web client.** The server still runs and `/`
-answers with the checked-in page, whose script the server does not have; the page that says how to build
-the bundle is what a build with no `web/client/index.html` serves. A *debug* build reads `web/` from the
-directory you run the binary from, so `cargo run -p tipsy-compadre` started at the repository root
+**A plain `cargo build` produces a binary without the web client.** The server still runs, and
+`Welcome.web_bundle` is `false`, which a native client attached to it reports as "the web UI is not
+available in this build" — the flag means the client page **and** the script it loads, and a plain
+build has only the page (`web/client/index.html` is committed, `web/dist/` is not). `/` still answers
+that page on such a build and the browser console shows the 404 for `/assets/dist/tipsy_web.js`; the
+page that says how to build the bundle is what a binary with no `web/client/index.html` at all
+serves. A *debug* build reads `web/` from
+the directory you run the binary from, so `cargo run -p tipsy-compadre` started at the repository root
 serves a bundle that is already built, and a binary copied elsewhere does not.
 
 ## How to verify the web terminal
@@ -582,19 +590,35 @@ what a test cannot hear.
       the page loads `web/dist`, which is generated and never committed, so
       `cargo run -p xtask -- dist` comes before the server does — then turn the microphone off
       in the OS (Windows: Settings → Privacy → Microphone → "Let desktop apps access your
-      microphone"), open `http://127.0.0.1:7070/` with `[login]` configured and `voice = true`, and
-      press the gate. **Expected:** the screen opens *typing-only* — no `● rec` on its top border, no
-      microphone in the OS' own in-use indicator — and its one line reads `Sin micro: escribe, que
-      también vale`. Type an allowed answer and press `Enter`: the door opens, the veil lifts, and the
-      HUD appears. **Do this half first, with the device really taken away**: it is the branch no test
-      can reach. Then turn the microphone back on and repeat; the same screen opens with the red
-      `● rec`. While the door is shut a human must look at three things no test can see: that the veil
-      is unreadable (the HUD is visibly there and visibly out of focus; `Veil::Dim` is the one-constant
-      escape hatch in `render_login.rs` if `▒`/`░` land badly in the browser's font — login spec §7 and
-      §13), that the core inside the widget pulses while you speak, and that the gate's own button was
-      removed from the page once the microphone opened rather than sitting over the canvas. Record
-      which it was, and record whether `Veil::Dim` had to be switched on. The keyboard half is worth
-      the same eye: the door answers `Tab`, `Enter` and `Esc` only, and the HUD behind it answers
-      nothing until the screen is down.
-- [ ] The real microphone and speakers in the browser, and the wake word in Spanish and English,
-      once those milestones land.
+      microphone"), and open `http://127.0.0.1:7070/` with `[login]` configured and `voice = true`.
+      **Expected:** the gate is on screen with the reason beside its button — `Micrófono denegado:
+      revisa el permiso del sitio. Puedes escribir.`, or the insecure-context wording when the page is
+      not on loopback — and **the button is still pressable**, which is the break-glass: the probe knows
+      the microphone cannot work before you press. Press it. The gate goes (it is an opaque overlay, and
+      leaving it up would hide the whole page), the page's audio context is created — so the greeting
+      and every reply are audible from here on, microphone or not — and the login screen is
+      *typing-only*: no `● rec` on its top border, no microphone in the OS' own in-use indicator, and
+      its one line reads `Sin micro: escribe, que también vale`. Type an allowed answer and press
+      `Enter`: the door opens, the veil lifts, the HUD appears, and the greeting is spoken. `Tab` does
+      nothing on that screen, because a browser cannot open a device without a fresh gesture and this
+      page load has spent its one; reload to try again. **Do this half first, with the device really
+      taken away**: it is the branch no test can reach. Then turn the microphone back on, reload, and
+      press the gate's button again: the gate goes, and the same screen opens with the red `● rec` and
+      a working `Tab`. While the door is shut a human must look at three things no test can see: that
+      the veil is unreadable (the HUD is visibly there and visibly out of focus; `Veil::Dim` is the
+      one-constant escape hatch in `render_login.rs` if `▒`/`░` land badly in the browser's font —
+      login spec §7 and §13), that the core inside the widget pulses while you speak, and that the
+      gate's own button was removed from the page rather than sitting over the canvas. Record which it
+      was, and record whether `Veil::Dim` had to be switched on. The keyboard half is worth the same
+      eye: the door answers `Tab`, `Enter` and `Esc` only, and the HUD behind it answers nothing until
+      the screen is down.
+- [ ] **The browser's own microphone and speakers, by hand** — the check no test in this repository can
+      make, because there is no browser in its harness. With `[login]` off, open
+      `http://127.0.0.1:7070/` and press the gate: the gate goes, the `VOZ` panel goes red, and the
+      microphone is open — the press tells the server so, the way `Tab` does, which is what makes the
+      frames it captures a turn rather than room tone the server drops. Say something and press `Tab`:
+      the microphone closes, what you said is transcribed, the `tú …` line appears in the log and the
+      reply is spoken; `F2` replays it. **Then take the microphone away** — deny it for the site, or
+      turn it off in the OS — and reload: **the reply still plays and the HUD still types**, which is
+      the part a refused microphone must not take with it. The wake word in Spanish and English comes
+      with `hands_free` (Plan 4).

@@ -24,32 +24,44 @@
 //!    (`crates/tipsy-compadre/src/client/mic.rs`). The browser's `Tab`, its third refusal and a pass
 //!    move exactly the same field (`crates/tipsy-ui/src/state.rs:414-424`, `:615-617`, `:607`), so the
 //!    same edge detector applies.
-//! 3. **A frame leaves the page only while that capture is open.** This is the login plan's review
-//!    finding 1, on the other client: the native rule is "the capture first, then the device, then the
-//!    frames" and "a frame belongs to a *stream*" (`tipsy_ui::policy::mic_route`). Here the device is
-//!    Task 3.3's gate and the stream is this predicate. It reads the state's `voice && open` and keeps
-//!    no copy of either: a pass closes the capture in the reducer (`state.rs:607`), so the gate shuts
-//!    with the door and the reconciliation sends the `LoginStop` spec §6.2 asks for. The browser does
-//!    not decide that a capture is over; the state says so, and this module is only the reader.
+//! 3. **A frame leaves the page behind one predicate, and that predicate has two cases.** This is the
+//!    login plan's review finding 1, on the other client: the native rule is "the capture first, then
+//!    the device, then the frames" and "a frame belongs to a *stream*" (`tipsy_ui::policy::mic_route`).
+//!    Here the device is Task 3.3's gate and the stream is [`Door::sends_frames`]: **while a screen is
+//!    up** it reads the state's `voice && open` and keeps no copy of either — a pass closes the capture
+//!    in the reducer (`state.rs:607`), so the gate shuts with the door and the reconciliation sends the
+//!    `LoginStop` spec §6.2 asks for — and **while no screen is up it reads the HUD's own
+//!    `state.mic_open`**, which is the switch the gate's press and the HUD's `Tab` both move. The
+//!    browser does not decide that a capture is over; the state says so, and this module is only the
+//!    reader.
 //!
 //! **The window this closes, measured on the tree it was written against.** Until this module had a
 //! caller, `mic::drain_capture`'s whole guard was `state.mic_open`, and Task 3.3's "press to start"
 //! click sets that flag the moment the device opens (`mic.rs`'s `press_to_start`) — *before* `Welcome`
-//! arrives and whatever `Welcome.login.voice` turns out to be. So a page pressed its gate and uploaded
-//! room tone to `/ws` from that press until something turned the flag off, including for the whole of a
+//! arrives and whatever `Welcome.login.voice` turns out to be. So a page pressed its gate and put room
+//! tone on `/ws` from that press until something turned the flag off, including for the whole of a
 //! `voice = false` screen where spec §9 says no audio leaves the machine at all. It never reached a
-//! provider (the session drops frames with no `LoginStart`), but the wire carried them. The predicate
-//! below is what stopped it, and `the_press_that_opened_the_hud_microphone_does_not_open_the_door`
-//! pins the case.
+//! provider (the session drops frames with no `LoginStart`), but the wire carried them. The screen's
+//! case of the predicate below is what stopped it, and
+//! `the_press_that_opened_the_hud_microphone_does_not_open_the_door` pins it.
 //!
-//! **One consequence, named rather than implied.** `sends_frames` is false whenever no screen is up,
-//! so on `/` no microphone frame leaves the page after the door either: the HUD's own push-to-talk is
-//! the native client's in this tier. That is the plan's Step 3 note 2, and **it is the plan's decision
-//! and not the spec's** — the plan cites spec §8.2 for it, and §8.2 is its table of the three jobs a
-//! browser does (capture, playback, transport); it says nothing about push-to-talk, and nothing else in
-//! the web-tier spec does either. A `Tab` on the HUD still raises `ListenStart` and still moves
-//! `state.mic_open` — those are `UiState`'s and untouched — and no frame follows them. It is the price
-//! of the guard being the door's and nothing else.
+//! **And the window the first version of that predicate opened, which the phase review found.** Task
+//! 3.7's predicate was the screen's expression *alone*, so it answered `false` at every moment with no
+//! screen up — which is the whole of the time after `LoginDone`, and the whole of a build whose
+//! `[login]` is disabled or carries no usable keyword (`Welcome.login = None`). `Tab` and the press
+//! still moved `state.mic_open` and **nothing followed them: on `/` a user could not say anything to
+//! the assistant, ever** — the regression `662b2fb:crates/tipsy-web/src/mic.rs` did not have, since
+//! its guard was `state.mic_open`. The plan chose that (its Task 3.7 Step 3 note 2) citing spec §8.2
+//! for it, and **§8.2 is the three-jobs table** — capture, playback, transport — and says nothing
+//! about push-to-talk; the web-tier spec's success criterion 5 (`:52-53`), the plan's own Phase 3 row
+//! (`:86`) and `README.md` all promise a user who talks to the assistant from the browser. It was not
+//! acceptable as-is. The fix is the second case below, and the plan's note 2 is corrected with it.
+//!
+//! **What the fix does not change.** Nothing here is a second copy of the shared state's rules: the
+//! screen's case is `LoginState`'s and the HUD's case is `UiState::mic_open`'s, and the server's own
+//! half is unchanged — a frame that arrives with no `ListenStart` is dropped by the session. The room
+//! tone between the gate's press and `Welcome` is native push-to-talk behaviour and is now reachable
+//! on `/`, which is the point (the gate's press is the user's own yes, spec §12).
 //!
 //! Everything in this file is pure and runs on the host target (Task 3.2 Step 1): no `web_sys` value
 //! is constructed, no socket is touched, and no test needs a browser.
@@ -126,17 +138,39 @@ impl Door {
         state.login = None;
     }
 
-    /// **The predicate that keeps audio inside the machine.** True exactly while the screen is up, its
-    /// voice switch is on and its capture is open — the native client's `login.voice && login.open` —
-    /// and false at every other moment, including a screen that is up but shut (`Tab` off, a pass, the
-    /// third refusal, a failed device), the whole of the time before `Welcome` arrives, and the whole
-    /// of the time after the door.
+    /// **The predicate that keeps the login's audio inside the machine, and the one that lets the HUD's
+    /// own microphone back out.** Which question is asked depends on whether the door is on screen at
+    /// all, and both cases are the shared state's answer rather than a copy kept here:
+    ///
+    /// - **A screen is up**: the screen's own `voice && open` decides — the native client's
+    ///   `login.voice && login.open` and the whole of spec §6.2's capture. A `voice = false` screen
+    ///   refuses whatever the HUD's switch says; `Tab` off, the third refusal, a failed device and a
+    ///   pass all refuse, because a pass closes `open` in the reducer (`state.rs:607`).
+    /// - **No screen is up**: `state.mic_open` decides — the HUD's own switch, which is what the gate's
+    ///   "press to start" click sets (`mic.rs`'s `press_to_start`) and what `Tab` on the HUD toggles.
+    ///   That is the state before `Welcome` arrives, the whole of a run with no screen, and the whole of
+    ///   the run after `LoginDone`: **on `/` the browser's push-to-talk reaches `/ws` again**, which is
+    ///   the phase's headline feature and the regression the review's Blocker 1 found.
+    ///
+    /// The server's half is unchanged either way: a frame that arrives with no `ListenStart` is dropped
+    /// by the session, so the switch being on is a request the server answers or ignores, never a
+    /// permission granted here.
     pub fn sends_frames(&self, state: &UiState) -> bool {
-        state.login.as_ref().is_some_and(|screen| screen.voice && screen.open)
+        match state.login.as_ref() {
+            Some(screen) => screen.voice && screen.open,
+            None => state.mic_open,
+        }
     }
 
-    /// The screen's capture state, whether or not it may send: the `● rec` badge and `Tab` read the
-    /// same field (`crates/tipsy-ui/src/render_login.rs:212`, spec §6).
+    /// The **login's** capture, whether or not it may send: the `● rec` badge and the core's pulse read
+    /// this (`crates/tipsy-ui/src/render_login.rs:212`), and it is `false` while no screen is up even
+    /// with the HUD's microphone on.
+    ///
+    /// **It is no longer the same expression as [`Door::sends_frames`], and that divergence is what the
+    /// plan's Step 3 note 2 was for** ("they are two questions and they diverge the moment a second
+    /// reason to capture exists … do not merge them, and do not make one call the other"): the frame
+    /// path is `sends_frames`, the badge and the login's `LoginStart`/`LoginStop` edges are this, and
+    /// the HUD's push-to-talk is the reason they differ.
     pub fn capture_open(&self, state: &UiState) -> bool {
         state.login.as_ref().is_some_and(|screen| screen.voice && screen.open)
     }
@@ -341,12 +375,18 @@ mod tests {
         assert_eq!(door.sync(&state), MicStep::None, "a typing-only client sends no `LoginStart`");
     }
 
-    /// **The window this task closes, pinned.** The "press to start" gate sets `UiState::mic_open` the
-    /// moment the device opens — before `Welcome` arrives — and it stays set while the login screen is
-    /// up. Every state below has that flag on and **not one of them may send a frame**: there is no
-    /// screen yet, the screen is typing-only, and the HUD is in front after the door. This is the test
-    /// that would have been red against Task 3.3's `state.mic_open` guard, and it is the whole reason
-    /// the guard is the door's.
+    /// **The press opens the HUD's microphone, and it never opens the door.** Task 3.3's "press to
+    /// start" click sets `state.mic_open` before `Welcome` arrives, and that flag is the HUD's own
+    /// switch: while no screen is up it is what lets a frame leave the page — the browser's
+    /// push-to-talk, which the review's Blocker 1 restored — and it is never a login capture: no
+    /// screen, so no `LoginStart` and nothing for `capture_open` to report, whatever the flag says.
+    ///
+    /// **It has two readings and both are pinned here**, which is why the test kept its name through
+    /// the fix. The one Task 3.7 wrote — the press must not put login audio on the wire — is the
+    /// `voice = false` screen below, where it belongs and where it still holds: the switch is on and
+    /// the screen refuses every frame. The one the phase review's Blocker 1 restored is the other two:
+    /// with no screen the switch *is* the frame path (so a user can talk to the assistant on `/`), and
+    /// after the door it is the HUD's again rather than the login's.
     #[test]
     fn the_press_that_opened_the_hud_microphone_does_not_open_the_door() {
         let mut state = UiState::new();
@@ -354,17 +394,59 @@ mod tests {
         // The press: the capture is open and the HUD's own switch says so.
         state.mic_open = true;
 
-        assert!(!door.sends_frames(&state), "the press alone is not a door: no `Welcome` has arrived");
-        assert_eq!(door.sync(&state), MicStep::None, "and nothing is said about a capture nobody has");
+        // No screen yet — a `Welcome` with no login view, or one that has not arrived. The HUD's switch
+        // is the whole of the frame path, and there is no login capture to announce or to draw.
+        assert!(door.sends_frames(&state), "with no screen the HUD's own microphone sends");
+        assert!(!door.capture_open(&state), "and it is not the login's capture: there is no screen");
+        assert_eq!(door.sync(&state), MicStep::None, "so no `LoginStart` is said about it");
 
         door.open_screen(&mut state, Some(&login_view(false)));
         assert!(state.mic_open, "the HUD's switch is still on");
         assert!(!door.sends_frames(&state), "but a typing-only screen opens no stream at all");
+        assert!(!door.capture_open(&state), "and there is no capture to draw");
 
-        // The door opens and the screen goes: the flag the press set is still on, and it is not the
-        // door's answer.
+        // The door opens and the screen goes: the flag the press set is the HUD's again, so
+        // push-to-talk works on `/` — the phase's headline feature, and what the first cut of this
+        // predicate took away.
         state.login = None;
-        assert!(!door.sends_frames(&state), "after the door the frame path is the HUD's, not the door's");
+        assert!(door.sends_frames(&state), "after the door the frame path is the HUD's own microphone");
+        assert!(!door.capture_open(&state), "and the login's capture is still not this flag's business");
+    }
+
+    /// **The fixed predicate's two cases, side by side on one state each.** The review's Blocker 1: the
+    /// predicate was the screen's expression alone, so `login == None` — after the door, and in every
+    /// build with no door at all — refused every frame and the browser's microphone was dead in every
+    /// configuration. What the fix promises is exactly this pair, and either half alone fails one of
+    /// the assertions below.
+    #[test]
+    fn the_screen_decides_while_it_is_up_and_the_huds_switch_decides_when_it_is_not() {
+        let mut state = UiState::new();
+        let mut door = Door::new();
+        // No screen, switch off: nothing may leave, which is the state every page starts in.
+        assert!(!door.sends_frames(&state), "no screen and no switch is no microphone");
+
+        // No screen, switch on: the HUD's push-to-talk, the half the first cut lost.
+        state.mic_open = true;
+        assert!(door.sends_frames(&state), "no screen: the HUD's own switch decides");
+
+        // A screen that wants no microphone is a refusal the switch cannot override.
+        door.open_screen(&mut state, Some(&login_view(false)));
+        assert!(!door.sends_frames(&state), "a screen is up, and `voice = false` refuses");
+
+        // A screen with the voice on and its own `Tab` shut: the switch is on and still there is no
+        // window, because while a screen is up the screen's `open` is the whole of the capture.
+        let mut state = UiState::new();
+        let mut door = Door::new();
+        state.mic_open = true;
+        door.open_screen(&mut state, Some(&login_view(true)));
+        assert!(door.sends_frames(&state), "the screen opens its capture with it");
+        assert_eq!(
+            state.on_key(KeyInput::Tab),
+            vec!(tipsy_ui::UiAction::Send(Command::LoginStop)),
+            "the screen's own `Tab` shuts it"
+        );
+        assert!(!door.sends_frames(&state), "and the HUD's switch may not hold the window open");
+        assert!(!door.capture_open(&state), "which is also what the `● rec` badge reads");
     }
 
     /// **The capture's edges, including the failed device.** `Tab` and the third refusal move
@@ -486,6 +568,13 @@ mod tests {
     /// the way this phase pins the page's `import init from …` and `mic.rs` pins `WORKLET_URL` against
     /// the file on disk: by reading the committed source and asking about the text. It is blunt, and it
     /// is the only gate there is on the line this whole task is about.
+    ///
+    /// **The count is of *audio* sends, and the fix wave tightened it to say so.** It used to count
+    /// `outbox.send(` in the whole file, which is the same number while the only sender is this one —
+    /// and stopped being the same number when the gate's own press gained its `Command::ListenStart`
+    /// (the press opens the HUD's microphone, and a server that is not told drops its frames). A
+    /// command is not a captured frame, and the claim this test makes is about captured frames: the
+    /// spelling below counts exactly those.
     #[test]
     fn the_one_send_site_guards_on_this_predicate_and_not_on_the_huds_switch() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mic.rs");
@@ -502,13 +591,14 @@ mod tests {
         );
         assert!(
             !body.contains("state.mic_open"),
-            "and it must not be the HUD's microphone switch, which the press-to-start click sets \
-             before `Welcome` arrives — that is the window this task closes:\n{body}"
+            "and it must not read the HUD's microphone switch *itself*: the predicate is the door's and \
+             the door is where that case lives (`login_door.rs`'s `sends_frames`):\n{body}"
         );
         assert_eq!(
-            source.matches("outbox.send(").count(),
+            source.matches("outbox.send(ToServer::Audio(").count(),
             1,
-            "there is exactly one place a captured frame may reach the socket, and it is this one"
+            "there is exactly one place a captured frame may reach the socket, and it is this one; the \
+             gate's `ListenStart` is a command and reaches the same socket by the same `Outbox`"
         );
     }
 

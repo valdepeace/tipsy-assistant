@@ -22,6 +22,10 @@ pub struct Strings {
     pub live: &'static str,
     /// Why a call did not start while `[realtime] enabled` is false.
     pub live_off: &'static str,
+    /// `F10` on a client with no realtime socket to open: there is no live call in the browser, no
+    /// command that would open one, and nothing for the indicator to report. The key says so rather
+    /// than swallowing the press (the phase review's nit).
+    pub live_web_unavailable: &'static str,
     pub cleared: &'static str,
     pub help: &'static str,
     pub weekdays: [&'static str; 7],
@@ -52,6 +56,11 @@ pub struct Strings {
     pub cfg_lan: &'static str,
     pub cfg_token: &'static str,
     pub cfg_regenerate: &'static str,
+    /// The Server tab's Regenerate row on a client that cannot mint a token: no command in this
+    /// protocol mints one and `store::new_token` lives in the server process, so the row is inert over
+    /// a socket and says where the token does come from instead of doing nothing at all (the phase
+    /// review's nit). The native client never draws this: there the row works.
+    pub cfg_regenerate_native: &'static str,
     pub cfg_save: &'static str,
     pub cfg_dirty: &'static str,
     pub cfg_unset: &'static str,
@@ -159,6 +168,7 @@ pub static ES: Strings = Strings {
     speaking: "Hablando...",
     live: "EN VIVO",
     live_off: "El modo en vivo está apagado ([realtime] enabled = false)",
+    live_web_unavailable: "La llamada en vivo no está en el cliente web: usa el cliente nativo.",
     cleared: "Conversación borrada",
     help: " Enter preguntar · !texto recitar · Tab micro · F4 borrar · F10 llamada · ←→ chat/red · Esc salir",
     weekdays: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
@@ -189,6 +199,7 @@ pub static ES: Strings = Strings {
     cfg_lan: "Red local",
     cfg_token: "Token",
     cfg_regenerate: "Regenerar token",
+    cfg_regenerate_native: "El token lo genera el servidor: solo el cliente nativo puede regenerarlo.",
     cfg_save: "Guardar",
     cfg_dirty: "sin guardar",
     cfg_unset: "sin definir",
@@ -250,6 +261,7 @@ pub static EN: Strings = Strings {
     speaking: "Speaking...",
     live: "LIVE",
     live_off: "The live mode is off ([realtime] enabled = false)",
+    live_web_unavailable: "The live call is not in the web client: use the native client.",
     cleared: "Conversation cleared",
     help: " Enter ask · !text recite · Tab mic · F4 clear · F10 call · ←→ chat/network · Esc quit",
     weekdays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
@@ -280,6 +292,7 @@ pub static EN: Strings = Strings {
     cfg_lan: "LAN",
     cfg_token: "Token",
     cfg_regenerate: "Regenerate token",
+    cfg_regenerate_native: "The server mints the token: only the native client can regenerate it.",
     cfg_save: "Save",
     cfg_dirty: "unsaved",
     cfg_unset: "unset",
@@ -393,5 +406,25 @@ mod tests {
         assert_ne!(strings(UiLanguage::Es).mic_start, strings(UiLanguage::En).mic_start);
         assert_ne!(strings(UiLanguage::Es).mic_no_api, strings(UiLanguage::En).mic_no_api);
         assert_ne!(strings(UiLanguage::Es).mic_granted, strings(UiLanguage::En).mic_granted);
+    }
+
+    /// **The two keys a web client has no implementation for now say so in both languages** (the phase
+    /// review's nit): `Ctrl+R` on the Server tab mints a token in the server process, and `F10` needs a
+    /// realtime socket the browser has no command to open. Both used to be inert with a comment in the
+    /// code and nothing on screen.
+    #[test]
+    fn the_not_implemented_here_copy_exists_in_both_languages() {
+        for table in [strings(UiLanguage::Es), strings(UiLanguage::En)] {
+            assert!(!table.cfg_regenerate_native.trim().is_empty(), "the token row has to say where");
+            assert!(!table.live_web_unavailable.trim().is_empty(), "and F10 why it did nothing");
+        }
+        assert_ne!(
+            strings(UiLanguage::Es).cfg_regenerate_native,
+            strings(UiLanguage::En).cfg_regenerate_native
+        );
+        assert_ne!(
+            strings(UiLanguage::Es).live_web_unavailable,
+            strings(UiLanguage::En).live_web_unavailable
+        );
     }
 }
