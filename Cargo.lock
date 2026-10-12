@@ -4406,6 +4406,7 @@ name = "tipsy-web"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "ratatui",
  "ratzilla",
  "serde",
  "serde_json",

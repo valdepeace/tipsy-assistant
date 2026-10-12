@@ -6,12 +6,17 @@
 //! `draw_web` wraps `requestAnimationFrame` itself, so the loop needs **no async runtime** — only the
 //! socket's callbacks do, and those use `spawn_local` (ratzilla-and-wasm-audio.md §6.4 point 5).
 //!
-//! **What this file deliberately does not have yet.** The key and mouse handlers and the page's
-//! layout are Task 3.5's; the hits `tipsy_ui::draw` reports are therefore dropped here rather than
-//! kept in a cell nothing reads, and Task 3.5 is what starts reading them. **The barge-in is
-//! [`playback::Playback::on_command`]'s and its call site is Task 3.5's too**, for the same reason: the
-//! only thing that produces a `UiAction` is the keyboard and the pointer. The rule itself is not defined
-//! here and is not repeated here — `on_command` calls `tipsy_ui::policy`'s own functions.
+//! **What this file deliberately does not have.** The translation itself — Ratzilla's key and mouse
+//! events into `tipsy_ui`'s vocabulary, the click test and the clock's numbering — is [`hud`]'s, where
+//! a host test can reach it; the two callbacks registered below are one line each and hold no decision
+//! of their own. Two `UiAction`s are inert here and named rather than implied: `ToggleLive`, which has
+//! no browser implementation in this phase, and `LoginDone`, which is Task 3.7's. The login door is not
+//! shown at all yet — nobody calls `UiState::show_login` — so a server with `[login] enabled` reaches
+//! this client without its screen, which is the same window Task 3.3 recorded and 3.7 closes.
+//!
+//! **The barge-in is [`playback::Playback::on_command`]'s and its call site is [`dispatch`].** The rule
+//! itself is not defined here and is not repeated here — `on_command` calls `tipsy_ui::policy`'s own
+//! functions, and the browser's only contribution is the clock it passes.
 //!
 //! **The microphone is Task 3.3's and it is wired here**, because `#[wasm_bindgen(start)]` is the only
 //! entry point `init()` calls and this is where the `UiState`, the queue and the render loop live: the
@@ -25,6 +30,7 @@
 //! `Frame::Speech` arriving before the user's press is **dropped** rather than kept — the events around
 //! it still reach the HUD, and the audio has nowhere to go.
 
+pub mod hud;
 pub mod mic;
 pub mod playback;
 pub mod socket;
@@ -35,13 +41,13 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use tipsy_protocol::{AssistantState, Event, Frame, ToClient};
-use tipsy_ui::policy;
+use tipsy_protocol::{AssistantState, ClientConfigView, Command, Event, Frame, ToClient, ToServer};
+use tipsy_ui::{policy, ClockView, ConfigEffect, ConfigForm, Hit, UiAction, UiState};
 use wasm_bindgen::prelude::*;
 
-// `draw_web` and the two event hooks are `WebRenderer`'s, and the trait has to be in scope for
-// `Terminal<WebGl2Backend>` to have them (ratzilla 0.3.1's `render.rs`). Task 3.5 adds
-// `WebEventHandler`'s two hooks beside it.
+// `draw_web` and the three event hooks are `WebRenderer`'s, and the trait has to be in scope for
+// `Terminal<WebGl2Backend>` to have them (`ratzilla-0.3.1/src/render.rs:63-98`); the `WebEventHandler`
+// trait behind them does not need to be named, which is why it is not imported.
 use ratzilla::WebRenderer;
 
 /// The wasm entry point (the front matter's shared contract pins this name).
@@ -51,7 +57,7 @@ use ratzilla::WebRenderer;
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     let backend = ratzilla::WebGl2Backend::new().map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let terminal =
+    let mut terminal =
         ratzilla::ratatui::Terminal::new(backend).map_err(|error| JsValue::from_str(&error.to_string()))?;
 
     let state = Rc::new(RefCell::new(tipsy_ui::UiState::new()));
@@ -71,68 +77,339 @@ pub fn start() -> Result<(), JsValue> {
     // with a reason rather than a button that fails on its first press.
     mic::press_to_start(Rc::clone(&state), Rc::clone(&capture));
 
-    let mut last = js_sys::Date::now();
     // The reply's timeline: one per run, fed by the frame loop below and presented by `web_audio`.
-    // Task 3.5 moves it into the `Shared` its `dispatch` holds; nothing here reads it any other way.
-    let mut playback = playback::Playback::new();
-    terminal.draw_web({
-        let outbox = outbox.clone();
-        move |frame| {
-            let now = js_sys::Date::now();
-            let dt = (now - last).max(0.0) as u64;
-            last = now;
-            let title = {
-                let mut state = state.borrow_mut();
-                state.tick(dt);
-                // The frame loop drains everything that arrived since the last frame, exactly as the
-                // native loop drains `from_server` (`client.rs:322-324`).
-                let mut queue = queue.borrow_mut();
-                // The one clock the reply is scheduled on: the capture's `AudioContext`, and `None`
-                // until the user's press. `current_time` is MDN's, in seconds, and it stops advancing
-                // while the context is suspended.
-                let audio_now = capture.borrow().as_ref().map(|capture| capture.context().current_time());
-                let (welcomed, scheduled) = route(&mut queue, &mut playback, &mut state, audio_now);
-                // The language first: `apply` is what sets it from `Welcome`, and the "connection
-                // restored" notice is the one thing this side says, so it is said in the profile's
-                // language and not in the default one.
-                if welcomed && outbox.welcomed() {
-                    let text = state.strings().web_online;
-                    state.notify(text);
+    let shared = Rc::new(RefCell::new(Shared {
+        state,
+        hits: Vec::new(),
+        queued: Vec::new(),
+        clock: hud::clock_from(0, 0, 0, 0, 0, 0),
+        title: String::new(),
+        playback: playback::Playback::new(),
+        outbox,
+        capture,
+        queue,
+        quit: false,
+    }));
+
+    // **The keyboard half of the backend, measured in 0.3.1's own source rather than taken from the
+    // research note.** The note and this plan's Step 4 both say `WebGl2Backend` "does not support key
+    // events and will silently succeed without registering any handlers". `WebGl2Backend::on_key_event`
+    // in 0.3.1 does the opposite: it sets `tabindex="0"` on its own canvas and attaches a `keydown`
+    // listener to it (`backend/webgl2.rs:920-942`), so the plan's separate `set_attribute("tabindex",
+    // "0")` is redundant and is not written here. What it does *not* do is **focus** the element, and
+    // the spike's own measurement is that keys arrive "given `tabindex="0"` **and focus**" — its
+    // counters stayed at zero until it called `focus()`. So the two calls to [`focus_canvas`] below
+    // are the load-bearing half: one here for the page's initial state, and one from the mouse
+    // callback because the gate's "press to start" button holds the focus until it is removed.
+    //
+    // Registered BEFORE `draw_web`: it consumes the `Terminal` by value, so a callback added
+    // afterwards has nothing to attach to (`ratzilla-0.3.1/src/render.rs:67`).
+    terminal.on_key_event({
+        let shared = Rc::clone(&shared);
+        move |event: ratzilla::event::KeyEvent| {
+            // The whole translation is `hud`'s and is host-tested; this is the adapter's call site and
+            // nothing else. A key the HUD has no opinion about does not reach the queue at all.
+            if let Some(key) = hud::key_input(hud::raw_key(&event)) {
+                shared.borrow_mut().queued.push(hud::Input::Key(key));
+            }
+        }
+    })
+    // The plan's Step 4 writes `?` here. It does not compile: `on_key_event` answers
+    // `Result<(), ratzilla::error::Error>`, and ratzilla's error type has no `From` into `JsValue` —
+    // so the conversion is the same one the two backend lines above use.
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    terminal
+        .on_mouse_event({
+            let shared = Rc::clone(&shared);
+            move |event: ratzilla::event::MouseEvent| {
+                if let Some(input) = hud::mouse_input(&event) {
+                    // A pointer that reaches the canvas focuses it, and that is what gives the keyboard
+                    // back after the gate's button took the focus and was then removed from the page.
+                    focus_canvas();
+                    shared.borrow_mut().queued.push(input);
                 }
-                if let Some(audio_now) = audio_now {
-                    if let Some(capture) = capture.borrow().as_ref() {
-                        let ctx = capture.context();
-                        for chunk in &scheduled {
-                            // The frame callback cannot propagate an error, and a silent client is the
-                            // worst outcome this file has: put it where the browser console can be read.
-                            if let Err(error) = web_audio::play(ctx, chunk) {
-                                web_sys::console::error_1(&error);
-                            }
-                        }
-                    }
-                    // Nodes whose audio has ended are forgotten so the map cannot grow for the length
-                    // of a reply. The prior art does this from each node's `onended`; `web_audio.rs`
-                    // says why this does it from the core instead.
-                    for id in playback.finished(audio_now) {
-                        web_audio::forget(id);
-                    }
-                }
-                // The microphone, once per frame and inside the one borrow this frame owns: the port's
-                // handler only appends what the worklet posted, and this is the only place a captured
-                // frame may reach the socket. `capture().as_ref()` is `None` until the gate's click
-                // opened one, which is what "no capture, no frames" means here.
-                if let Some(capture) = capture.borrow().as_ref() {
-                    mic::drain_capture(capture, &mut state, &outbox);
-                }
-                state.profile.as_ref().map(|profile| profile.name.clone()).unwrap_or_default()
+            }
+        })
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    focus_canvas();
+
+    let mut last = js_sys::Date::now();
+    terminal.draw_web(move |frame| {
+        let mut guard = shared.borrow_mut();
+        let shared: &mut Shared = &mut guard;
+        // The user quit: the socket is closed, nothing reconnects, and the frame that is on screen
+        // stays there. Stopping `requestAnimationFrame` is not something `draw_web` offers, so the
+        // loop keeps running and draws nothing — which is the same picture for a fortieth of the cost.
+        if shared.quit {
+            return;
+        }
+        let now = js_sys::Date::now();
+        let dt = (now - last).max(0.0) as u64;
+        last = now;
+
+        {
+            let mut state = shared.state.borrow_mut();
+            state.tick(dt);
+            shared.clock = clock_view();
+
+            // The frame loop drains everything that arrived since the last frame, exactly as the native
+            // loop drains `from_server` (`client.rs:322-324`). The one clock the reply is scheduled on
+            // is the capture's `AudioContext`, and it is `None` until the user's press.
+            let audio_now = audio_now(&shared.capture);
+            let (welcomed, scheduled) = {
+                let mut queue = shared.queue.borrow_mut();
+                route(&mut queue, &mut shared.playback, &mut state, audio_now)
             };
-            let clock = clock_view();
-            let state = state.borrow();
-            // Task 3.5 keeps these: a click is tested against the hits of the frame on screen.
-            let _hits = tipsy_ui::draw(frame, &state, &clock, &title);
+            // The language first: `apply` is what sets it from `Welcome`, and the "connection
+            // restored" notice is the one thing this side says, so it is said in the profile's
+            // language and not in the default one.
+            if welcomed && shared.outbox.welcomed() {
+                let text = state.strings().web_online;
+                state.notify(text);
+            }
+            if let Some(audio_now) = audio_now {
+                present(&mut shared.playback, &shared.capture, audio_now, &scheduled);
+            }
+            // The microphone, once per frame and inside the one borrow this frame owns: the port's
+            // handler only appends what the worklet posted, and this is the only place a captured
+            // frame may reach the socket. No capture means no frames, which is what the gate's
+            // un-pressed state is.
+            drain_microphone(&mut state, &shared.capture, &shared.outbox);
+        }
+
+        // Everything the handlers queued since the last frame, in the order it arrived, tested against
+        // the hits of the frame the user was actually looking at.
+        let actions = {
+            let mut state = shared.state.borrow_mut();
+            hud::drain(&mut state, &shared.hits, &mut shared.queued)
+        };
+        shared.title = {
+            let state = shared.state.borrow();
+            state.profile.as_ref().map(|profile| profile.name.clone()).unwrap_or_default()
+        };
+        let hits = {
+            let state = shared.state.borrow();
+            tipsy_ui::draw(frame, &state, &shared.clock, &shared.title)
+        };
+        shared.hits = hits;
+        for action in actions {
+            dispatch(action, shared);
         }
     });
     Ok(())
+}
+
+/// Everything the render loop and the two handlers share.
+///
+/// **`state` is the `Rc<RefCell<UiState>>` Task 3.2's socket and Task 3.3's gate already hold, not a
+/// copy.** The plan's sketch gave this struct an owned `UiState`, which would have been a second one:
+/// the socket's close handler writes the `web_offline` notice into *its* state and the gate writes
+/// `mic_open` into its own, so a struct with a third would render a HUD nobody was updating.
+///
+/// The same correction applies to the two fields the plan gave it that cannot be built: there is no
+/// `to_server` (that is Task 3.2's [`socket::Outbox`], which is `Clone` and follows a reconnect) and
+/// no `web_sys::WebSocket` (the outbox owns the cell; [`socket::Outbox::close`] is the way in) — and
+/// there is no `AudioContext` either, because the one context per run belongs to the capture
+/// ([`mic::Capture::context`]) and a second one would be a second clock.
+struct Shared {
+    state: Rc<RefCell<UiState>>,
+    /// The hits of the frame that is on screen, which is what a click is tested against.
+    hits: Vec<Hit>,
+    /// Input since the last frame, in arrival order.
+    queued: Vec<hud::Input>,
+    /// The clock, refreshed once per frame from the browser's own time.
+    clock: ClockView,
+    /// The profile's title, as the frame that drew the header used it.
+    title: String,
+    /// Task 3.4's timeline, which `Replay` and the barge-in both read.
+    playback: playback::Playback,
+    /// Task 3.2's sender for everything the HUD asks the server for.
+    outbox: socket::Outbox,
+    /// Task 3.3's capture slot, which is also where the one `AudioContext` lives.
+    capture: mic::CaptureSlot,
+    /// The messages the socket has queued, drained once per frame.
+    queue: Rc<RefCell<VecDeque<ToClient>>>,
+    /// The user pressed `Esc`: the socket is closed and nothing more is drawn.
+    quit: bool,
+}
+
+/// Puts the keyboard focus on the backend's canvas.
+///
+/// `WebGl2Backend::on_key_event` makes the canvas focusable and attaches its listener to it
+/// (`backend/webgl2.rs:920-942`), but a listener on an element that does not hold the focus never
+/// fires: the spike recorded `keys=0` while `on_key_event` returned `Ok(())`, and its counters only
+/// moved once it had focused the element. The canvas is not in the page's own markup at all — the
+/// backend appends it to `<body>` (`backend/utils.rs:255-265`, `:276-294`) — so it is found by tag
+/// name and nothing else. A page that refuses the focus (a background tab) simply has no keyboard
+/// until it is activated again, which is why this is not an error.
+fn focus_canvas() {
+    let Some(canvas) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.query_selector("canvas").ok().flatten())
+    else {
+        return;
+    };
+    if let Ok(element) = canvas.dyn_into::<web_sys::HtmlElement>() {
+        // `HtmlElement::focus` is web-sys's associated-function shape and answers `Result<(), JsValue>`
+        // (0.3.106's `gen_HtmlElement.rs`): a page that refuses the focus — a background tab — is not
+        // an error this client has anything to do about.
+        let _ = web_sys::HtmlElement::focus(&element);
+    }
+}
+
+/// The one clock the reply is scheduled on: the capture's `AudioContext`, and `None` until the user's
+/// press. `current_time` is MDN's, in seconds, and it stops advancing while the context is suspended.
+fn audio_now(capture: &mic::CaptureSlot) -> Option<f64> {
+    capture.borrow().as_ref().map(|capture| capture.context().current_time())
+}
+
+/// Schedules the chunks the timeline placed and drops the nodes whose audio has ended.
+///
+/// The frame callback cannot propagate an error, and a silent client is the worst outcome this file
+/// has: a failure goes where the browser console can be read.
+fn present(
+    playback: &mut playback::Playback,
+    capture: &mic::CaptureSlot,
+    audio_now: f64,
+    scheduled: &[playback::Scheduled],
+) {
+    if let Some(capture) = capture.borrow().as_ref() {
+        let ctx = capture.context();
+        for chunk in scheduled {
+            if let Err(error) = web_audio::play(ctx, chunk) {
+                web_sys::console::error_1(&error);
+            }
+        }
+    }
+    // Nodes whose audio has ended are forgotten so the map cannot grow for the length of a reply. The
+    // prior art does this from each node's `onended`; `web_audio.rs` says why this does it from the
+    // core instead.
+    for id in playback.finished(audio_now) {
+        web_audio::forget(id);
+    }
+}
+
+/// The microphone, once per frame: the port's handler only appends what the worklet posted, and this
+/// is the only place a captured frame may reach the socket (Task 3.3's ledger note 2).
+fn drain_microphone(state: &mut UiState, capture: &mic::CaptureSlot, outbox: &socket::Outbox) {
+    if let Some(capture) = capture.borrow().as_ref() {
+        mic::drain_capture(capture, state, outbox);
+    }
+}
+
+/// Sends one command, and treats a socket that is not open as the native client treats a closed
+/// channel: the message is dropped (`client.rs:465`).
+///
+/// It is not silent, though, because the browser console is the only place a reader can see it — and
+/// `NotOpen` is the ordinary case on a page that has not finished connecting yet, so only the other
+/// refusals are worth a line.
+fn send(shared: &Shared, command: Command) {
+    // A let-chain rather than two nested `if`s: `clippy::collapsible_if` fires on the nesting, and the
+    // gate for this phase is exactly the seven findings that predate it.
+    if let Err(error) = shared.outbox.send(ToServer::Command(command))
+        && !matches!(error, wire::WireError::NotOpen)
+    {
+        web_sys::console::warn_1(&JsValue::from_str(&format!("tipsy-web: {error}")));
+    }
+}
+
+/// The action loop's other half: the native client's `on_action` (`client.rs:428-509`) with a socket
+/// instead of a file.
+///
+/// Every arm is an `UiAction` this build has. Two of them are deliberately inert and named here
+/// rather than left to be discovered: `ToggleLive` has no browser implementation in this phase — there
+/// is no realtime call on a web client, and no command to send — and `LoginDone` belongs to Task 3.7,
+/// which is the task that shows the door in the first place.
+fn dispatch(action: UiAction, shared: &mut Shared) {
+    let mut state = shared.state.borrow_mut();
+    match action {
+        UiAction::Send(command) => {
+            // **The barge-in, and it is `Playback::on_command`'s, not this arm's.** That method applies
+            // `tipsy_ui::policy`'s three decisions — `flush_on_interrupt`, `interrupts_playback` and
+            // `starts_turn` — in the native client's order (`client.rs:458-464`), which is the plan's
+            // five lines as one call. Re-deriving the `&&` here is exactly what Task 3.4 removed.
+            let now = audio_now(&shared.capture).unwrap_or(0.0);
+            web_audio::silence(&shared.playback.on_command(&command, now));
+            send(shared, command);
+        }
+        // There is no terminal to restore in a browser: the socket closes, nothing reconnects, and the
+        // frame on screen stays (`socket.rs`'s `Outbox::close`).
+        UiAction::Quit => {
+            shared.outbox.close();
+            shared.quit = true;
+        }
+        // `client.rs:468-474`: what `Replay` replays is the reply the client kept, whatever entry the
+        // HUD selected — the native client ignores the index too. Task 3.4 owns the audio and the
+        // timeline, and a `Replay` that is audible does not touch the sequence position.
+        UiAction::Replay(_) => {
+            let Some(now) = audio_now(&shared.capture) else {
+                // No press yet, so no context: there is nothing to play through and nothing kept.
+                return;
+            };
+            if let Some(scheduled) = shared.playback.replay(now) {
+                present(&mut shared.playback, &shared.capture, now, std::slice::from_ref(&scheduled));
+            }
+        }
+        // F9 and the gear. There is no `config.toml` in a browser, so the screen is read over the wire
+        // — Phase 1's `GetConfig` (spec §4.2, §6.2: "Reading: `GetConfig` on open"). The screen is
+        // already up, on the placeholder form `toggle_config_form` put there (`state.rs:271-281`); the
+        // answer is `Event::Config`, which `route` below turns into `show_config_form`
+        // (`state.rs:287-291`), and *that* is what marks the form filled and so saveable.
+        UiAction::OpenConfig => send(shared, Command::GetConfig),
+        // Every other screen action goes through the form's own reducer, exactly as it does natively
+        // (`client.rs:485-503`), and the effects it returns are what the browser has to do about it.
+        UiAction::Config(action) => {
+            let effects = match state.config_form.as_mut() {
+                Some(form) => form.apply(action),
+                None => Vec::new(),
+            };
+            for effect in effects {
+                match effect {
+                    // **The save, over the wire, as a shape rather than a check.** `Command::
+                    // UpdateConfig` carries `Box<ClientConfigView>` and not a `ConfigView` (spec §4.3):
+                    // a client may edit this configuration and may not move a provider's `base_url`, a
+                    // provider's `key_name` or the server's `token`, so the conversion used here is the
+                    // one that cannot spell them. The plan's Step 4 writes `ConfigView::from(form)` for
+                    // this arm, which does not compile against this tree's protocol.
+                    ConfigEffect::Save => {
+                        if let Some(form) = state.config_form.as_ref() {
+                            let config = ClientConfigView::from(form);
+                            send(shared, Command::UpdateConfig { config: Box::new(config) });
+                        }
+                    }
+                    // The probe runs against the server's providers (spec §5.2) and its answer is
+                    // `Event::TestResult`, which `route` puts on the screen's notice line. It says
+                    // nothing out loud, so it must not quiet a reply being spoken — and rather than
+                    // assume that, the decision is `hud::test_barge_in`'s, which is
+                    // `policy::test_interrupts_playback` joined with `policy::flush_on_interrupt` the
+                    // way the native client joins them (`client.rs:496-500`).
+                    ConfigEffect::Test(capability) => {
+                        let now = audio_now(&shared.capture).unwrap_or(0.0);
+                        web_audio::silence(&hud::test_barge_in(&mut shared.playback, capability, now));
+                        send(shared, Command::TestProvider { capability });
+                    }
+                    // No command in the protocol this plan fixes mints a token: §4.2 lists `GetConfig`,
+                    // `UpdateConfig` and `SetKey`, and `store::new_token` (`config/store.rs:28-48`)
+                    // lives in the server process. The browser therefore cannot regenerate one, and
+                    // this arm must NOT invent a command or mint a token client-side. Leave the row
+                    // inert and report it: the Server tab's Regenerate row is native-only until a plan
+                    // defines a command for it.
+                    ConfigEffect::RegenerateToken => {}
+                    ConfigEffect::None => {}
+                }
+            }
+        }
+        // F10 has no browser meaning in this phase: `tipsy-ui` maps the key to `ToggleLive` (Plan 2C's
+        // indicator), and a web client has no realtime socket to open, no `Command` that would open
+        // one and nothing for an indicator to report. The arm is inert rather than unreachable — the
+        // key is the HUD's, and swallowing it is the honest answer. Recorded in the ledger as a gap.
+        UiAction::ToggleLive => {}
+        // Task 3.7's, by its own brief: its whole body is `state.login = None`, and it is the task
+        // that shows the door, reconciles the capture with `LoginState::open` and gates the frames. In
+        // this task nothing can raise it — `show_login` is called by nobody, so `state.login` is always
+        // `None` and `UiState::on_key` never reaches `login_key`.
+        UiAction::LoginDone => {}
+    }
 }
 
 /// The socket's messages, routed into the HUD and the timeline.
@@ -152,10 +429,18 @@ pub fn start() -> Result<(), JsValue> {
 ///
 /// The order inside one message is the native client's `on_message`: the announced rate first, then the
 /// audio it belongs to, and the turn boundaries where its own bookkeeping sits.
+///
+/// **The configuration screen's two answers are this function's, and the plan believed they were
+/// `UiState::apply`'s.** They are not, and the tree says so twice: `state.rs:633` is
+/// `Event::Config { .. } => {}` and `state.rs:552` is `Event::TestResult { .. } => {}`, both
+/// deliberately empty because `tipsy-ui` owns no file, no connector and no token. The native client is
+/// what renders them (`client.rs:369-391`), and this is the browser's half of the same job — without
+/// it the screen Task 3.5's own `UiAction::OpenConfig` opens can never be filled and so can never be
+/// saved (`ConfigForm`'s `filled` flag is what `Save` checks, `config_form.rs:712-721`).
 fn route(
     queue: &mut VecDeque<ToClient>,
     playback: &mut playback::Playback,
-    state: &mut tipsy_ui::UiState,
+    state: &mut UiState,
     audio_now: Option<f64>,
 ) -> (bool, Vec<playback::Scheduled>) {
     let mut welcomed = false;
@@ -175,6 +460,8 @@ fn route(
                 if ends_turn(&event) {
                     playback.end_of_turn();
                 }
+                // The screen's two answers, exactly as the native client's `on_message` renders them.
+                apply_screen_answer(state, &event);
                 welcomed |= matches!(event, Event::Welcome { .. });
                 state.apply(&event);
             }
@@ -211,22 +498,52 @@ fn ends_turn(event: &Event) -> bool {
         || matches!(event, Event::Status { state: AssistantState::Idle, .. })
 }
 
-/// The HUD's clock, from the page's own `Date`. `ClockView.weekday` numbers the week from Monday
-/// (`render.rs`'s `ClockView`, built natively at `client.rs:566-576`) and `js_sys::Date::get_day()`
-/// numbers it from Sunday, which is the one off-by-one in this file — so it is a function of its own
-/// with a test under it, and not an expression inside a `Date` call no host can make.
-fn clock_view() -> tipsy_ui::ClockView {
-    let now = js_sys::Date::new_0();
-    tipsy_ui::ClockView {
-        time: format!("{:02}:{:02}:{:02}", now.get_hours(), now.get_minutes(), now.get_seconds()),
-        weekday: weekday_from_sunday(now.get_day()),
-        day: now.get_date() as u8,
-        month: now.get_month() as u8,
+/// The two messages the configuration screen is waiting for, rendered into the form.
+///
+/// Both are the client's business and not `UiState::apply`'s, because `tipsy-ui` owns no file, no
+/// connector and no credential store: `apply`'s `Event::Config` and `Event::TestResult` arms are empty
+/// on purpose (`state.rs:552`, `:633`). The native client renders them in `on_message`
+/// (`client.rs:369-391`), and the browser needs the same two lines or the screen it opens is a
+/// placeholder nobody can fill or save.
+///
+/// `show_config_form` is what marks the form filled (`state.rs:287-291`), which is the flag
+/// `ConfigEffect::Save` checks — so a `Test` result for a screen that is not up is quietly dropped
+/// rather than opening a form nobody asked for.
+fn apply_screen_answer(state: &mut UiState, event: &Event) {
+    match event {
+        Event::Config { config } => state.show_config_form(ConfigForm::from(config.as_ref().clone())),
+        Event::TestResult { capability, ok, latency_ms, message } => {
+            if let Some(form) = state.config_form.as_mut() {
+                form.test_result(*capability, *ok, *latency_ms, message.clone());
+            }
+        }
+        _ => {}
     }
 }
 
+/// The HUD's clock, from the page's own `Date`.
+///
+/// It reads six numbers off the browser and hands them to [`hud::clock_from`], which is the host-tested
+/// half: the mapping that is not obvious is the weekday, because `Date.getDay()` numbers from Sunday
+/// and the HUD numbers from Monday. `client.rs:566-576` is the native twin, and it is *not* shared: the
+/// native one reads `chrono::Local`, this one reads `js_sys::Date`, and only the numbering is common.
+///
+/// The `Date` getters are the one part no host test can reach — `js_sys::Date::new_0()` panics outside
+/// wasm — which is why the arithmetic is not in here.
+fn clock_view() -> ClockView {
+    let now = js_sys::Date::new_0();
+    hud::clock_from(
+        now.get_hours(),
+        now.get_minutes(),
+        now.get_seconds(),
+        now.get_day(),
+        now.get_date(),
+        now.get_month(),
+    )
+}
+
 /// `Date::get_day()`: `0` is Sunday. `ClockView::weekday`: `0` is Monday, and `tipsy-ui`'s weekday
-/// table starts at `lunes`/`Monday`.
+/// table starts at `lunes`/`Monday`. [`hud::clock_from`] is its only production caller.
 fn weekday_from_sunday(day: u32) -> u8 {
     ((day + 6) % 7) as u8
 }
@@ -466,5 +783,213 @@ mod tests {
         assert_eq!(playback.reply().len(), total, "the reply is every sample the server sent, once");
         assert_eq!(playback.gaps(), 0, "a live turn has no missing sentences");
         assert!(!playback.envelope().is_empty(), "and the oscilloscope has something to draw");
+    }
+
+    /// **The screen's two answers, which the plan believed `UiState::apply` already handled.** It does
+    /// not — `state.rs:633` and `:552` are empty arms on purpose, because `tipsy-ui` owns no file and no
+    /// connector — and without this routing the screen `UiAction::OpenConfig` opens is a placeholder
+    /// that can never be filled and therefore never saved (`config_form.rs:712-721` refuses an unfilled
+    /// form). The native client renders both in `on_message` (`client.rs:369-391`); this is that half
+    /// on the browser's side of the socket.
+    #[test]
+    fn the_configuration_answer_fills_the_form_and_is_what_makes_it_saveable() {
+        let mut state = UiState::new();
+        state.apply(&welcome());
+        // The gear's path, raised by the state itself: `toggle_config_form` puts the placeholder up and
+        // asks the client for the real thing.
+        assert_eq!(state.on_key(tipsy_ui::KeyInput::F(9)), vec![UiAction::OpenConfig]);
+        assert!(
+            !state.config_form.as_ref().expect("the placeholder is up").filled(),
+            "and the placeholder cannot be saved: `Save` refuses it"
+        );
+
+        // The server's answer, in the shape the socket hands it over.
+        let mut served = ConfigForm::default();
+        served.active_profile = "meigo".into();
+        let answer = Event::Config { config: Box::new(tipsy_protocol::ConfigView::from(&served)) };
+        apply_screen_answer(&mut state, &answer);
+
+        let form = state.config_form.as_ref().expect("the screen is still up");
+        assert!(form.filled(), "the answer is what marks the form saveable");
+        assert_eq!(form.active_profile, "meigo", "and it carries the server's own values");
+        assert_eq!(
+            state.config_form.as_mut().unwrap().apply(tipsy_ui::ConfigAction::Save),
+            vec![ConfigEffect::Save],
+            "so `Ctrl+S` now raises the effect `dispatch` sends as `UpdateConfig`"
+        );
+    }
+
+    /// The probe's answer goes to the screen's notice line and nowhere else — including the case where
+    /// there is no screen, which must stay that way rather than opening one.
+    #[test]
+    fn a_test_result_lands_on_the_screen_and_opens_nothing_when_there_is_none() {
+        let mut state = UiState::new();
+        state.apply(&welcome());
+        let result = Event::TestResult {
+            capability: tipsy_protocol::Capability::Chat,
+            ok: true,
+            latency_ms: 42,
+            message: "ok".into(),
+        };
+
+        apply_screen_answer(&mut state, &result);
+        assert!(state.config_form.is_none(), "a probe for a screen that is not up opens nothing");
+
+        state.show_config_form(ConfigForm::default());
+        apply_screen_answer(&mut state, &result);
+        let (_, text) = state
+            .config_form
+            .as_ref()
+            .and_then(|form| form.notice.clone())
+            .expect("the answer is on the notice line");
+        assert!(text.contains("42"), "and the latency is what the row reports: {text}");
+    }
+
+    /// **The page, as a file, because there is no browser on this machine to load it.** Two of the
+    /// document's facts are load-bearing for tasks that have already run:
+    ///
+    /// - the bundle's path, the join between this page and Task 3.6's `--out-dir web/dist`. Task 3.2
+    ///   measured `/assets/dist/tipsy_web.js` answering 200 with the size of the file on disk once
+    ///   `wasm-bindgen` had run, and 404 before it;
+    /// - **no positioned overlay over the canvas**, the trap the spike measured twice
+    ///   (`ratzilla-spike-verdict.md` §5.4 point 2) and which the plan's own Step 5 walks into: its
+    ///   `#hud { position: absolute; inset: 0 }` is an empty div covering the viewport, and a
+    ///   positioned sibling paints *and hit-tests* above the static canvas — every click the HUD's
+    ///   `hit_at` waits for would land on the div instead.
+    ///
+    /// It asks about the **file** and not about a directory holding it (the Phase 2 lesson), and it
+    /// does not skip: `web/client/index.html` is committed, so a checkout that lacks it has to fail
+    /// here rather than pass quietly. The one coupling it accepts is the gate's id: that string is
+    /// Task 3.3's `mic.rs:91`, and a rename there is meant to break this test until the page follows.
+    #[test]
+    fn the_page_loads_the_bundle_the_dist_step_writes_and_puts_nothing_over_the_canvas() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/client/index.html");
+        let page = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        // A commented-out rule is not a rule, and this page's own comment *names* the trap this test
+        // exists for — so the two assertions below read the document with its comments removed. The
+        // rest read it verbatim, which is where the import and the script tag have to be.
+        let live = without_comments(&page);
+
+        assert!(
+            page.contains(r#"import init from "/assets/dist/tipsy_web.js";"#),
+            "the page must import the file `wasm-bindgen --target web --out-dir web/dist` writes"
+        );
+        assert!(page.contains(r#"<script type="module">"#), "a bare `import` needs a module script");
+        assert!(!page.contains("fetch("), "the page fetches nothing at run time (spec §10)");
+
+        assert!(
+            !live.contains(r#"id="hud""#),
+            "the plan's `#hud` div is a second element the backend does not use: its canvas is appended \
+             to `<body>` and there is nothing for the div to hold"
+        );
+        assert!(
+            !live.contains("position: absolute"),
+            "no element may be positioned over the canvas: a positioned sibling hit-tests above it and \
+             would swallow every click (spike §5.4 point 2)"
+        );
+        assert!(
+            live.contains("#tipsy-gate") && live.contains("position: fixed"),
+            "the gate Task 3.3's `gate_elements` appends to `<body>` is styled here, and it is the one \
+             positioned element — and it is removed once the microphone is open"
+        );
+        assert!(page.contains("monospace"), "the stack ends in a generic family to fall back to");
+    }
+
+    /// **The header a real server announced, clicked — on the profile the server sent.**
+    ///
+    /// `.target-sandbox/live-35.ps1` (a real `serve`, a stub provider and a real `ClientWebSocket`)
+    /// captures the `Welcome` text frame to `live-35/welcome.json`. This decodes it with the client's own
+    /// `wire::event_from_text`, routes it through the same `route` the frame loop calls, draws a real
+    /// frame and clicks the gear's own cell through `hud::drain` — the whole glue minus Ratzilla and the
+    /// DOM. **The profile is the server's, so the badge's drawn width is the server's too**, which is
+    /// the one thing the plan's font section was worried about and the one thing a hand-written fixture
+    /// cannot pin: `render.rs` measures every column of that row because the title is the profile's own
+    /// (`render.rs:211-214`).
+    ///
+    /// It asks about the **file**, not about a directory holding it — the Phase 2 lesson, where
+    /// `.is_dir()` was true in a fresh clone and the skip became dead code. A checkout that has never run
+    /// the live check skips this and the reason is printed (visible under `cargo test -- --nocapture`);
+    /// both sides are recorded in the ledger.
+    #[test]
+    fn the_header_a_real_server_announced_is_clickable_on_this_client() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.target-sandbox/live-35/welcome.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!(
+                "skipping `{}`: it is not there. Run `.target-sandbox/live-35.ps1` (a real `serve`, a \
+                 stub provider and a real WebSocket) to produce it — the assertions below need a \
+                 `Welcome` a real server sent, profile and all.",
+                path.display()
+            );
+            return;
+        };
+
+        // The client's own decoder, on the bytes a real server sent.
+        let event = wire::event_from_text(text.trim()).expect("the live `Welcome` decodes");
+        let announced = match &event {
+            Event::Welcome { profile, .. } => profile.name.clone(),
+            other => panic!("the live check captured {other:?}, not a `Welcome`"),
+        };
+
+        let mut state = UiState::new();
+        let mut playback = playback::Playback::new();
+        let mut queue = VecDeque::from(vec![ToClient::Event(event)]);
+        // The call the frame loop makes, with no audio context: the events reach the HUD either way.
+        let (welcomed, scheduled) = route(&mut queue, &mut playback, &mut state, None);
+        assert!(welcomed, "`route` reports the `Welcome` the restored-connection notice is said on");
+        assert!(scheduled.is_empty() && queue.is_empty(), "and nothing is scheduled before a press");
+
+        let title = state.profile.as_ref().expect("the `Welcome` reached the HUD").name.clone();
+        assert_eq!(title, announced, "the badge carries the server's own profile name");
+
+        let clock = hud::clock_from(17, 41, 3, 0, 11, 9);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("a test terminal");
+        let mut hits = Vec::new();
+        terminal
+            .draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, &title))
+            .expect("one frame");
+
+        assert!(hits.len() >= 2, "the header reports its two controls first: {hits:?}");
+        let (mode, gear) = (hits[0], hits[1]);
+        assert_eq!(mode.key, tipsy_ui::KeyInput::F(9), "the mode word is the door key: {mode:?}");
+        assert_eq!(gear.key, tipsy_ui::KeyInput::F(9), "and so is the gear: {gear:?}");
+        assert_eq!(mode.area.right(), gear.area.x, "the mode ends where the gear begins");
+        assert_eq!(
+            gear.area.right(),
+            120,
+            "the gear is flush against the right edge whatever the profile's own name measures"
+        );
+        assert!(mode.area.width > 0 && gear.area.width > 0, "both are clickable: {mode:?} {gear:?}");
+
+        // The whole click path, on the server's own profile.
+        let mut queued = vec![hud::Input::Click { col: gear.area.x, row: 0 }];
+        assert_eq!(hud::drain(&mut state, &hits, &mut queued), vec![UiAction::OpenConfig]);
+        assert!(state.config_form.is_some(), "the door is open on the real profile's header");
+    }
+
+    /// An HTML document with its HTML comments and its CSS block comments removed.
+    ///
+    /// The page's own comments *name* the trap the two assertions above exist for — that is what a
+    /// comment is for — and a commented-out rule is not a rule. `-->` inside an HTML comment is not a
+    /// thing and there is no nesting; a `*/` inside a CSS comment is not a thing either, and the only
+    /// `/*` in this document is the one opening each block comment.
+    fn without_comments(html: &str) -> String {
+        let stripped = strip(html, "<!--", "-->");
+        strip(&stripped, "/*", "*/")
+    }
+
+    fn strip(text: &str, open: &str, close: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(start) = rest.find(open) {
+            out.push_str(&rest[..start]);
+            match rest[start..].find(close) {
+                Some(end) => rest = &rest[start + end + close.len()..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
     }
 }

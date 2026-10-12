@@ -13,6 +13,13 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 tipsy-protocol.workspace = true
 tipsy-ui.workspace = true
+# Task 3.5: `Hit.area` is a `ratatui::layout::Rect`, so the tests that build one need the crate by
+# name, and `hud.rs`'s own rendering test needs `Terminal` and `TestBackend`. The **workspace** entry
+# and not a fresh one: it is `{ version = "0.30", default-features = false, features = ["std",
+# "layout-cache", "all-widgets"] }` and therefore carries **no crossterm**, which is the property that
+# keeps the wasm build plausible. It resolves to the same `ratatui 0.30.2` `tipsy-ui` and `ratzilla`
+# already share — `Hit` would be a different type otherwise.
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -5,22 +5,93 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>tipsy-compadre</title>
     <style>
-      /* No chrome over the terminal, on purpose: the canvas backends put their canvas at (0, 0), so a
-         fixed header bar would cover the HUD's own first row — which is the header with the gear and
-         the mode indicator (`ratzilla-spike-verdict.md` §5.4 point 3). */
-      html, body { margin: 0; height: 100%; background: #001014; }
-      pre, canvas { font-family: Consolas, "Cascadia Mono", "Segoe UI Symbol", monospace; font-size: 16px; }
+      /* The page is the canvas and one overlay, and there is nothing else in it on purpose.
+         `WebGl2Backend::new()` appends its own `<canvas>` to `<body>` — it does not use a container,
+         because `WebGl2BackendOptions::grid_id` is unset and `get_element_by_id_or_body` falls back to
+         the body (`ratzilla-0.3.1/src/backend/utils.rs:255-265`, `:276-294`) — so there is no markup
+         for the terminal here, and a page that wrote one would be describing a canvas it does not own.
+
+         **No element of this page may be positioned over the canvas, and that is a measured rule
+         rather than a style choice.** The Ratzilla spike lost two full rounds to it: with the
+         container `position: absolute`, `elementsFromPoint(300,300)` returned `[DIV#grid, CANVAS]` and
+         **every** mouse event was swallowed by the container, because a positioned element paints and
+         hit-tests above a static sibling (`ratzilla-spike-verdict.md` §5.4 point 2, which the spike's
+         author records as "an input result that looked like a Ratzilla capability failure and was in
+         fact my page's stacking order"). The canvas is static, so anything positioned above it wins
+         the pointer. The one positioned element here is the start gate, and Task 3.3's
+         `press_to_start` **removes** it once the microphone is open (`crates/tipsy-web/src/mic.rs:486`)
+         — after which nothing on the page can intercept a click. The plan's Step 5 is the shape this
+         rule forbids: it carries `#hud { position: absolute; inset: 0 }`, an empty overlay covering the
+         whole viewport, which would swallow every click the HUD's own `hit_at` is waiting for. */
+
+      html, body { margin: 0; height: 100%; background: #001014; overflow: hidden; }
+      canvas { display: block; }
+
+      /* The gate Task 3.3 builds from Rust (`mic.rs`'s `gate_elements`, whose overlay id is
+         `tipsy-gate`): a div, a button and a `p`, in that order, appended to `<body>` after the
+         canvas. It has no styling of its own, so this is where it gets one — and it has to be an
+         overlay, because the canvas above it is a 100%-viewport element and a static block would be
+         laid out *below* the fold, off screen. It is opaque so the HUD is not visible behind it
+         before the user has granted anything.
+
+         Its copy is not here: the button and the reason line are `tipsy_ui::Strings`' `mic_start`,
+         `mic_hint`, `mic_granted` and the rest, in the language the HUD is running in. Restyling this
+         element is the one edit this page may make to Task 3.3's gate, and it changes nothing the
+         gate decides. */
+      #tipsy-gate {
+        position: fixed; inset: 0; display: flex; flex-direction: column; gap: 1rem;
+        align-items: center; justify-content: center; background: #000; color: #d0d0d0;
+      }
+      #tipsy-gate button {
+        font: inherit; font-size: 16px; padding: .5rem 1rem; color: #000; background: #00d2ff;
+        border: 0; cursor: pointer;
+      }
+      /* The probe's own answer, when it says the microphone cannot work at all: the button stays on
+         screen and says so rather than failing on its first press (`mic.rs`'s `MicAvailability`). */
+      #tipsy-gate button:disabled { opacity: .5; cursor: not-allowed; }
+      #tipsy-gate p { max-width: 32rem; text-align: center; line-height: 1.4; }
+
+      /* The font stack, and what it is *not* for.
+
+         It is here for the gate's copy and for nothing else, and the reason is measured: the canvas
+         backends **ignore the page's font entirely**. `WebGl2Backend` rasterises a fixed font atlas
+         (`FontAtlasConfig` unset means `FontAtlasData::default()`, `backend/webgl2.rs:637-649`) and
+         reports `cell_css=10x18` at `?font=16`, `24` and `36` alike (`ratzilla-spike-verdict.md` §6),
+         so `◉`, `⚙` and `·` on the HUD come out of beamterm's own atlas and not out of this stack. The
+         plan's Step 5 argues the opposite — that the browser's font is "a third width table" that can
+         push the header's columns out of the places `drawn_width` measured (`render.rs:264-...`) — and
+         for this backend that is not true. What *did* measure the three glyphs was the spike's
+         `DomBackend` page (`?5.1`), where each cell box is sized `1ch` and the browser draws the
+         glyph: one column each, at 16 px and at 24 px, on the stack below.
+
+         So the stack is the one the spike's own page resolved to — **DejaVu Sans Mono**, which is what
+         `monospace` picked on the machine that measured (`?5.1`), and which agreed with
+         `drawn_width` on all three glyphs. `"Fira Code"` is deliberately **not** first, which is the
+         plan's order: the spike found Fira Code installed but *not* selected by its stack, and measured
+         its advance at 16 px as 14.22656 against DejaVu's 9.63281 — a different width table from the
+         one the pass was recorded on. Nothing on this machine can re-check a header under Fira Code,
+         so this page names the measured family rather than the preferred one. */
+      #tipsy-gate, #tipsy-gate button, #tipsy-gate p {
+        font-family: "DejaVu Sans Mono", Consolas, "Cascadia Mono", "Segoe UI Symbol", monospace;
+      }
     </style>
   </head>
   <body>
     <script type="module">
-      // The bundle is served by this server's own embed, so the path is the absolute one
-      // `crates/tipsy-compadre/src/server/assets.rs` serves: `web/dist/…` under the embedded `web/`
-      // is `/assets/dist/…`. A relative `./tipsy_web.js` would resolve to `/tipsy_web.js`, a route
-      // this router does not have. `cargo run -p xtask -- dist` (Task 3.6) writes the file.
+      // The bundle's JS entry: `wasm-bindgen --target web` output (Task 3.6, `--out-dir web/dist`),
+      // served from `/assets/dist/`. The path is absolute on purpose — a relative `./tipsy_web.js`
+      // would resolve against `/` and ask for `/tipsy_web.js`, a route this server does not have.
+      // Both files land in one directory, which is what lets the generated `init()` find
+      // `tipsy_web_bg.wasm` beside itself with no argument; Task 3.2 measured both answering 200 from
+      // this server with the sizes of the files on disk.
       import init from "/assets/dist/tipsy_web.js";
       // `?token=…` is where a token reaches this page (spec §9.2) and `start()` reads it off
       // `location`; it is never put in the socket's URL.
+      //
+      // `init()` runs `tipsy_web::start()` — it is `#[wasm_bindgen(start)]` — so by the time this
+      // promise settles the render loop is up, the socket is opening and the gate is on screen. A
+      // failure is not swallowed: before Task 3.6 has run `dist` this is a 404, and the console is
+      // where that has to be legible.
       init().catch((error) => console.error("tipsy-web: init failed", error));
     </script>
   </body>
