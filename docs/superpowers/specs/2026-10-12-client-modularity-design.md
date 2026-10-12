@@ -173,9 +173,11 @@ otherwise), with `CARGO_TARGET_DIR` and `TEMP`/`TMP` pinned as `global-constrain
 ways. `cargo fmt` is never run.
 
 1. **Test-name identity.** Before the first edit and after the last one:
-   `cargo test -j 1 --workspace -- --list` into a file, then diff the two name sets. The sets must be
-   **identical**. This is the gate that catches a test lost inside the 823-line split, and it is the
-   reason tests move as an intact block rather than being rewritten in passing.
+   `cargo test -j 1 --workspace -- --list` into a file, then compare. The gate is the **set of test
+   function names — the last `::` segment of each listed path — plus the total count**, and it must be
+   identical. It is deliberately not the full module path: a test that moves from `client::tests::foo`
+   to `policy::tests::foo` is the work, not a regression. This is the gate that catches a test lost
+   inside the 823-line split.
 2. **The suite is green**, `0` failures, with the same count the baseline recorded. The baseline is
    **505 at `2b328f3`** as this document is written; it is re-measured, not trusted.
 3. **No test is deleted, ignored, or weakened.** No `#[ignore]`, no assertion relaxed, no test renamed.
