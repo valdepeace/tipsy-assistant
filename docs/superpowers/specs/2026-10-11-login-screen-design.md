@@ -525,3 +525,14 @@ changing it changes no code path.
   can make a device fail to open, and push-to-talk's own refusal has never had a test either. Also
   worth a human eye, because no test can see it: the veil's look on a real terminal (`Veil::Dim` is the
   escape hatch if `▒`/`░` land badly), and the core's pulse following the voice while the door is shut.
+- **A change the user has asked for, not yet designed (2026-10-12).** On a **correct** answer the screen
+  should come down and the veil should lift **at once**, with no `Enter` in between — the opposite of
+  §6.2's "The screen stays until `Enter`". The argument is §7's own: the veil exists to hide the HUD
+  from someone who has *not* identified themselves, and once the verdict is `ok` they have, so veiling
+  them afterwards protects nothing and reads as a defect. The greeting does not depend on the keypress
+  (§10 has the verdict speak it), so nothing is lost by closing the door in the same arm — and
+  `LoginPhase::Passed` would then have no state to sit in, which is a simplification worth taking
+  deliberately rather than by accident. `render.rs` needs no change: the veil is a function of
+  `login.is_some()`. **Nothing has been changed yet.** The code paths and the five tests it touches are
+  in this plan's workspace, `.superpowers/sdd/2026-10-11-plan-login-screen/follow-ups.md`, beside the
+  one defect the reviews parked.

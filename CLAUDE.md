@@ -47,14 +47,18 @@ was not terminal for the phase — a later `Tab`, a stale refusal or an error co
 outside a door they had walked through. Both are fixed, and **master is at 425 tests, 0 failures**. It
 is a **ritual, not authentication**: `server.token` is still the only door, and nothing in its code,
 docs or comments claims otherwise. Its record is `.superpowers/sdd/2026-10-11-plan-login-screen/` — read
-`coordinator-rulings.md` there, not `progress.md`, which another session overwrote.
+`coordinator-rulings.md` there, not `progress.md`, which another session overwrote. **Its one open
+request from the user (2026-10-12): a correct answer should take the screen down and lift the veil at
+once, instead of holding both until `Enter`** — which is what login spec §6.2 specifies today, on
+purpose. The code paths, the spec sentences and the five tests it touches are in that workspace's
+`follow-ups.md`, beside the one defect the reviews parked.
 
-**In flight on its own branch: Phase 1 of Plan 3, the web tier**
+**Integrated on `master`: Phase 1 of Plan 3, the web tier**
 (`docs/superpowers/plans/2026-10-11-plan-3-web-tier.md`, spec
 `docs/superpowers/specs/2026-10-11-web-tier-design.md`) — **20 tasks in three phases** (9 server and
 remote client, 4 web terminal, 7 web client), whose Ratzilla gate is answered `PASS`. **Tasks 1.1–1.9
-are executed on branch `plan-3-phase-1` and not merged; the whole branch has been reviewed twice**
-(security and the wire, then correctness and the tests) **and one fix wave has closed their blockers**:
+are merged** (fast-forward to `2f25c20`, 35 files, +9,369/−300); the branch was reviewed twice
+(security and the wire, then correctness and the tests) **and two fix waves closed every blocker**:
 the bare run now says `Hello` before the terminal (it used to greet nothing and die on the user's first
 keypress), the attach token travels only in `Hello` and no URL that can carry one is printed anywhere,
 a handshake deadline bounds a socket that says nothing, a client's `UpdateConfig` is *shaped* so it
@@ -62,7 +66,10 @@ cannot move a provider's `base_url`, a provider's `key_name` or `server.token` a
 after admission, the read side has an explicit ceiling and the session's audio buffers are capped,
 three vacuous tests were made falsifiable, and `TIPSY_CONFIG_DIR` made the phase's **first live
 `serve` + `--connect` + `serve --tls` check possible — which then found that `serve --tls` had never
-served at all** (it bound the port twice and died with `WSAEADDRINUSE`). **505 tests, 0 failures**,
+served at all** (it bound the port twice and died with `WSAEADDRINUSE`). The scoped re-review then found
+that removing the route's token check had left **a web page able to reach a loopback listener**, so
+`/ws` now refuses with 403 an upgrade whose `Origin` is present and is not the host the request arrived
+on — and `--connect` sends none, which is why it is unaffected. **509 tests, 0 failures**,
 clippy at the same seven pre-existing findings, wasm clean. Its ledger is
 `.superpowers/sdd/2026-10-11-plan-3-web-tier/progress.md` and the constraints every task inherits are
 beside it in `global-constraints.md`. **Read the two review reports in that same directory**
@@ -119,6 +126,13 @@ free tier was withdrawn. Every profile's wake word stays provisional until it is
   binary runs restricted and cannot create `%APPDATA%\tipsy-compadre\config.toml` — that trap cost
   hours once and is recorded in Plan 1's ledger. The permission recovery scripts live in
   `E:\workspace\personal\.dsh-acl-recovery\` (each with its own rollback command).
+- **A process the tool *starts* can only write inside the project tree.** Not a permission bug and not
+  the app's: the confinement applies to spawned processes, so the binary gets `Acceso denegado` when it
+  tries to create `%APPDATA%\tipsy-compadre\config.toml` — or a log, or a config **anywhere** outside
+  the repository — while the shell's own file operations succeed in the same directory. That is the real
+  mechanism behind the `G:`-build trap above, and it is why a hand-editable configuration has to live
+  inside the tree: `TIPSY_CONFIG_DIR` is the way, and `.tipsy-config/` at the repository root is ignored
+  for exactly this and holds the demo config the user edits.
 - **Run the tests with `-j 1`.** At cargo's default job parallelism this machine dies with
   `STATUS_STACK_BUFFER_OVERRUN`, which looks exactly like a code fault and is not one. Plan 2B's
   ledger records the discovery.
