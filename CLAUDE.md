@@ -86,18 +86,25 @@ beside it in `global-constraints.md`. **Read the two review reports in that same
 wrong in three ways. Phases 2 and 3 have not started.
 
 **The client's files are split, and the client's decision policy is shared** — spec
-`docs/superpowers/specs/2026-10-12-client-modularity-design.md`. It landed on branch
-`client-modularity` in its own worktree and is **done**: `ef8333c` (the policy → `tipsy_ui::policy`),
-`726104b` (`client/mic.rs`), `1610ad5` (`client/audio.rs`), `5b80abc` (`client/call.rs`) and `4237d37`
-(`client/settings.rs`). `client.rs` is the parent module and went from **1176 production lines at
+`docs/superpowers/specs/2026-10-12-client-modularity-design.md`. **Merged into `master` at `0de11e0`**
+(it ran on branch `client-modularity` in its own worktree, which is now gone; its ledger and the
+identity gate's captures were copied to `.superpowers/sdd/2026-10-12-client-modularity/`): `ef8333c`
+(the policy → `tipsy_ui::policy`), `726104b` (`client/mic.rs`), `1610ad5` (`client/audio.rs`),
+`5b80abc` (`client/call.rs`) and `4237d37` (`client/settings.rs`), then the record. `client.rs` is the
+parent module and went from **1176 production lines at
 `2f25c20` to 574** (1176 → 1055 → 945 → 905 → 819 → 574, one step per commit); the children hold what
 left it — `settings.rs` 271 production lines, `mic.rs` 132, `call.rs` 115, `audio.rs` 58 — and the
 client's turn, microphone and playback policy (`starts_turn`, `interrupts_playback`,
 `test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`, `mic_wanted`, `mic_route`/
 `MicRoute`, `hit_at`, and the new `speech_rate`) lives in `tipsy_ui::policy` for both clients to call.
-**The suite is 513 tests / 0 failures** (511 distinct names: two leaf names are duplicated across
-modules, and four were added by Task 1), clippy at the same seven findings, the wasm gate clean, and
-the test-name identity gate clean at every one of the five commits. **The plan's own "< 450 production
+**Reviewed once as a whole branch, answered by one fix wave, scoped-re-reviewed, and that re-review's
+own follow-up verified by hand before the merge** — the review proved all 33 original `client.rs` tests
+and all 24 moved methods byte-identical and the whole production diff a single equivalent substitution.
+**The branch's suite was 513 tests / 0 failures** (511 distinct names: two leaf names are duplicated
+across modules, and four were added by Task 1), clippy at the same seven findings, the wasm gate clean,
+and the test-name identity gate clean at every one of the five commits; **`master` after the merge is
+514 / 0** — the extra one is the profile-switch test `4a6bab9` added — with the identity gate at
+514 / 512. **The plan's own "< 450 production
 lines" target for `client.rs` was wrong and is not met**: the four moves shed 481 production lines, not
 the ~730 its arithmetic assumed, because `client.rs` keeps `frame_loop`, `on_message`, `on_action`
 (both settings arms included), `key_input` and `clock_view`. `session.rs` was **not** split — that task
