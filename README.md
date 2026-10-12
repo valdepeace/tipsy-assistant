@@ -15,9 +15,10 @@ three listening modes work: `push`, where you open and close the microphone by h
 where a voice detector decides what is an utterance. The server and the remote client work too:
 `tipsy-compadre serve` listens, and `tipsy-compadre --connect <ws-url>` attaches a terminal to it.
 The **web terminal** works as well — `/terminal` runs that same TUI in a browser tab over a socket of
-raw PTY bytes (Phase 2 of the web tier) — and the **web client**, the real browser HUD at `/`, is the
-phase after it. Still to come: `hands_free` (it waits for the wake word), the web client, plus CI and
-releases.
+raw PTY bytes (Phase 2 of the web tier) — and so does the **web client**: `cargo run -p xtask -- dist`
+builds the browser HUD into `web/dist/`, the binary embeds it, and `/` renders that HUD from
+WebAssembly with the browser's own microphone and speakers (Phase 3). Still to come: the login door's
+browser wiring, `hands_free` (it waits for the wake word), plus CI and releases.
 
 ## Quick start
 
@@ -437,6 +438,43 @@ export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '^/usr/bin$' | paste -sd:)"
 ```
 
 In PowerShell no change is needed.
+
+### Building the full distribution
+
+Two steps, wrapped in one command: the WebAssembly bundle first, then the binary that embeds it.
+
+```sh
+cargo run -p xtask -- dist
+```
+
+It needs the network once per clean checkout (it fetches the pinned xterm.js for the web terminal) and
+the wasm target, which the pinned toolchain does not install by itself:
+
+```sh
+rustup target add wasm32-unknown-unknown
+```
+
+The command runs `cargo build --target wasm32-unknown-unknown -p tipsy-web --release`,
+`wasm-bindgen --target web` (the CLI's version must be the one `Cargo.lock` pins — `cargo install -f
+wasm-bindgen-cli --version <that version>`), and finally `cargo build -p tipsy-compadre --release` with
+the bundle embedded. Run it from somewhere inside the repository — its root or any crate directory:
+`dist` resolves `web/vendor/` from the `xtask` crate's own location rather than from your shell's
+working directory, so the fetched assets land where the embed reads them, and it prints the absolute
+path it wrote. A file that is present and does not match the pinned digest is **refused** rather than
+re-fetched, so delete the file it names and run it again.
+
+**There is no short form.** `cargo xtask dist` is not a working spelling and no document may carry it:
+cargo resolves `cargo <name>` by looking for a `cargo-<name>` binary on `PATH`, and this workspace's own
+binary target is not there, so it answers ``error: no such command: `xtask` ``. `server::assets`'s
+`DIST_COMMAND` (the string the missing-bundle page renders), `docs/architecture.md` and this section all
+spell the long form. An `[alias]` in `.cargo/config.toml` would work on your own machine, but `.cargo/`
+is git-ignored here and never ships, so nothing documented may depend on it.
+
+**A plain `cargo build` produces a binary without the web client.** The server still runs and `/`
+answers with the checked-in page, whose script the server does not have; the page that says how to build
+the bundle is what a build with no `web/client/index.html` serves. A *debug* build reads `web/` from the
+directory you run the binary from, so `cargo run -p tipsy-compadre` started at the repository root
+serves a bundle that is already built, and a binary copied elsewhere does not.
 
 ## How to verify the web terminal
 
