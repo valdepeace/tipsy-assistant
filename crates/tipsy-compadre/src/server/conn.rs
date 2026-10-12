@@ -21,7 +21,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use futures::stream::StreamExt;
 use tipsy_protocol::{ClientKind, Command, ErrorCode, Event, Frame, ToClient, ToServer};
 use tokio::sync::mpsc;
@@ -77,6 +77,20 @@ impl Default for ConnOptions {
             max_message_size: READ_CEILING,
         }
     }
+}
+
+/// Applies [`ConnOptions`]' socket bounds to an upgrade, in **one** place: the production `/ws`
+/// handler (`server::ws`) and this file's own test handler both call it, so a bound cannot be dropped
+/// from one of them and stay covered by the other's test (M1, the read ceiling's lost coverage).
+///
+/// `max_frame_size` is set from `max_message_size` deliberately: a *message* ceiling that left single
+/// frames unbounded would let one framing choice — a fragmented message — carry a frame past it.
+pub fn with_limits(upgrade: WebSocketUpgrade, options: ConnOptions) -> WebSocketUpgrade {
+    upgrade
+        .write_buffer_size(options.write_buffer_size)
+        .max_write_buffer_size(options.max_write_buffer_size)
+        .max_message_size(options.max_message_size)
+        .max_frame_size(options.max_message_size)
 }
 
 /// Why a connection ended. Four ways in, one way out.
@@ -552,11 +566,9 @@ mod tests {
         let options = state.options;
         let policy = state.policy.clone();
         let peer: SocketAddr = "127.0.0.1:54123".parse().expect("a literal loopback address parses");
-        upgrade
-            .write_buffer_size(options.write_buffer_size)
-            .max_write_buffer_size(options.max_write_buffer_size)
-            .max_message_size(options.max_message_size)
-            .max_frame_size(options.max_message_size)
+        // The production handler calls the same function, which is what makes one test of the
+        // ceiling a test of both routes (M1).
+        super::with_limits(upgrade, options)
             .on_upgrade(move |socket| async move {
                 // The hub's entry point: it allocates the session id, attaches the session before
                 // `Welcome` can be missed, and clones the fakes in its slot into the session.

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -68,18 +68,19 @@ pub struct Settings {
 
 /// Hand-written, not derived: the derive would require `ProviderSlot` — hence the three connector
 /// trait objects behind it — to be `Debug`, and it is not. The two handles are shown as handles, and
-/// neither the token nor the configuration is printed: `Config`'s own `Debug` prints
-/// `server.token`, which made an earlier version of this formatter claim more than it did, and a
-/// `Debug` line reaches a log more often than anyone intends (spec §9.6).
+/// neither the token nor the configuration is printed: `Config`'s own `Debug` printed `server.token`
+/// when this formatter was first written, which made it claim more than it did, and a `Debug` line
+/// reaches a log more often than anyone intends (spec §9.6). `ServerConfig`'s formatter is redacted
+/// now, so that specific leak is closed where the secret lives; this one still prints a *summary*
+/// rather than the whole configuration, because a log line is not the place for one.
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Settings")
             .field("bind", &self.bind)
             .field("lan", &self.lan)
             .field("token", &if self.token.trim().is_empty() { "<none>" } else { "<set>" })
-            // A summary rather than `&self.config`: printing the whole configuration would print the
-            // token into whatever line this `Debug` lands in, which is the one thing this file's own
-            // comment promised it did not do.
+            // A summary rather than `&self.config`: a whole configuration in a log line is more than
+            // a `Debug` line should carry, and this is the formatter that promised to be safe.
             .field("config", &config_summary(&self.config))
             .field("config_path", &self.config_path)
             .field("keys", &"<key resolver>")
@@ -89,8 +90,9 @@ impl std::fmt::Debug for Settings {
     }
 }
 
-/// The configuration as a `Debug` may print it: what describes it, and none of the secrets
-/// `Config`'s derived `Debug` would print (its `server.token` above all).
+/// The configuration as a `Debug` may print it: what describes it, and not the whole of it. The token
+/// is no longer a reason to keep it short — `ServerConfig`'s formatter is hand-written and redacted
+/// (`config/model.rs`) — but a log line is still not the place for a whole configuration.
 fn config_summary(config: &Config) -> String {
     format!(
         "Config {{ active_profile: {:?}, profiles: {}, bind: {:?}, lan: {} }}",
@@ -155,10 +157,16 @@ impl std::fmt::Display for ServerError {
             ),
             // The address is in the sentence because the operator has to be told *which* address was
             // refused: `--bind` overrides the file, so "the one in config.toml" is a guess.
+            //
+            // **The advice names the address and the token, and deliberately not `lan`.** `lan` is not
+            // a term in §5.1's rule: the rule reads the address, `lan = true` on a loopback address is
+            // legal and changes nothing, and setting it on this one would still be refused. The
+            // sentence used to offer it, which sent a user to a switch that cannot help them
+            // (`Settings.lan`'s own comment records the same thing).
             ServerError::LanWithoutToken { addr } => write!(
                 f,
                 "refusing to bind {addr}: it is not a loopback address and no token is configured. \
-                 Set a token, or set `lan = true` in [server] together with a token."
+                 Set a token in [server], or bind a loopback address such as 127.0.0.1:7070."
             ),
             ServerError::BoundWiderThanAsked { addr } => write!(
                 f,
@@ -457,6 +465,17 @@ fn page_response(content_type: &'static str, body: Vec<u8>) -> Response {
 /// the log line of anything that prints the address (spec §9.2, §9.1). What keeps a silent socket
 /// from holding a session is `SessionPolicy::handshake_timeout`, not an HTTP status.
 ///
+/// **What replaced that check is the `Origin` check below, and it is the only thing that keeps a
+/// *page* out of a *loopback* listener.** A WebSocket handshake is not subject to the same-origin
+/// policy: nothing in a browser stops a page the user merely visits from opening
+/// `ws://127.0.0.1:<port>/ws`, and `SessionPolicy::require_token` is false on loopback by design, so
+/// such a page *is* admitted. That matters because `Command::UpdateConfig` carries the client's shape
+/// (`ClientServerView` holds `bind` and `lan`) into `Hub::apply_config`, which persists it — so a page
+/// could leave `bind = "0.0.0.0"` and `lan = true` behind for the **next** `serve` to bind the LAN
+/// with. `--connect` sends no `Origin` at all, which is why the documented CLI attach is unaffected;
+/// a page served from `/` sends this listener's own origin and is allowed. See
+/// [`origin_is_this_host`] for what "its own" means, and [`forbidden`] for the status.
+///
 /// `ConnectInfo<SocketAddr>` is the peer's address, and Task 1.8's §9.4 guard is the one thing that
 /// needs it: the rule is about **who** sent a `SetKey`, not about what the configuration says. The
 /// `true` passed to `conn::serve` is whether this listener terminates TLS — the other half of the
@@ -464,8 +483,20 @@ fn page_response(content_type: &'static str, body: Vec<u8>) -> Response {
 async fn ws(
     State(state): State<ServeState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    // Refused **before** the upgrade, so no session is spawned for a request that fails this: the
+    // page never reaches `Hello`, and the hub never sees it.
+    //
+    // `403` and not `401`: no credential can change the answer — a token would not make another
+    // page's origin this listener's own, and a loopback listener asks for no token at all — so
+    // `401`'s "authenticate and try again" would be a lie, and `403` is the status for a request
+    // that is understood, well-formed and refused. `400` is what axum itself answers a handshake
+    // whose WebSocket headers are wrong, and this request's are not.
+    if !origin_is_this_host(&headers) {
+        return forbidden();
+    }
     // The research note reads axum 0.8.9's own defaults: the write buffer is 128 KiB and
     // `max_write_buffer_size` is **unlimited** until it is set (`web-transport-and-terminal.md:1339-1344`).
     // A peer that stops reading must not grow the server's memory, so the ceiling is explicit.
@@ -474,12 +505,13 @@ async fn ws(
     // nothing in the protocol caps a frame's sample count, so one inbound message could have added
     // tens of megabytes to a session's buffer. `max_frame_size` is set from the same number so no
     // single frame can slip past the message ceiling.
-    let options = conn::ConnOptions::default();
-    let upgrade = upgrade
-        .write_buffer_size(options.write_buffer_size)
-        .max_write_buffer_size(options.max_write_buffer_size)
-        .max_message_size(options.max_message_size)
-        .max_frame_size(options.max_message_size);
+    //
+    // **`conn::with_limits` is the one place those four bounds are applied**, and this call is the
+    // production half of it: the same function is what `conn.rs`'s test handler calls, and
+    // `server::tests::the_read_ceiling_is_applied_on_the_route_that_ships` drives this router. Before
+    // that test and that one place existed, deleting these bounds from this handler left the whole
+    // workspace green (M1).
+    let upgrade = conn::with_limits(upgrade, conn::ConnOptions::default());
     // Taken out before the upgrade so the async block owns what it needs: `spawn` needs the hub
     // itself, and `serve` needs another handle to it.
     let hub = state.hub.clone();
@@ -498,6 +530,100 @@ async fn ws(
         // session's own front door is `Command::Hello`, which every connection sends first.
         conn::serve(socket, ends, hub.clone(), ClientKind::Web, peer, tls).await;
     })
+}
+
+/// Why a `/ws` upgrade whose `Origin` is another page's is refused. The status is the whole story:
+/// **nothing a caller can present would change the answer** — a token is not what is missing, and the
+/// loopback listener this is here to protect asks for none — so `401` would send a client looking for
+/// a credential that does not exist, and `400` would call a well-formed request malformed.
+///
+/// The body names no address, no header and no token, and the refusal is not logged: a page may ask
+/// as often as it likes, and each refusal is cheap precisely because no session was spawned for it.
+fn forbidden() -> Response {
+    (StatusCode::FORBIDDEN, "the Origin of this request is not this server's own host").into_response()
+}
+
+/// Whether a `/ws` upgrade is allowed by the one rule the absent token check left behind: **an
+/// `Origin` that is present must be the host the request actually arrived on**.
+///
+/// - **Absent is allowed.** `--connect` and every other CLI client send no `Origin` at all — a header
+///   only a browser adds — and that is the documented local attach (README, release checklist). The
+///   check is about a browser; a browser always sends one.
+/// - **Present and unreadable is refused.** `null` (a sandboxed frame, a `file://` page), another
+///   scheme, a value with no authority, a `Host` that cannot be read: none of them is *provably* this
+///   host, and "not provably ours" is not a state to admit. No legitimate client sends one.
+/// - **Compared against the request's own host, never a spelling written here.** The reference is the
+///   `Host` header, so a page served from `http://127.0.0.1:PORT` and one served from
+///   `http://localhost:PORT` each open a socket (and send a `Host`) naming the name they were loaded
+///   from, and each matches. This is also why the *page* must connect back to the host it was served
+///   from: `http://localhost:PORT` is not `127.0.0.1:PORT`, and the two are different authorities
+///   whatever they resolve to.
+/// - Host names are compared case-insensitively, and a port omitted on both sides — or named on one
+///   side and equal to the other's scheme default — is the same authority.
+fn origin_is_this_host(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Some((origin_host, origin_port, default_port)) = origin.to_str().ok().and_then(origin_authority) else {
+        return false;
+    };
+    let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else {
+        // A browser always sends `Host`; without one there is nothing to compare the origin to.
+        return false;
+    };
+    let Some((host_name, host_port)) = authority_parts(host) else {
+        return false;
+    };
+    origin_host == host_name && origin_port.unwrap_or(default_port) == host_port.unwrap_or(default_port)
+}
+
+/// `(host, port, the scheme's default port)` out of an `Origin`, or `None` when it is not an
+/// `http`/`https` origin that can be read at all. The scheme must be one of those two: a browser's
+/// page is served over one of them, and `file://`, `chrome-extension://` and `null` are pages this
+/// listener has no business admitting.
+fn origin_authority(origin: &str) -> Option<(String, Option<u16>, u16)> {
+    let (scheme, rest) = origin.split_once("://")?;
+    let default_port = match scheme.to_ascii_lowercase().as_str() {
+        "http" => 80,
+        // What a TLS listener's own page sends. The scheme is the page's, not the socket's; the
+        // authority is the half that has to match.
+        "https" => 443,
+        _ => return None,
+    };
+    // An origin is `scheme://host[:port]` with nothing after it. A path, a query or a fragment is not
+    // part of one, and reading past it cannot make a foreign host match, so it is ignored rather than
+    // refused.
+    let authority = rest.split(|c: char| c == '/' || c == '?' || c == '#').next().unwrap_or("");
+    let (name, port) = authority_parts(authority)?;
+    Some((name, port, default_port))
+}
+
+/// `(host, port)` out of an authority such as `127.0.0.1:7070`, `localhost` or `[::1]:7070`, or
+/// `None` when it is not one: an empty name, whitespace, userinfo, a path, or a port that is not a
+/// number. The name is folded to lower case because host names are case-insensitive and an `Origin`
+/// is not required to preserve the case the user typed.
+fn authority_parts(authority: &str) -> Option<(String, Option<u16>)> {
+    if authority.is_empty() || authority.chars().any(|c| matches!(c, '@' | ' ' | '\t' | '/')) {
+        return None;
+    }
+    let (name, port) = if let Some(rest) = authority.strip_prefix('[') {
+        // An IPv6 literal, which is where a colon is not a port separator.
+        let (name, tail) = rest.split_once(']')?;
+        (format!("[{name}]"), tail.strip_prefix(':'))
+    } else {
+        match authority.split_once(':') {
+            Some((name, port)) => (name.to_string(), Some(port)),
+            None => (authority.to_string(), None),
+        }
+    };
+    let port = match port {
+        Some(text) => Some(text.parse().ok()?),
+        None => None,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_ascii_lowercase(), port))
 }
 
 /// The token the two **pages** are reached with, and the one shape a browser can send on a
@@ -636,14 +762,19 @@ mod tests {
         assert!(addr.port() != 0, "the kernel's port is reported, not the 0 that was asked for");
     }
 
+    /// The refusal names the **address**, the token and nothing else. `lan` is not a term in §5.1's
+    /// rule — it is read for the log line and no guard — so the sentence no longer offers a switch
+    /// that could not make this bind legal (F15's residue; the README's "the bind rule is about the
+    /// address, not the switch" is the same claim a user reads first).
     #[tokio::test]
-    async fn a_wildcard_bind_with_no_token_refuses_and_names_lan() {
+    async fn a_wildcard_bind_with_no_token_refuses_and_names_the_address() {
         // `0.0.0.0` is unspecified, not loopback (research note `:540`), so the rule catches it.
         let error = start(settings("0.0.0.0:0", "")).await.expect_err("0.0.0.0 is every interface");
         let message = error.to_string();
         assert!(message.contains("0.0.0.0"), "the message names the address it refused: {message}");
-        assert!(message.contains("lan = true"), "and the switch that would make it legal: {message}");
+        assert!(message.contains("127.0.0.1"), "and an address that would be legal instead: {message}");
         assert!(message.contains("token"), "and the token it needs: {message}");
+        assert!(!message.contains("lan = true"), "and not the decorative switch that cannot help: {message}");
     }
 
     #[tokio::test]
@@ -734,6 +865,201 @@ mod tests {
         let loopback = start(settings("127.0.0.1:0", "correct-horse")).await.expect("a loopback bind needs no token to be legal");
         let local = attach(loopback.port(), None).await;
         assert!(local.contains(r#""type":"welcome""#), "a loopback listener asks for no token: {local}");
+    }
+
+    /// **H1, the blocker the fix wave's scoped re-review found.** Removing the route's `?token=` check
+    /// was right — the token belongs in `Hello` — but that check was also the only thing keeping a
+    /// **page** out of a loopback listener, because a WebSocket handshake is not subject to the
+    /// same-origin policy and `SessionPolicy` asks for no token on loopback. What a page gains is not
+    /// a key: `Command::UpdateConfig` carries the client's shape, `ClientServerView` holds `bind` and
+    /// `lan`, and `Hub::apply_config` **persists** it — so a page the user merely visits could leave a
+    /// LAN-wide bind behind for the next `serve` to use.
+    ///
+    /// The listener here holds a token on purpose: what is under test is that the `Origin` header is
+    /// what refuses the page, not the token, which a loopback session never asks for.
+    ///
+    /// Three shapes, in the order that matters: the CLI's (no `Origin` — it must attach), the
+    /// listener's own page in **both** spellings (`127.0.0.1` and `localhost`, each reaching the
+    /// server under its own name), and any other page (refused before the upgrade).
+    #[tokio::test]
+    async fn a_foreign_origin_is_refused_and_a_client_with_no_origin_attaches() {
+        use futures::{SinkExt, StreamExt};
+        use tipsy_protocol::{ClientKind, Command, PROTOCOL_VERSION};
+        use tokio_tungstenite::tungstenite::{http::Uri, ClientRequestBuilder, Error, Message};
+
+        /// One attach to `host:port`. `Origin` is set when asked for and **absent** otherwise, which is
+        /// exactly the request `--connect` sends: `tungstenite`'s `IntoClientRequest for &str` adds no
+        /// `Origin`, and `ClientRequestBuilder` starts from that same request and only appends.
+        async fn attach(host: &str, port: u16, origin: Option<&str>) -> Result<String, Error> {
+            let uri: Uri = format!("ws://{host}:{port}/ws").parse().expect("a literal url parses");
+            let mut request = ClientRequestBuilder::new(uri);
+            if let Some(origin) = origin {
+                request = request.with_header("Origin", origin);
+            }
+            let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
+            let hello = Command::Hello { token: None, client: ClientKind::Web, protocol_version: PROTOCOL_VERSION };
+            socket.send(Message::text(serde_json::to_string(&hello).unwrap())).await.expect("the socket must stay open");
+            let message = tokio::time::timeout(PATIENCE, socket.next())
+                .await
+                .expect("the bridge must answer inside the patience window")
+                .expect("the socket must stay open")
+                .expect("the socket must not error");
+            match message {
+                Message::Text(text) => Ok(text.to_string()),
+                other => panic!("the server sends JSON text here, got {other:?}"),
+            }
+        }
+
+        // The greeting would otherwise reach the real provider hosts; a refused loopback port answers
+        // it in microseconds and keeps this test off the network, exactly as the token test above does.
+        let mut loopback = settings("127.0.0.1:0", "correct-horse");
+        for provider in [
+            &mut loopback.config.providers.chat,
+            &mut loopback.config.providers.speech,
+            &mut loopback.config.providers.transcribe,
+        ] {
+            provider.base_url = "http://127.0.0.1:9/v1".into();
+        }
+        loopback.providers = providers(&loopback.config);
+        let addr = start(loopback).await.expect("a token never stops a loopback bind");
+        let port = addr.port();
+
+        // The documented local attach: no `Origin` at all, and no token, against a listener whose
+        // configuration holds one. This is the half the fix must not break.
+        let cli = attach("127.0.0.1", port, None).await.expect("a client that sends no Origin is the CLI, and must attach");
+        assert!(cli.contains(r#""type":"welcome""#), "a loopback listener asks for no token: {cli}");
+
+        // The listener's own page: it was served from this host, so this origin is this host — and
+        // each spelling is compared against the `Host` the request arrived with, not against a name
+        // written into the code.
+        for (host, origin) in [
+            ("127.0.0.1", format!("http://127.0.0.1:{port}")),
+            ("localhost", format!("http://localhost:{port}")),
+        ] {
+            let own = attach(host, port, Some(&origin))
+                .await
+                .unwrap_or_else(|error| panic!("the listener's own page at {origin} must attach: {error}"));
+            assert!(own.contains(r#""type":"welcome""#), "the page served from {origin} is this host: {own}");
+        }
+
+        // Any other page: refused before the upgrade, so no session is ever spawned for it.
+        let foreign = attach("127.0.0.1", port, Some("http://evil.example"))
+            .await
+            .expect_err("a page that is not this host must not reach a session");
+        match foreign {
+            Error::Http(response) => assert_eq!(
+                response.status().as_u16(),
+                403,
+                "the refusal is a decision, not a missing credential: 401 would ask for a token that \
+                 would not help"
+            ),
+            other => panic!("a foreign Origin must fail the handshake with an HTTP status, got {other:?}"),
+        }
+    }
+
+    /// The `Origin` comparison itself, without a socket: every shape a browser can send, and the two
+    /// spellings of this machine. A browser sends `scheme://host[:port]`, and the host it has to match
+    /// is the `Host` header the request arrived with.
+    #[test]
+    fn an_origin_matches_the_host_the_request_arrived_on() {
+        fn headers(origin: Option<&str>, host: Option<&str>) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, origin.parse().expect("a literal origin header"));
+            }
+            if let Some(host) = host {
+                headers.insert(header::HOST, host.parse().expect("a literal host header"));
+            }
+            headers
+        }
+
+        // Absent is the CLI, and it is the half that must never be refused.
+        assert!(origin_is_this_host(&headers(None, None)), "`--connect` sends no Origin at all");
+        assert!(origin_is_this_host(&headers(None, Some("127.0.0.1:7070"))), "and the check is about the header, not the host");
+
+        // The listener's own page, in either spelling, case-folded, and with a default port omitted
+        // on both sides.
+        assert!(origin_is_this_host(&headers(Some("http://127.0.0.1:7070"), Some("127.0.0.1:7070"))));
+        assert!(origin_is_this_host(&headers(Some("http://localhost:7070"), Some("localhost:7070"))));
+        assert!(origin_is_this_host(&headers(Some("https://LOCALHOST:7070"), Some("localhost:7070"))));
+        assert!(origin_is_this_host(&headers(Some("http://127.0.0.1"), Some("127.0.0.1"))));
+        assert!(origin_is_this_host(&headers(Some("http://example.test:80"), Some("example.test"))));
+
+        // A page anywhere else. The two loopback spellings are deliberately not interchangeable:
+        // `localhost:7070` and `127.0.0.1:7070` are different authorities, and the page that must be
+        // admitted is the one served from the name the socket names.
+        assert!(!origin_is_this_host(&headers(Some("http://evil.example"), Some("127.0.0.1:7070"))));
+        assert!(!origin_is_this_host(&headers(Some("http://localhost:7070"), Some("127.0.0.1:7070"))));
+        assert!(!origin_is_this_host(&headers(Some("http://127.0.0.1:7071"), Some("127.0.0.1:7070"))), "another port");
+        assert!(!origin_is_this_host(&headers(Some("http://127.0.0.1:7070"), Some("127.0.0.1:7071"))), "either way round");
+
+        // Present and unreadable: not provably this host, so refused. `null` is what a sandboxed frame
+        // and a `file://` page send, and neither scheme is one this listener serves a page over.
+        assert!(!origin_is_this_host(&headers(Some("null"), Some("127.0.0.1:7070"))));
+        assert!(!origin_is_this_host(&headers(Some("file://127.0.0.1:7070"), Some("127.0.0.1:7070"))));
+        assert!(!origin_is_this_host(&headers(Some("chrome-extension://abcdef"), Some("127.0.0.1:7070"))));
+        assert!(!origin_is_this_host(&headers(Some("127.0.0.1:7070"), Some("127.0.0.1:7070"))), "no scheme at all");
+        assert!(!origin_is_this_host(&headers(Some("http://"), Some("127.0.0.1:7070"))));
+        assert!(!origin_is_this_host(&headers(Some("http://127.0.0.1:not-a-port"), Some("127.0.0.1:7070"))));
+        assert!(!origin_is_this_host(&headers(Some("http://user@127.0.0.1:7070"), Some("127.0.0.1:7070"))));
+        // An `Origin` with no `Host` to compare it to is refused rather than guessed at.
+        assert!(!origin_is_this_host(&headers(Some("http://127.0.0.1:7070"), None)));
+    }
+
+    /// **M1: the read ceiling on the route that ships.** `READ_CEILING` was applied in two places and
+    /// only `conn.rs`'s test handler's copy was covered, so deleting it from `server::ws` left the
+    /// workspace at 505 passed, 0 failed: the value and the mechanism were proven, and the production
+    /// route's *use* of them was not. Two things close that now — `conn::with_limits` is the one place
+    /// either handler applies the bounds, and this test drives `run`'s real router, so it is the
+    /// shipping path and not a copy of it.
+    ///
+    /// The frame is large on purpose: this listener uses `ConnOptions::default()`, so the only frame
+    /// that proves anything here is one over 256 KiB — 140 000 samples are 280 000 bytes, which is over
+    /// `READ_CEILING` and far under axum's own 64 MiB default. A frame under the ceiling goes first, so
+    /// the connection is known to have been alive and being read a moment before the assertion.
+    #[tokio::test]
+    async fn the_read_ceiling_is_applied_on_the_route_that_ships() {
+        use futures::{SinkExt, StreamExt};
+        use tipsy_protocol::{ClientKind, Command, Frame, PROTOCOL_VERSION};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // The greeting would otherwise reach the real provider hosts; a refused loopback port answers
+        // it in microseconds.
+        let mut loopback = settings("127.0.0.1:0", "correct-horse");
+        for provider in [
+            &mut loopback.config.providers.chat,
+            &mut loopback.config.providers.speech,
+            &mut loopback.config.providers.transcribe,
+        ] {
+            provider.base_url = "http://127.0.0.1:9/v1".into();
+        }
+        loopback.providers = providers(&loopback.config);
+        let addr = start(loopback).await.expect("a token never stops a loopback bind");
+
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/ws", addr.port()))
+            .await
+            .expect("the upgrade must not require a query");
+        let hello = Command::Hello { token: None, client: ClientKind::Web, protocol_version: PROTOCOL_VERSION };
+        socket.send(Message::text(serde_json::to_string(&hello).unwrap())).await.unwrap();
+
+        let small = Frame::Mic(vec![0i16; 8_000]).encode();
+        assert!(small.len() < conn::READ_CEILING, "the frame under the ceiling has to be under it");
+        socket.send(Message::Binary(small.into())).await.unwrap();
+
+        let oversized = Frame::Mic(vec![0i16; 140_000]).encode();
+        assert!(oversized.len() > conn::READ_CEILING, "the frame has to be over the ceiling to prove it");
+        socket.send(Message::Binary(oversized.into())).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!left.is_zero(), "a message over the read ceiling must end the connection");
+            match tokio::time::timeout(left, socket.next()).await {
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => panic!("the connection survived a message over the production read ceiling"),
+            }
+        }
     }
 
     /// **The first thing the phase's live check caught.** `serve --tls` called
