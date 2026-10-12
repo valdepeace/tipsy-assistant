@@ -96,7 +96,7 @@ pub async fn run_remote(url: String, token: Option<String>) -> Result<(), String
     // W11: the client keeps its own system monitor in `--connect` mode. The server's bridge does not
     // spawn one for a remote peer, so this stays the only producer of `Stats` on this channel.
     sysmon::spawn(ends.events.clone());
-    let mut client = Client::remote(loaded.config, path, url);
+    let mut client = Client::remote(loaded.config, path, &url);
     client.terminal(ends, None, loaded.warning)
 }
 
@@ -106,8 +106,9 @@ enum Attachment {
     /// The bare run: a session spawned from this process's own hub, with the connectors built here.
     InProcess,
     /// `--connect`: a socket to a server that owns the session, the connectors and the keys. The
-    /// token is deliberately not kept — it went into `Hello`, and nothing else needs it.
-    Remote { url: String },
+    /// token is deliberately not kept — it went into `Hello`, and nothing else needs it — and the URL
+    /// is a [`bridge::DisplayUrl`], so the query a token used to travel in is not here to print.
+    Remote { url: bridge::DisplayUrl },
 }
 
 impl Attachment {
@@ -115,11 +116,12 @@ impl Attachment {
         matches!(self, Attachment::Remote { .. })
     }
 
-    /// How to name the other end in a notice. Never the token: it is not in this value.
+    /// How to name the other end in a notice. **Never the token**, and now that is a fact of the type
+    /// rather than a promise in a comment: `DisplayUrl` has no query to print.
     fn describe(&self) -> String {
         match self {
             Attachment::InProcess => "this process".to_string(),
-            Attachment::Remote { url } => url.clone(),
+            Attachment::Remote { url } => url.to_string(),
         }
     }
 }
@@ -193,7 +195,7 @@ impl Client {
     /// `config` is still read from this machine's `config.toml`: it carries what belongs to *this*
     /// machine — the microphone gain — and the screen's content is the server's from the first
     /// `Event::Config` on. Nothing here acts on its provider rows.
-    fn remote(config: Config, config_path: PathBuf, url: String) -> Self {
+    fn remote(config: Config, config_path: PathBuf, url: &str) -> Self {
         let (mic_tx, mic_frames) = std::sync::mpsc::sync_channel(MIC_QUEUE);
         let mic_gain = config.listening.mic_gain;
         Self {
@@ -202,7 +204,7 @@ impl Client {
             config_path,
             keys: None,
             providers: None,
-            attachment: Attachment::Remote { url },
+            attachment: Attachment::Remote { url: bridge::DisplayUrl::new(url) },
             player: None,
             reply: Vec::new(),
             call: None,
@@ -1655,7 +1657,7 @@ mod tests {
         );
 
         // And now the remote path: opening the screen, testing and saving, with no resolver and no stack.
-        let mut remote = Client::remote(config, path.clone(), "ws://127.0.0.1:7070/ws".into());
+        let mut remote = Client::remote(config, path.clone(), "ws://127.0.0.1:7070/ws");
         let mut form = form_of(&mock_config("http://127.0.0.1:9"));
         // `form_of` marks the form filled — the file was read — and Save is refused on a form that is
         // not, exactly as the screen's own reducer refuses it.

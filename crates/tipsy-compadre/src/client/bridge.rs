@@ -19,6 +19,41 @@ use crate::session::SessionEnds;
 const BACKOFF_START: Duration = Duration::from_millis(100);
 const BACKOFF_MAX: Duration = Duration::from_millis(3_200);
 
+/// A URL as it may be printed: the scheme, the authority and the path, with the query and the
+/// fragment taken off.
+///
+/// **It exists because a URL here can carry a secret, and the sinks that print one do not pass
+/// through the log's scrubber.** `?token=…` is the spelling a browser has to use on the two pages
+/// (spec §9.2), and this client used to need it on `/ws` as well — which is how the token reached the
+/// `--verbose` banner, a `BridgeError`'s sentence and the configuration screen's notice line, none of
+/// which is a `ScrubWriter`. Nothing a reader needs is in a query: the address, the port and the path
+/// are all before it. Every value that reaches a user is built from this type, so "nothing may print a
+/// URL that could carry a secret" is a property of the shape rather than a rule to remember.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DisplayUrl(String);
+
+impl DisplayUrl {
+    /// The safe form of `url`: everything up to the first `?` or `#`.
+    pub fn new(url: &str) -> Self {
+        let cut = url.find(['?', '#']).unwrap_or(url.len());
+        Self(url[..cut].to_string())
+    }
+}
+
+impl std::fmt::Display for DisplayUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The same string as `Display`: a type whose whole purpose is to be safe to print must not grow a
+/// second, unguarded spelling the day somebody writes `{url:?}`.
+impl std::fmt::Debug for DisplayUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The wait before attempt `n` (0-based): 100 ms, 200 ms, 400 ms, 800 ms, 1.6 s, then 3.2 s
 /// forever. A server that comes back after a reboot is picked up within a few seconds.
 fn backoff(attempt: u32) -> Duration {
@@ -31,8 +66,10 @@ fn backoff(attempt: u32) -> Duration {
 /// retried (spec §9.1).
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
+    /// The URL in this sentence is a [`DisplayUrl`]: the address and the path, and never the query a
+    /// token could have travelled in. This is the line a user copies into a bug report.
     #[error("cannot reach {url}: {reason}")]
-    Unreachable { url: String, reason: String },
+    Unreachable { url: DisplayUrl, reason: String },
     /// The server answered `Hello` with `Error`. `code` is the code as it went over the wire —
     /// `token_required`, `token_invalid`, `protocol_version` — read back through serde so this
     /// variant needs no list of its own.
@@ -53,7 +90,7 @@ pub enum BridgeError {
 pub async fn connect(url: &str, token: Option<&str>) -> Result<SessionEnds, BridgeError> {
     let (mut socket, _response) = tokio_tungstenite::connect_async(url)
         .await
-        .map_err(|error| BridgeError::Unreachable { url: url.to_string(), reason: error.to_string() })?;
+        .map_err(|error| BridgeError::Unreachable { url: DisplayUrl::new(url), reason: error.to_string() })?;
     let welcome = say_hello(&mut socket, token, url).await?;
 
     let (to_server_tx, to_server_rx) = mpsc::unbounded_channel();
@@ -84,14 +121,14 @@ async fn say_hello(socket: &mut Socket, token: Option<&str>, url: &str) -> Resul
     socket
         .send(Message::text(text))
         .await
-        .map_err(|error| BridgeError::Unreachable { url: url.to_string(), reason: error.to_string() })?;
+        .map_err(|error| BridgeError::Unreachable { url: DisplayUrl::new(url), reason: error.to_string() })?;
     wait_for_welcome(socket, url).await
 }
 
 /// The one frame that says the server accepted this client.
 async fn wait_for_welcome(socket: &mut Socket, url: &str) -> Result<Event, BridgeError> {
     let unreachable = |error: tokio_tungstenite::tungstenite::Error| BridgeError::Unreachable {
-        url: url.to_string(),
+        url: DisplayUrl::new(url),
         reason: error.to_string(),
     };
     loop {
@@ -134,6 +171,9 @@ async fn pump(
     view: UnboundedSender<ToClient>,
 ) {
     let mut attempt = 0u32;
+    // The address as every line in this task may print it: the real URL is kept for reconnecting and
+    // for nothing else (see [`DisplayUrl`]).
+    let shown = DisplayUrl::new(&url);
     loop {
         if matches!(shuttling(&mut socket, &mut to_server, &view).await, Ending::ClientGone) {
             return;
@@ -141,7 +181,7 @@ async fn pump(
         // The socket is gone. One line to the HUD, a wait, and `Hello` again.
         let _ = view.send(ToClient::Event(Event::Error {
             code: ErrorCode::Network,
-            message: format!("{url}: connection lost; reconnecting"),
+            message: format!("{shown}: connection lost; reconnecting"),
             recoverable: true,
         }));
         tokio::time::sleep(backoff(attempt)).await;
@@ -233,5 +273,45 @@ mod tests {
         assert_eq!(seconds, [100, 200, 400, 800, 1600, 3200, 3200]);
         assert_eq!(backoff(0), Duration::from_millis(100));
         assert!(backoff(40) <= BACKOFF_MAX, "a long outage must not overflow the schedule");
+    }
+
+    /// F1's shape rule: what this program may print is a URL without its query and without its
+    /// fragment, in both of the ways a value can be formatted.
+    #[test]
+    fn a_displayed_url_carries_no_query_and_no_fragment() {
+        assert_eq!(DisplayUrl::new("ws://192.168.1.5:7070/ws?token=abc").to_string(), "ws://192.168.1.5:7070/ws");
+        assert_eq!(DisplayUrl::new("ws://192.168.1.5:7070/ws?a=1&b=2").to_string(), "ws://192.168.1.5:7070/ws");
+        assert_eq!(DisplayUrl::new("ws://host/ws#secret").to_string(), "ws://host/ws");
+        assert_eq!(DisplayUrl::new("ws://host/ws?").to_string(), "ws://host/ws");
+        assert_eq!(DisplayUrl::new("ws://host:7070/ws").to_string(), "ws://host:7070/ws", "an address and a path survive");
+        assert_eq!(
+            format!("{:?}", DisplayUrl::new("ws://host/ws?token=abc")),
+            "ws://host/ws",
+            "`Debug` is the same string: a type that exists to be safe to print may not have a second spelling"
+        );
+    }
+
+    /// F1 on the path a user actually hits: the address in shell history carries the token, nothing
+    /// listens on it, and the sentence they paste into a bug report is what must not carry it.
+    ///
+    /// A real connection to a port that was just released, so the failure is the transport's and
+    /// happens before any handshake — the refused-attach path rather than a formatted value.
+    #[tokio::test]
+    async fn an_unreachable_url_never_carries_a_token_into_its_message() {
+        const SECRET: &str = "9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a free port");
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let url = format!("ws://{addr}/ws?token={SECRET}");
+        let error = match connect(&url, Some(SECRET)).await {
+            Err(error) => error,
+            Ok(_) => panic!("nothing listens on {addr} any more"),
+        };
+        assert!(matches!(error, BridgeError::Unreachable { .. }), "{error:?}");
+        let text = error.to_string();
+        assert!(!text.contains(SECRET), "the token reached the line a user copies: {text}");
+        assert!(text.contains(&format!("ws://{addr}/ws")), "and the address they need is still there: {text}");
+        assert!(!text.contains('?'), "the query is what carried it, and it is gone: {text}");
     }
 }
