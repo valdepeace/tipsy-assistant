@@ -182,6 +182,16 @@ The server spends the user's API keys and listens to their microphone, so:
   loopback listener the socket asks for nothing at all — the bound address is what decides exposure
   — so the pages are the half a token gates there. The web terminal grants full control of the
   application, so it is never reachable without it.
+- **A loopback listener's `/ws` is reachable by any page in the user's browser.** A WebSocket
+  handshake is not subject to the same-origin policy, and the session behind it requires no token
+  there, so a page the user merely visits can open `ws://127.0.0.1:<port>/ws`. What it gains is not a
+  key: `Command::UpdateConfig` carries the client's own shape, `server.bind` and `lan` included, and
+  the server persists it — so the *next* `serve` could bind the LAN. The `/ws` upgrade therefore
+  refuses a request whose `Origin` header is present and is not the host the request arrived on
+  (`403`), compared against that request's own `Host` header rather than any hard-coded name. A CLI
+  client sends no `Origin` and is unaffected, which is what keeps `--connect` working. **This check,
+  and not `Hello`'s token, is what keeps a browser out of a loopback listener**; a future
+  `/terminal/ws` needs the same one.
 - `serve --tls` encrypts the connection: that is what makes the token and a new key safe on a LAN.
   It does **not** by itself unlock `getUserMedia` on another machine — loopback over plain HTTP is
   already a secure context, and a certificate the browser has not been told to trust is not one. The

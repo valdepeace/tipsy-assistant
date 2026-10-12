@@ -292,6 +292,11 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   for a protocol client — **never in the socket's URL** — and as `?token=…` on the two pages, which a
   browser can only send in the URL; both pages therefore answer with `Referrer-Policy: no-referrer`
   and `Cache-Control: no-store`, so the token is not in a `Referer` and not in a cache.
+- **A page in your browser can open a loopback listener's `/ws`**, because a WebSocket handshake is
+  not subject to the same-origin policy and a loopback socket asks for no token. So the socket refuses
+  (`403`) a request that carries an `Origin` which is not this server's own host; `--connect` sends no
+  `Origin` at all and is unaffected, which is what keeps the local attach above working. A browser
+  client must therefore reach the socket under the same host it was served from.
 - **Nothing generates a first-run token yet.** A new `config.toml` carries `token = ""`, and the one
   thing that mints one is the Server tab's `Ctrl+R`, which fills the row and writes it when you save.
   With an empty token `serve` is loopback-only, which is what the bind rule enforces; a first-run
