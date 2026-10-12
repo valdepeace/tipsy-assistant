@@ -139,6 +139,12 @@ pub enum ServerError {
     /// and in `source` for one reason: `TlsError`'s sentence already names the paths a user has to
     /// look at, and it is the line a failed `serve` prints.
     Tls(tls::TlsError),
+    /// A refusal that is none of the above and needs no type of its own: the server cannot name its
+    /// own executable, which is how Task 2.1's terminal spawner is built (`std::env::current_exe()`
+    /// failing while `run` assembles the spawner). **Task 2.1's variant**, spelled exactly as its
+    /// `Produces` block requires. It carries a rendered sentence rather than a cause, so `source`
+    /// returns `None` for it.
+    Message(String),
 }
 
 impl From<tls::TlsError> for ServerError {
@@ -176,6 +182,8 @@ impl std::fmt::Display for ServerError {
             // Transparent on purpose: `TlsError`'s own sentence already names the paths a user has
             // to look at, and wrapping it again here would put a second prefix in front of them.
             ServerError::Tls(e) => write!(f, "{e}"),
+            // Already a sentence: whoever built it named what could not be done.
+            ServerError::Message(message) => f.write_str(message),
         }
     }
 }
@@ -185,6 +193,8 @@ impl std::error::Error for ServerError {
         match self {
             ServerError::Io(e) => Some(e),
             ServerError::Tls(e) => Some(e),
+            // `Message` carries a rendered sentence, not a cause: there is nothing to walk to.
+            ServerError::Message(_) => None,
             _ => None,
         }
     }
