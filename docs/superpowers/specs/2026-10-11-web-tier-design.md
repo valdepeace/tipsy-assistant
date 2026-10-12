@@ -481,6 +481,24 @@ that worked was the URL — which is where the token leaked into shell history, 
 log that prints an address. The route's check is gone, `Hello` is the socket's only door, and a
 connection that never says anything is bounded by the session's own handshake deadline.
 
+**A WebSocket handshake is not subject to the same-origin policy, so on loopback the removed check
+was load-bearing and an `Origin` check replaced it.** Any page in the user's browser — a page the user
+merely visits, from anywhere, over plain HTTP — can open `ws://127.0.0.1:<port>/ws`, and the session
+it reaches requires no token there. What such a page gains is not a key, and it is worse: a page can
+send `Hello` and then `Command::UpdateConfig`, whose client shape deliberately carries `server.bind`
+and `lan`, and the server **persists** it — so the *next* `serve` binds the LAN. The `/ws` upgrade
+therefore refuses, with **`403`**, a request whose `Origin` header is present and is not the host the
+request arrived on; "the host the request arrived on" is that request's own `Host` header, never a
+hard-coded `127.0.0.1` or `localhost`, so a page served from either spelling is compared against the
+name it was served under. A CLI client sends no `Origin` at all and is unaffected, which is what keeps
+the documented `--connect ws://127.0.0.1:7070/ws` attach working; a page served from this listener's
+own `/` sends this listener's own origin and is allowed. An `Origin` that is present but unreadable —
+`null` from a sandboxed frame or a `file://` page, another scheme, no authority — is refused rather
+than guessed at, because no legitimate client sends one. **This check is the only thing keeping a
+browser out of a loopback listener and must not be removed as redundant with `Hello`'s token**: on
+loopback there is no token to be redundant with. `/terminal/ws` (Task 2.2) is a raw PTY socket and
+needs the same check for the same reason.
+
 ### 9.2 The token in a query string, and what that costs
 
 The pages receive the token as `?token=…` because a browser cannot set a header on a navigation. RFC
