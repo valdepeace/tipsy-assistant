@@ -5,3 +5,5 @@ out/
 __pycache__/
 *.log
 .superpowers/
+web/vendor/*
+!web/vendor/README.md
