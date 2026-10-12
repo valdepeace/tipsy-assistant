@@ -70,17 +70,27 @@ beside it in `global-constraints.md`. **Read the two review reports in that same
 `docs/superpowers/plans/2026-10-11-plan-3-start-here.md`, which the ledger records as superseded and
 wrong in three ways. Phases 2 and 3 have not started.
 
-**Before Phase 2 starts, the client's files are split** — spec
-`docs/superpowers/specs/2026-10-12-client-modularity-design.md`: `client.rs` (`impl Client` is one
-823-line block carrying six reasons to change), `session.rs`, `state.rs` and `config_form.rs` are split
-by reason to change, and the client's turn, microphone and playback policy — `starts_turn`,
-`interrupts_playback`, `test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`,
-`mic_wanted`, `mic_route`/`MicRoute` and `hit_at` — moves to `tipsy_ui::policy`, so Plan 3's Tasks 3.4
-and 3.5 import it instead of cloning it. **Every `file:line` the web-tier plan carries for those four
-files is stale until re-measured**, and `client.rs` stays the parent module (`pub mod bridge;`, and
-Task 2.1's `pub mod pty;`, are unaffected). `key_input` and `clock_view` deliberately do **not** move,
-because `tipsy-ui` may never gain `crossterm`. It runs in its own worktree, after Phase 1 merges and
-before Phase 2.
+**The client's files are split, and the client's decision policy is shared** — spec
+`docs/superpowers/specs/2026-10-12-client-modularity-design.md`. It landed on branch
+`client-modularity` in its own worktree and is **done**: `ef8333c` (the policy → `tipsy_ui::policy`),
+`726104b` (`client/mic.rs`), `1610ad5` (`client/audio.rs`), `5b80abc` (`client/call.rs`) and `4237d37`
+(`client/settings.rs`). `client.rs` is the parent module and went from **1176 production lines at
+`2f25c20` to 574** (1176 → 1055 → 945 → 905 → 819 → 574, one step per commit); the children hold what
+left it — `settings.rs` 271 production lines, `mic.rs` 132, `call.rs` 115, `audio.rs` 58 — and the
+client's turn, microphone and playback policy (`starts_turn`, `interrupts_playback`,
+`test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`, `mic_wanted`, `mic_route`/
+`MicRoute`, `hit_at`, and the new `speech_rate`) lives in `tipsy_ui::policy` for both clients to call.
+**The suite is 513 tests / 0 failures** (511 distinct names: two leaf names are duplicated across
+modules, and four were added by Task 1), clippy at the same seven findings, the wasm gate clean, and
+the test-name identity gate clean at every one of the five commits. **The plan's own "< 450 production
+lines" target for `client.rs` was wrong and is not met**: the four moves shed 481 production lines, not
+the ~730 its arithmetic assumed, because `client.rs` keeps `frame_loop`, `on_message`, `on_action`
+(both settings arms included), `key_input` and `clock_view`. `session.rs` was **not** split — that task
+was dropped deliberately (nothing outside the server needs it) — and `key_input` and `clock_view`
+deliberately did **not** move, because `tipsy-ui` may never gain `crossterm`. **What Phase 2 and
+Phase 3 still owe: every `file:line` the web-tier plan and its tasks carry for `client.rs` is stale —
+the line is in `client/settings.rs`, `client/call.rs`, `client/mic.rs` or `client/audio.rs` now — and
+must be re-measured rather than trusted.** The tree is stable, so one re-measurement holds.
 
 **Both throwaway spikes are done, and the second one shapes `hands_free`.** They live in scratch
 directories outside the repo and nothing of them is committed. **Ratzilla: PASS on all four gate

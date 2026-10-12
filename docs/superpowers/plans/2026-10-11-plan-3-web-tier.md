@@ -2,15 +2,29 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **Pending, and it changes the citations below.** Before Phase 2 starts, the client's four large files
-> are split by reason to change and the client's decision policy moves to `tipsy_ui::policy` — see
-> `docs/superpowers/specs/2026-10-12-client-modularity-design.md` and the dated notice at the top of
+> **Landed, and it changes the citations below.** The client-modularity split
+> (`docs/superpowers/specs/2026-10-12-client-modularity-design.md`) is **done**, on branch
+> `client-modularity` at `4237d37`: `client.rs` is the parent module and its four children are
+> `client/{mic,audio,call,settings}.rs`, and the client's decision policy lives in
+> `tipsy_ui::policy` — see the dated notice at the top of
 > `.superpowers/sdd/2026-10-11-plan-3-web-tier/global-constraints.md`. **Every `file:line` below for
-> `client.rs`, `session.rs`, `state.rs` and `config_form.rs` is stale until re-measured**; `client.rs`
-> stays the parent module; and Tasks 3.4 and 3.5 import `starts_turn`, `interrupts_playback`,
+> `client.rs` is now wrong: `client.rs` is no longer where the client's parts live**, and the line it
+> names is in `client/settings.rs`, `client/call.rs`, `client/mic.rs` or `client/audio.rs`. Re-measure
+> it rather than trusting the old number; the tree is now stable, so one re-measurement holds.
+> **`session.rs` was not split.** The design's server-side cut was a droppable task and it was
+> dropped deliberately — nothing outside the server needs it — so its citations have drifted only with
+> the tree. (`state.rs` and `config_form.rs` were never in this design's cut at all.) The client's
+> decision policy is `tipsy_ui::policy`: `starts_turn`, `interrupts_playback`,
 > `test_interrupts_playback`, `flush_on_interrupt`, `takes_the_floor`, `mic_wanted`, `mic_route`/
-> `MicRoute` and `hit_at` instead of defining them. `key_input` and `clock_view` stay per shell, because
-> `tipsy-ui` never gains `crossterm`.
+> `MicRoute`, `hit_at` and the new `speech_rate`. **Task 3.4's `starts_turn` and `interrupts_playback`
+> definitions and Task 3.5's `hit_at` definition are already replaced by imports**, and nothing else in
+> those two bodies changed; the other names were never defined by a web-tier body — they are there for
+> whichever task needs them, and their old `client.rs:…` citations in Tasks 1.1 and 3.7 are stale prose,
+> not definitions. `client.rs` stays the
+> parent module (`pub mod bridge;` and Task 2.1's `pub mod pty;` are unaffected). `key_input` and
+> `clock_view` stay per shell, because `tipsy-ui` never gains `crossterm`. The reference count is
+> **513 test entries / 511 distinct names** (`509 / 507` at `2f25c20`, the four new ones Task 1's
+> `policy::tests::*`, and two leaf names duplicated across modules).
 
 **Goal:** Make the assistant reachable from outside the one terminal that owns it: a token-guarded
 WebSocket server (`tipsy-compadre serve`), a native TUI that attaches to a remote one
@@ -12236,8 +12250,8 @@ by this task; if the check needs an edit to it, that edit belongs to Task 3.5's 
 - Test: `crates/tipsy-web/src/playback.rs` (its own `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: `tipsy_protocol::{AssistantState, Command, Event, Frame}` — `Frame::Speech { seq: u32, samples: Vec<i16> }` (`crates/tipsy-protocol/src/lib.rs:179`), `Event::SpeechChunk { seq, sample_rate }` (`:151`), `Event::Done { .. }` (`:152`), `Event::Status { state, .. }` (`:146`), `Event::Heard { .. }` (`:147`), `Frame::decode(&[u8]) -> Result<Frame, FrameError>` (`:227`); `tipsy_ui::UiState::start_voice(Vec<f32>)` (`crates/tipsy-ui/src/state.rs:511`), whose hop is `ENVELOPE_HOP_MS = 50` (`state.rs:14`, `render.rs:32`); Task 3.1's recorded verdict (this task does not run if it was FAIL) and its `rustup target add wasm32-unknown-unknown`; Task 3.2's `tipsy_web::start()` and the decoded `ToClient` queue its socket fills; Task 3.3's `AudioContext`, created and resumed inside the press-to-start handler (research note §5.2).
-- Produces: `tipsy_web::playback::{Playback, Scheduled, CUSHION_S}` and `tipsy_web::playback::{starts_turn, interrupts_playback}`; `Playback::{new, rate, set_rate, chunk, end_of_turn, barge_in, finished, replay, forget_reply, envelope, reply, gaps, is_playing}`; `tipsy_web::web_audio::{play, silence, forget}` (wasm only).
+- Consumes: `tipsy_protocol::{AssistantState, Command, Event, Frame}` — `Frame::Speech { seq: u32, samples: Vec<i16> }` (`crates/tipsy-protocol/src/lib.rs:179`), `Event::SpeechChunk { seq, sample_rate }` (`:151`), `Event::Done { .. }` (`:152`), `Event::Status { state, .. }` (`:146`), `Event::Heard { .. }` (`:147`), `Frame::decode(&[u8]) -> Result<Frame, FrameError>` (`:227`); `tipsy_ui::UiState::start_voice(Vec<f32>)` (`crates/tipsy-ui/src/state.rs:511`), whose hop is `ENVELOPE_HOP_MS = 50` (`state.rs:14`, `render.rs:32`); Task 3.1's recorded verdict (this task does not run if it was FAIL) and its `rustup target add wasm32-unknown-unknown`; Task 3.2's `tipsy_web::start()` and the decoded `ToClient` queue its socket fills; Task 3.3's `AudioContext`, created and resumed inside the press-to-start handler (research note §5.2); **`tipsy_ui::policy::{interrupts_playback, starts_turn}`** (`crates/tipsy-ui/src/policy.rs:18-51`) — the turn and playback decisions this task used to define for itself, and no longer does: `client.rs` is not where they live any more, and neither is this file.
+- Produces: `tipsy_web::playback::{Playback, Scheduled, CUSHION_S}`; `Playback::{new, rate, set_rate, chunk, end_of_turn, barge_in, finished, replay, forget_reply, envelope, reply, gaps, is_playing}`; `tipsy_web::web_audio::{play, silence, forget}` (wasm only). **`starts_turn` and `interrupts_playback` are not this module's exports**: Step 2 qualifies them from `tipsy_ui::policy`, and `dispatch` (Task 3.5) calls them from there too.
 
 - [ ] **Step 1: Read Task 3.1's verdict, and stop if it was FAIL**
 
@@ -12316,7 +12330,10 @@ Create `crates/tipsy-web/src/playback.rs` with the module documentation, the pub
 //!
 //! Nothing here touches a browser type: this file compiles and its tests run on this host.
 
-use tipsy_protocol::Command;
+// The decisions this file does not own. `client.rs` was where they used to be copied from, and it is
+// not where they live any more: `tipsy_ui::policy` is the one home, shared with the native client.
+// `Command` is no longer imported here: nothing in this module names it once these two are imports.
+use tipsy_ui::policy::{interrupts_playback, starts_turn};
 
 /// How far in front of `now` a turn's first chunk is placed.
 ///
@@ -12380,13 +12397,6 @@ impl Playback {
     pub fn gaps(&self) -> u32 { todo!() }
     pub fn is_playing(&self, now: f64) -> bool { todo!() }
 }
-
-/// Whether a command starts the next turn, which is the native client's rule (`client.rs:619-640`) and
-/// the reason a new reply's audio may not be queued behind the previous one.
-pub fn starts_turn(command: &Command) -> bool { todo!() }
-
-/// Whether a command quiets the device: the user is taking the floor (`client.rs:658-660`).
-pub fn interrupts_playback(command: &Command) -> bool { todo!() }
 
 #[cfg(test)]
 mod tests {
@@ -12867,44 +12877,16 @@ impl Playback {
         self.live.iter().any(|live| live.ends_at > now)
     }
 }
-
-/// `client.rs:619-640`, verbatim in behaviour: an empty question and a bare `!` start nothing
-/// (`session.rs:233-238`, `:242-249`), `ListenStop`/`Reset` start the next turn, and the probe, the
-/// profile change, the mode change and the login commands start none. `Hello` is never sent by this
-/// client (Task 3.2 sends it once on open) and `Cancel` ends a turn without starting one, which is why
-/// it is `interrupts_playback`'s second half and not this function's.
-pub fn starts_turn(command: &Command) -> bool {
-    match command {
-        Command::Ask { text } | Command::Say { text } => !text.trim().is_empty(),
-        Command::ListenStop | Command::Reset => true,
-        Command::Hello { .. }
-        | Command::TestProvider { .. }
-        | Command::ListenStart
-        | Command::Cancel
-        | Command::SetProfile { .. }
-        | Command::SetListeningMode { .. }
-        | Command::LoginStart
-        | Command::LoginStop
-        | Command::LoginAnswer { .. } => false,
-        // Phase 1's three configuration commands are additive and start no turn: a save is not a
-        // question, and it must not cut a sentence in half. `lib.rs`'s `Command` after Task 1.1 has
-        // them; if the compiler says this arm is unreachable, Task 1.1 named them differently and this
-        // is the one line to fix.
-        Command::GetConfig | Command::UpdateConfig { .. } | Command::SetKey { .. } => false,
-    }
-}
-
-/// `client.rs:658-660`: everything that starts a turn, plus the one command that ends one without
-/// starting another. The v1 spec's Tab sentence (`spec:166-171`: "presses `Tab` while the assistant is
-/// talking, the client sends `Cancel` and drops its audio queue") is **not** what the code does —
-/// `Tab` with the microphone closed raises `ListenStart` (`state.rs:412-422`) and `starts_turn`
-/// answers `false` for it (`client.rs:632`) — and the native client is the authority (`CLAUDE.md`:
-/// terminal first). This task mirrors the code; widening the set is a change to `client.rs` and belongs
-/// to a task that owns it.
-pub fn interrupts_playback(command: &Command) -> bool {
-    starts_turn(command) || matches!(command, Command::Cancel)
-}
 ```
+
+**The two free functions this step used to define are gone, and that is the whole of what changed in
+this task's body.** `starts_turn` and `interrupts_playback` are imports from `tipsy_ui::policy` now
+(Step 2's line, above), because the native client and this one must not be able to disagree about them
+and because `client.rs` stopped being their home when the client's files were split. The bodies that
+were here are byte-for-byte `policy.rs`'s — `starts_turn` at `crates/tipsy-ui/src/policy.rs:18-43`,
+doc comment included, and `interrupts_playback` at `:45-51` — so nothing about this task's behaviour
+changes; the imports are what its tests at the bottom of the file now exercise. If an implementer finds
+this file still defining either one, the imports have not been applied and that is this step.
 
 Run the same command as Step 2.
 
@@ -13164,8 +13146,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Test: `crates/tipsy-web/src/hud.rs` (its own `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: `tipsy_ui::{ClockView, Hit, KeyInput, UiAction, UiState, draw}` — `draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) -> Vec<Hit>` (`crates/tipsy-ui/src/render.rs:65`), `Hit { area: Rect, key: KeyInput, action: Option<ConfigAction> }` (`render.rs:51-63`), `KeyInput` (`state.rs:70-81`), `UiAction` (`state.rs:83-98`), `UiState::{on_key, on_hit, apply, start_voice}` (`state.rs:389`, `:202`, `:289`, `:511`); `tipsy_protocol::{Command, Event, ToServer}` — `Command::GetConfig`/`UpdateConfig`/`TestProvider` (Phase 1's, Task 1.1) and `Event::Config` (`:171`); `tipsy_ui::ConfigForm` as the view of `tipsy_protocol::ConfigView` after Task 1.1 (spec §4.3); Task 3.1's recorded verdict, **its backend choice, its glyph result and its header result**; Task 3.2's `tipsy_web::start()`, its socket and its sender; Task 3.3's gate (its handler owns `getUserMedia` and the `AudioContext`); Task 3.4's `playback::{Playback, interrupts_playback, starts_turn}` and `web_audio::{play, silence, forget}`.
-- Produces: `tipsy_web::hud::{RawKey, Input, key_input, hit_at, drain, clock_from}`; the render loop and its `dispatch`; `web/client/index.html`.
+- Consumes: `tipsy_ui::{ClockView, Hit, KeyInput, UiAction, UiState, draw}` — `draw(frame: &mut Frame, state: &UiState, clock: &ClockView, title: &str) -> Vec<Hit>` (`crates/tipsy-ui/src/render.rs:65`), `Hit { area: Rect, key: KeyInput, action: Option<ConfigAction> }` (`render.rs:51-63`), `KeyInput` (`state.rs:70-81`), `UiAction` (`state.rs:83-98`), `UiState::{on_key, on_hit, apply, start_voice}` (`state.rs:389`, `:202`, `:289`, `:511`); `tipsy_protocol::{Command, Event, ToServer}` — `Command::GetConfig`/`UpdateConfig`/`TestProvider` (Phase 1's, Task 1.1) and `Event::Config` (`:171`); `tipsy_ui::ConfigForm` as the view of `tipsy_protocol::ConfigView` after Task 1.1 (spec §4.3); Task 3.1's recorded verdict, **its backend choice, its glyph result and its header result**; Task 3.2's `tipsy_web::start()`, its socket and its sender; Task 3.3's gate (its handler owns `getUserMedia` and the `AudioContext`); Task 3.4's `playback::Playback` and `web_audio::{play, silence, forget}`; **`tipsy_ui::policy::{hit_at, interrupts_playback, starts_turn}`** (`crates/tipsy-ui/src/policy.rs:18-51`, `:145-153`) — the click test and the barge-in decisions, which are imports now and not this shell's to define. `hit_at` is re-exported under this module's own name (`pub use tipsy_ui::policy::hit_at;`) so `hud::hit_at` keeps meaning what this task's `Produces` line says.
+- Produces: `tipsy_web::hud::{RawKey, Input, key_input, hit_at, drain, clock_from}` — `hit_at` being a **re-export** of `tipsy_ui::policy::hit_at`, not a second definition; the render loop and its `dispatch`; `web/client/index.html`.
 
 - [ ] **Step 1: Re-read Task 3.1's verdict and stop if it was FAIL**
 
@@ -13200,8 +13182,22 @@ It must resolve to the same copy `tipsy-ui` uses (one `ratatui 0.30.2` in the lo
 //! types (`client.rs:683-707`, `:676-680`) and once over Ratzilla's. This module is the second one's
 //! decisions, spelled over this crate's own `RawKey`: the Ratzilla types are `#[cfg]`-gated to wasm
 //! (Step 4) and never reach a test.
+//!
+//! **`key_input` and `clock_view` are per shell on purpose, and that is not duplication to remove.**
+//! The client-modularity refactor moved the client's decision policy into `tipsy_ui::policy` and left
+//! exactly these two behind, because `tipsy-ui` may never gain `crossterm` (`key_input` takes a
+//! crossterm `KeyEvent` on the native side) and because there are two clocks (`clock_view` reads this
+//! process's, and this shell reads `js_sys::Date` — both are below). `hit_at` was the third candidate
+//! and it did move, which is why the line above imports it. A later reader who "finishes the job" by
+//! folding these two into `tipsy-ui` breaks the wasm build and merges two different clocks.
 
 use tipsy_ui::{ClockView, Hit, KeyInput, UiAction, UiState};
+
+// The click test is the client's, not this shell's: it used to be copied from `client.rs` and it lives
+// in `tipsy_ui::policy` now, so both clients run the same half-open containment and neither can drift
+// from the other. Re-exported under this module's own name because `hud::hit_at` is what this task's
+// `Produces` line and its `drain` call; the re-export is the whole of the change.
+pub use tipsy_ui::policy::hit_at;
 
 /// The subset of a key event the HUD has an opinion about. The wasm adapter fills it from Ratzilla's
 /// `KeyEvent` — the same crossterm-*shaped* vocabulary, a separate type (research note §2b).
@@ -13231,9 +13227,10 @@ pub enum Input {
 
 pub fn key_input(raw: RawKey) -> Option<KeyInput> { todo!() }
 
-/// The hit whose clickable rectangle contains the cell, if any. The native client's `hit_at`
-/// (`client.rs:676-680`), and the rectangles are `tipsy_ui`'s (`render.rs:51-63`).
-pub fn hit_at(hits: &[Hit], col: u16, row: u16) -> Option<Hit> { todo!() }
+// `hit_at` is not written here any more: it is `tipsy_ui::policy`'s, re-exported at the top of this
+// file from the import list above. Its body and its half-open edges are
+// `crates/tipsy-ui/src/policy.rs:145-153`, and the click test below is the same case the native
+// client's own `policy::tests::only_a_shown_hit_contains_a_click_and_its_edges_are_half_open` pins.
 
 /// Applies everything the handlers queued since the last frame, in the order it arrived.
 pub fn drain(state: &mut UiState, hits: &[Hit], queued: &mut Vec<Input>) -> Vec<UiAction> { todo!() }
@@ -13402,17 +13399,15 @@ pub fn key_input(raw: RawKey) -> Option<KeyInput> {
     }
 }
 
-/// `client.rs:676-680`, unchanged: the rectangles are half-open, so the cell at `area.right()` and the
-/// row at `area.bottom()` are outside.
-pub fn hit_at(hits: &[Hit], col: u16, row: u16) -> Option<Hit> {
-    hits.iter().copied().find(|hit| {
-        col >= hit.area.x && col < hit.area.right() && row >= hit.area.y && row < hit.area.bottom()
-    })
-}
-
+/// `client.rs:676-680` before the client's files were split, `crates/tipsy-ui/src/policy.rs:145-153`
+/// after — unchanged either way: the rectangles are half-open, so the cell at `area.right()` and the
+/// row at `area.bottom()` are outside. `hit_at` is **not** defined here: it is imported and re-exported
+/// at the top of this file (`pub use tipsy_ui::policy::hit_at;`), which is what keeps this task's
+/// `Produces` line true and keeps `drain`'s call below reading the same.
 /// The frame's worth of input. The clicks are tested against the `hits` the *previous* frame drew —
 /// which is the frame the user was looking at, and the native client does exactly this
-/// (`client.rs:148-151` tests the click against `hits` from the draw above it).
+/// (`crates/tipsy-compadre/src/client.rs` tests the click against `hits` from the draw above it; the
+/// line has moved, so take it from the function, not from a remembered number).
 pub fn drain(state: &mut UiState, hits: &[Hit], queued: &mut Vec<Input>) -> Vec<UiAction> {
     let mut actions = Vec::new();
     for input in queued.drain(..) {
