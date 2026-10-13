@@ -3,7 +3,8 @@ name = "tipsy-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Messages exchanged between the tipsy-compadre server and its clients"
+license.workspace = true
+description = "Messages exchanged between the tipsy-assistant server and its clients"
 
 [dependencies]
 serde.workspace = true

@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn an_unknown_event_type_is_a_tag_not_a_crash() {
         // A newer server's event, which this build has never heard of: Plan 2C's Task 3 rule — data,
-        // not death (docs/superpowers/plans/2026-10-10-plan-2c-openai-realtime.md:1732).
+        // not death (the realtime plan records the measurement that showed which one it is).
         assert_eq!(
             event_from_text(r#"{"type":"volume_changed","level":3}"#),
             Err(WireError::UnknownType("volume_changed".into()))

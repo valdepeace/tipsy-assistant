@@ -2,7 +2,7 @@
 //!
 //! `start()` is what `wasm-bindgen --target web`'s generated `init()` calls. The render loop is the
 //! native client's frame loop with the socket's queue in place of `from_server`
-//! (`crates/tipsy-compadre/src/client.rs:272-349` is the loop being mirrored): tick, drain, draw.
+//! (`crates/tipsy-assistant/src/client.rs:272-349` is the loop being mirrored): tick, drain, draw.
 //! `draw_web` wraps `requestAnimationFrame` itself, so the loop needs **no async runtime** — only the
 //! socket's callbacks do, and those use `spawn_local` (ratzilla-and-wasm-audio.md §6.4 point 5).
 //!

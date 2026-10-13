@@ -383,12 +383,12 @@ fn the_login_widget_draws_the_core_the_status_line_and_the_input() {
 
     // The title on the top border is the *application's* name, never the profile's: the profile speaks
     // from inside, and its badge is behind the veil.
-    assert!(text.contains("◉ tipsy-compadre"), "the widget's top border:\n{text}");
+    assert!(text.contains("◉ tipsy-assistant"), "the widget's top border:\n{text}");
     // The widget's border is a rounded block, like every other panel of the HUD.
     assert!(text.contains("╭") && text.contains("╮") && text.contains("╰") && text.contains("╯"), "a bordered widget");
     // The core is the HUD's own drawing, without the HUD's panel: `◉` in the middle of the widget and
     // no "NÚCLEO" title on it.
-    assert!(text.contains('◉') && text.contains("tipsy-compadre"));
+    assert!(text.contains('◉') && text.contains("tipsy-assistant"));
     assert!(!text.contains("NÚCLEO"), "the widget's border is the core's frame:\n{text}");
     // One status line: the prompt, because nothing has been said yet. It is cut to the widget's own
     // width, so the assertion reads the head of the sentence rather than the whole of it.
@@ -587,7 +587,7 @@ fn only_the_title_and_the_input_row_report_a_hit() {
     assert!(hits.iter().all(|h| h.action.is_none()), "a click is the keystroke its control means");
 
     let title = text_at(&term, hits[0].area);
-    assert!(title.contains("tipsy-compadre"), "the title's area sits on the title: {title:?}");
+    assert!(title.contains("tipsy-assistant"), "the title's area sits on the title: {title:?}");
     // The input's area is the row *inside* the border — the border is the widget's, and the clickable
     // row is what the border frames.
     let input = text_at(&term, hits[1].area);

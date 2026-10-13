@@ -1,4 +1,4 @@
-//! Backend-agnostic ratatui HUD for tipsy-compadre.
+//! Backend-agnostic ratatui HUD for tipsy-assistant.
 
 pub mod config_form;
 pub mod policy;

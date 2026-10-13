@@ -1,6 +1,6 @@
 //! The browser's socket, and the three ends the browser's equivalent of `SessionEnds` has.
 //!
-//! The native client's `SessionEnds` (`crates/tipsy-compadre/src/session.rs:46-52`) is
+//! The native client's `SessionEnds` (`crates/tipsy-assistant/src/session.rs:46-52`) is
 //! `{ to_server, from_server, events }` over `tokio::sync::mpsc`. There is no trait here either
 //! (spec W6, §3.3): [`Outbox`] is that struct's `to_server`, the queue `spawn_connection` is handed
 //! is its `from_server` and its `events`, and the payloads are the same `ToServer`/`ToClient`, so the
@@ -94,7 +94,7 @@ impl Connection {
 ///
 /// **The host is passed through untouched, and that is a security-shaped rule rather than a
 /// convenience.** `/ws` refuses an upgrade whose `Origin` is not the host the request arrived on
-/// (`crates/tipsy-compadre/src/server/mod.rs`'s `origin_is_this_host`), and a browser sets `Origin`
+/// (`crates/tipsy-assistant/src/server/mod.rs`'s `origin_is_this_host`), and a browser sets `Origin`
 /// from the document's own authority, so a page served from `http://localhost:7070` must open
 /// `ws://localhost:7070/ws` and not a rewritten `127.0.0.1` — the two spellings are different
 /// authorities by design, with a test each on the server side.

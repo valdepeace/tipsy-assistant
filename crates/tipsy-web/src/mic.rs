@@ -1,6 +1,6 @@
 //! The browser microphone: WebAudio capture into the protocol's 320-sample 16 kHz frames.
 //!
-//! The browser has to do in WebAudio what `crates/tipsy-compadre/src/audio/device.rs` does in cpal:
+//! The browser has to do in WebAudio what `crates/tipsy-assistant/src/audio/device.rs` does in cpal:
 //! downmix the channels, resample to 16 kHz, clamp to `i16`, and emit exactly
 //! `MIC_FRAME_SAMPLES = 320` samples — 20 ms — per frame, because that is the frame the server's own
 //! `audio/device.rs:18-20` and `session.rs` are built around. The frames leave as the **existing**
@@ -43,7 +43,7 @@
 //! confirms speech", and **this crate has no detector at all**: every 20 ms frame the page captures
 //! while its capture is open is uploaded to `/ws`, silence and room tone included, exactly as
 //! push-to-talk uploads them. What keeps the silence away from the provider is the **server's**
-//! `login_vad` (`crates/tipsy-compadre/src/session.rs:935-962`), which runs in front of the transcriber
+//! `login_vad` (`crates/tipsy-assistant/src/session.rs:935-962`), which runs in front of the transcriber
 //! on the login capture the way `auto` mode runs it. The browser's half of the promise is narrower and
 //! is what [`drain_capture`] enforces: no frame leaves the page while no capture is open, and a frame
 //! the door refuses is dropped rather than kept. A later task that wants the browser to filter its own
@@ -77,7 +77,7 @@ pub const MIC_RATE: u32 = 16_000;
 
 /// How many assembled frames may wait for one turn of the render loop before the newest are lost.
 ///
-/// **The twin of the native capture's bound**: `crates/tipsy-compadre/src/client.rs:53` is
+/// **The twin of the native capture's bound**: `crates/tipsy-assistant/src/client.rs:53` is
 /// `MIC_QUEUE = 16` on a `sync_channel`, and its `try_send` drops the frame rather than stalling the
 /// device. Sixteen frames is 320 ms of speech, which is longer than any stall a frame loop this shape
 /// can have and short enough that a forgotten queue cannot grow without bound.
@@ -261,8 +261,8 @@ pub fn enqueue_frame(queue: &mut VecDeque<Vec<i16>>, frame: Vec<i16>) {
     }
 }
 
-/// Linear interpolation to 16 kHz. The twin of `crates/tipsy-compadre/src/audio/pcm.rs`'s
-/// `resample_linear`, copied because this crate must not depend on `tipsy-compadre` (its closure holds
+/// Linear interpolation to 16 kHz. The twin of `crates/tipsy-assistant/src/audio/pcm.rs`'s
+/// `resample_linear`, copied because this crate must not depend on `tipsy-assistant` (its closure holds
 /// tokio, cpal and rodio); the test below pins the same arithmetic, because a twin that rounds
 /// differently is a pitch shift the server would hear.
 pub fn resample_linear(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
@@ -313,7 +313,7 @@ pub fn rms(samples: &[f32]) -> f32 {
 /// The loudness one frame shows in the HUD, from its own samples and **before the configured gain**.
 ///
 /// The native client's `state.push_mic_level(rms(&i16_to_f32(&samples)) * self.mic_gain)`
-/// (`crates/tipsy-compadre/src/client/mic.rs:44`): this is the `rms` half of that expression, and the
+/// (`crates/tipsy-assistant/src/client/mic.rs:44`): this is the `rms` half of that expression, and the
 /// gain is [`MicGain`]'s, applied by [`drain_capture`]. The split is what lets the unscaled twin be
 /// pinned against `pcm.rs`'s own conversion in a test with no configuration anywhere near it.
 pub fn levels_from_samples(samples: &[i16]) -> f32 {
@@ -323,7 +323,7 @@ pub fn levels_from_samples(samples: &[i16]) -> f32 {
 /// `[listening] mic_gain`, as the configuration this client has been told spells it.
 ///
 /// **Applied, and this is where a browser can get it.** The native client reads the number out of
-/// `config.toml` when it starts (`crates/tipsy-compadre/src/client.rs:186`) and multiplies every level
+/// `config.toml` when it starts (`crates/tipsy-assistant/src/client.rs:186`) and multiplies every level
 /// by it (`client/mic.rs:44`); a browser has no file, so the only source is `Event::Config` — the
 /// answer to the `GetConfig` the configuration screen sends when it opens (`UiAction::OpenConfig`,
 /// spec §4.2's "Reading: `GetConfig` on open"). [`configured_gain`] reads it from that answer and the
@@ -470,7 +470,7 @@ pub type MicFailure = Rc<RefCell<Option<&'static str>>>;
 /// `voice = false` is the state in which `UiState`'s own key table makes `Tab` do nothing
 /// (`state.rs:414`), so the screen cannot raise a `LoginStart` for a device that will not open, and
 /// the `● rec` badge (`render_login.rs:212`) stays off. The native client instead retries the device
-/// every frame (`crates/tipsy-compadre/src/client/mic.rs:93-124`); a browser cannot — a second
+/// every frame (`crates/tipsy-assistant/src/client/mic.rs:93-124`); a browser cannot — a second
 /// `getUserMedia` needs a second gesture, and the gate that had the first one is gone — so the honest
 /// answer is the typing-only screen the spec describes.
 pub fn record_no_microphone(state: &mut UiState, reason: &'static str) {
@@ -606,7 +606,7 @@ fn gate_elements(document: &web_sys::Document, strings: &tipsy_ui::Strings) -> O
 /// of here takes the gate off the page**.
 ///
 /// The v1 spec requires the press — "In the browser, audio capture requires a user gesture; the web
-/// client shows a 'press to start' screen until then" (`2026-10-10-tipsy-compadre-design.md:193-194`)
+/// client shows a 'press to start' screen until then" (`2026-10-10-tipsy-assistant-design.md:193-194`)
 /// — and the MDN autoplay rule makes it load-bearing for **both** halves: the click must call
 /// `getUserMedia` *and* create and resume the `AudioContext` in the same handler, or the user gets a
 /// silent client that looks started (`ratzilla-and-wasm-audio.md` §5.2; the prior art's shipped page
@@ -634,7 +634,7 @@ fn gate_elements(document: &web_sys::Document, strings: &tipsy_ui::Strings) -> O
 /// press sets `state.mic_open` — the HUD's switch, which is the frame path while no screen is up (the
 /// phase review's Blocker 1) — and a switch the server has not been told about is a microphone whose
 /// frames it drops: the session ignores `Frame::Mic` while `!listening`
-/// (`crates/tipsy-compadre/src/session.rs:534-548`), and `listening` is what `Command::ListenStart`
+/// (`crates/tipsy-assistant/src/session.rs:534-548`), and `listening` is what `Command::ListenStart`
 /// sets. So the press does what `Tab` does when it sets the same flag — the key table raises
 /// `ListenStart` with it (`crates/tipsy-ui/src/state.rs:698-705`) — and the browser's push-to-talk is
 /// then the native one: the microphone is open, you speak, and `Tab` closes it and sends what it
@@ -1033,7 +1033,7 @@ mod tests {
 
     #[test]
     fn the_resampler_matches_the_native_one() {
-        // `crates/tipsy-compadre/src/audio/pcm.rs`'s own arithmetic: out_len = 2 * 4 / 2 = 4,
+        // `crates/tipsy-assistant/src/audio/pcm.rs`'s own arithmetic: out_len = 2 * 4 / 2 = 4,
         // step = 0.5.
         assert_eq!(resample_linear(&[0.0, 1.0], 2, 4), vec![0.0, 0.5, 1.0, 1.0]);
         assert_eq!(resample_linear(&[1.0, 2.0], 16_000, 16_000), vec![1.0, 2.0]);

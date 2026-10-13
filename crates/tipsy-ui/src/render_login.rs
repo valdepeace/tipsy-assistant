@@ -1,5 +1,4 @@
-//! The login widget and the veil over the HUD behind it (spec
-//! `docs/superpowers/specs/2026-10-11-login-screen-design.md`, §6 and §7).
+//! The login widget and the veil over the HUD behind it (the login screen design spec, §6 and §7).
 //!
 //! The screen is not a full-screen form: `draw` paints the whole HUD as it always does, [`veil`]
 //! paints over everything outside the widget's rectangle, and the widget is drawn last, crisp, in the
@@ -29,7 +28,7 @@ const CHROME_H: u16 = 4;
 /// The application's own name on the top border: the *application's* title, never the profile's. The
 /// profile speaks from inside, and the badge it wears on the HUD's header is behind the veil, which is
 /// why this is not a string-table entry.
-const TITLE: &str = "◉ tipsy-compadre";
+const TITLE: &str = "◉ tipsy-assistant";
 /// The marker the input row draws before what is typed.
 const PROMPT: &str = "❯ ";
 /// The columns [`PROMPT`] takes before the answer's first character.
