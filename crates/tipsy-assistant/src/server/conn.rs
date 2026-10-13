@@ -1330,9 +1330,22 @@ mod tests {
     ///
     /// **The greeting's size is the lever.** [`SPEECH_SAMPLES`] is what makes one write exceed a
     /// socket buffer, so this is the test of the queue and the next one is the test of the ceiling.
+    ///
+    /// **`max_write_buffer_size` is the other half of that lever, and it was measured.** axum buffers
+    /// the writer's bytes in userspace and lets that buffer grow to 1 MiB by default — the greeting's
+    /// exact size — so on a host whose socket buffers are roomy the whole greeting was absorbed and
+    /// the queue stayed empty: CI on Linux held `0 message(s) of a queue of 2`, while Windows (whose
+    /// socket buffers are 64 KiB) blocked as this test assumes. Capping it at 4 KiB, as the give-up
+    /// test below already does for its own reason, puts the greeting back on the socket.
     #[tokio::test]
     async fn the_write_side_queue_is_bounded() {
-        let options = ConnOptions { queue: 2, write_timeout: Duration::from_secs(2), ..ConnOptions::default() };
+        let options = ConnOptions {
+            queue: 2,
+            write_timeout: Duration::from_secs(2),
+            write_buffer_size: 1024,
+            max_write_buffer_size: 4096,
+            ..ConnOptions::default()
+        };
         let chat = FakeChat::slow(
             vec![Ok(vec!["uno ", "dos ", "tres ", "cuatro ", "cinco ", "seis ", "siete ", "ocho ", "nueve ", "diez "])],
             Duration::from_millis(2),
