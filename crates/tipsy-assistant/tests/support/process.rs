@@ -39,8 +39,30 @@ pub fn alive(pid: u32) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// The same question on a platform without `Get-Process`.
-#[cfg(not(windows))]
+/// The same question on Linux, where a child this test has not reaped yet **still has its `/proc`
+/// entry**: it is a zombie, and asking whether the path exists answers "alive" for ever, which is what
+/// made `tests/pty.rs`'s `wait_for_exit` spend its whole deadline on a child that had already left and
+/// then fail with *the child never exited*. The state field of `/proc/<pid>/stat` is the difference:
+/// `Z` is gone-but-unreaped, and gone is what these tests mean.
+///
+/// The field is read from after the **last** `)`, because the command name between the parentheses is
+/// the one field of that file that may contain spaces and parentheses of its own.
+#[cfg(target_os = "linux")]
+pub fn alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    match stat.rsplit(')').next().and_then(|rest| rest.split_whitespace().next()) {
+        Some("Z" | "X") => false,
+        Some(_) => true,
+        // Nothing after the name is a file this platform does not write, and assuming life would hang
+        // every caller on its deadline.
+        None => false,
+    }
+}
+
+/// The same question on a platform with neither `Get-Process` nor `/proc`.
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn alive(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
