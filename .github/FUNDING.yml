@@ -1,0 +1,13 @@
+# Who to pay, if you feel like it. GitHub reads this file to draw the Sponsor button on the
+# repository, and the button only appears once the account named here is enrolled in that platform —
+# so this is harmless to commit while an application is still in review, and it costs nothing to leave
+# here if nobody ever sponsors anything.
+#
+# Every key below is optional. Uncomment the one you have set up and delete the rest.
+github: [valdepeace]
+# open_collective: tipsy-assistant
+# ko_fi: valdepeace
+# liberapay: valdepeace
+# buy_me_a_coffee: valdepeace
+# polar: valdepeace
+# custom: ["https://example.invalid/support"]

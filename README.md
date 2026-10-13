@@ -1,6 +1,6 @@
-# tipsy-compadre
+# tipsy-assistant
 
-tipsy-compadre is a voice assistant for software developers with a strong, affectionate regional
+tipsy-assistant is a voice assistant for software developers with a strong, affectionate regional
 personality. The default profile, *El Compae*, is a lazy, joking, slightly tipsy Andalusian who
 knows Jira, GitHub, GitLab, CI/CD and code review, dodges work with developer excuses and, in the
 end, always gives a correct and useful answer. The project is meant to be shared with the
@@ -13,13 +13,52 @@ OpenAI-compatible connector plus the native Gemini and ElevenLabs ones), the bra
 terminal client and its configuration screen all work, and nine profiles ship with it. Two of the
 three listening modes work: `push`, where you open and close the microphone by hand, and `auto`,
 where a voice detector decides what is an utterance. The server and the remote client work too:
-`tipsy-compadre serve` listens, and `tipsy-compadre --connect <ws-url>` attaches a terminal to it.
+`tipsy-assistant serve` listens, and `tipsy-assistant --connect <ws-url>` attaches a terminal to it.
 The **web terminal** works as well — `/terminal` runs that same TUI in a browser tab over a socket of
 raw PTY bytes (Phase 2 of the web tier) — and so does the **web client**: `cargo run -p xtask -- dist`
 builds the browser HUD into `web/dist/`, the binary embeds it, and `/` renders that HUD from
 WebAssembly with the browser's own microphone and speakers (Phase 3), behind the login door when
 `[login]` is configured. Still to come: `hands_free` (it waits for the wake word), plus CI and
 releases.
+
+## Screenshots
+
+Every picture below was drawn by the application's own renderer — `tipsy_ui::draw`, the same call the
+HUD's tests make — and written out as SVG, so it is what the terminal really shows and it cannot drift
+from the code. `cargo run -p xtask -- shots` regenerates them into `docs/images/`.
+
+**The chat HUD**, as a first run opens it: the default profile is El Compae, and the interface is
+drawn in the *profile's* own language, so it opens in Spanish. A reply has already been spoken — the
+core, the machine's own figures and the question box are the rest of the dashboard:
+
+![The chat HUD: the conversation on the left, the core with its rings in the middle, the system figures on the right, and the question box below](docs/images/hud-chat.svg)
+
+**The same HUD with an English profile.** Five of the nine profiles that ship speak English —
+American, Australian, British and Canadian — and the buttons, headings and help line follow whichever
+one is active, because a profile carries its own `language` in `[[profiles]]`:
+
+![The same chat HUD with the English profile The Mate: the panels read LOCAL TIME, CORE, SYSTEM, VOICE and ASK, and the reply is in the profile's register](docs/images/hud-chat-en.svg)
+
+**The `NETWORK` view.** The same dashboard with two minutes of traffic in and out where the
+conversation was (`←`/`→` switches between them):
+
+![The NETWORK view: a chart of inbound and outbound traffic over the last two minutes](docs/images/hud-network.svg)
+
+**The configuration screen** (`F9`). Four tabs whose rows are edited in place. The `Providers` tab
+holds the three connectors — here the chat goes to Gemini, speech to ElevenLabs and transcription to
+an OpenAI-compatible server, which is the point of naming a `kind` per capability:
+
+![The configuration screen on the Providers tab: a connector, a base URL, a model and a key name per capability, with a Test row under each](docs/images/config-providers.svg)
+
+The `Profiles` tab carries the nine profiles that ship, their prompts and voices, and the one that is
+active:
+
+![The configuration screen on the Profiles tab: the profile list, then the active profile's name, language, prompt, voice instructions, greeting, wake word and voices](docs/images/config-profiles.svg)
+
+**The login door.** A ritual and not a lock: the HUD shows through a veil, the core is in the middle,
+and one answer the *server* judges opens it:
+
+![The login screen: the veiled HUD behind a centered widget with the core, the question and a typed answer](docs/images/login.svg)
 
 ## Quick start
 
@@ -30,13 +69,13 @@ as [Ollama](https://ollama.com/) — see [Configuration](#configuration).
 ```sh
 # 1. Tell it where your key is. It asks you to paste it and stores it in the OS credential
 #    store; the key itself never touches the repository, the config file or the logs.
-cargo run -p tipsy-compadre -- key set openrouter
+cargo run -p tipsy-assistant -- key set openrouter
 
 # 2. Check it, without printing it:
-cargo run -p tipsy-compadre -- key status openrouter
+cargo run -p tipsy-assistant -- key status openrouter
 
 # 3. Run it. On the first run it writes a default config.toml and greets you out loud.
-cargo run -p tipsy-compadre
+cargo run -p tipsy-assistant
 ```
 
 `F9` — or a click on the gear in the header — opens the configuration screen. It has four tabs
@@ -53,7 +92,7 @@ exported variable takes precedence over a stored key. In PowerShell:
 
 ```powershell
 $env:TIPSY_KEY_OPENROUTER = "your-key-here"
-cargo run -p tipsy-compadre
+cargo run -p tipsy-assistant
 ```
 
 ## Keys
@@ -95,17 +134,18 @@ do nothing in there. These are the keys the client binds in the screen:
 | `F9` / `Esc` | Close the screen. Nothing that was edited is written, and the file is left as it was |
 
 The interface is drawn in Spanish when the active profile's language starts with `es` (`NÚCLEO`,
-`PREGUNTA`, `CHAT`/`RED`, "Listo, quillo"), and in English otherwise.
+`PREGUNTA`, `CHAT`/`RED`, "Listo, quillo"), and in English otherwise — [Languages](#languages) is the
+whole of that rule, and what a profile in a third language gets.
 
 ## Configuration
 
 ```sh
-cargo run -p tipsy-compadre -- config path
+cargo run -p tipsy-assistant -- config path
 ```
 
-prints the path of `config.toml`; it is `%APPDATA%\tipsy-compadre\config.toml` on Windows,
-`~/.config/tipsy-compadre/config.toml` on Linux and
-`~/Library/Application Support/tipsy-compadre/config.toml` on macOS. The file is created with
+prints the path of `config.toml`; it is `%APPDATA%\tipsy-assistant\config.toml` on Windows,
+`~/.config/tipsy-assistant/config.toml` on Linux and
+`~/Library/Application Support/tipsy-assistant/config.toml` on macOS. The file is created with
 defaults on the first run, and a `config.toml` that does not parse is renamed to
 `config.toml.bad-<unix seconds>` and replaced by defaults rather than overwritten in place.
 
@@ -228,6 +268,30 @@ never carries `server.token`, so the row says where the token belongs instead of
 server would not learn. [Running a server, and attaching to
 one](#running-a-server-and-attaching-to-one) is what those three values mean.
 
+### Languages
+
+The **interface** exists in two languages: Spanish and English. Which one you get is decided by the
+active profile's `language` and by nothing else — `es` and every `es-…` tag draw the Spanish table
+(`NÚCLEO`, `PREGUNTA`, `CHAT`/`RED`, "Listo, quillo"), and **anything else draws English**, including
+a profile written in a third language.
+
+A profile's own **copy** is not restricted to those two: `prompt`, `voice_instructions`, `greeting`,
+`wake_word`, `name` and the login allowlist are free text, in whatever language and variety the
+profile is written in, and a profile in a third language is a perfectly good profile — it just wears
+an English interface. Two things assume the word-separated shape Spanish and English share, so they
+are worth knowing before writing one:
+
+- the login's allowlist splits an answer on everything that is not alphanumeric, so a language
+  without spaces between words matches a keyword only as a whole run between punctuation;
+- the wake word compares acoustics (`hands_free`, and it needs recordings of a real voice), so it is
+  language-agnostic but not yet in your language.
+
+Adding a *third interface language* is not a translation file dropped in a directory: `UiLanguage`
+carries the variants (`crates/tipsy-protocol/src/lib.rs`), `UiLanguage::from_bcp47` is the mapping that
+decides which profile language reaches which table, and each language is a complete `Strings` table in
+`crates/tipsy-ui/src/strings.rs`, all of whose fields the tests require to be filled in. That work has
+not been done for any language beyond the two.
+
 ### The login screen
 
 With `[login]` configured, a client opens on a screen before the HUD: the dashboard shows through
@@ -282,17 +346,17 @@ again.
 
 ```sh
 # The server, headless: the web client at / and the web terminal at /terminal.
-cargo run -p tipsy-compadre -- serve
+cargo run -p tipsy-assistant -- serve
 
 # The same TUI you get from a bare run, drawn on this machine and driven by that server.
-cargo run -p tipsy-compadre -- --connect ws://127.0.0.1:7070/ws
+cargo run -p tipsy-assistant -- --connect ws://127.0.0.1:7070/ws
 
 # From another machine, once `lan = true` and a token are in config.toml:
-cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the Server tab's token>
+cargo run -p tipsy-assistant -- --connect ws://192.168.1.20:7070/ws --token <the Server tab's token>
 ```
 
 - `serve` records where it is listening — the address it was asked for and the one it bound, which
-  differ whenever `--bind` names port `0` — in `tipsy-compadre.log`. `--verbose` prints the bound
+  differ whenever `--bind` names port `0` — in `tipsy-assistant.log`. `--verbose` prints the bound
   address as well. `--bind` overrides `bind` for one run and never writes the file back.
 - **The bind rule is about the address, not the switch.** An address that is not loopback is refused
   without a token, and `lan = true` on `127.0.0.1` is perfectly legal: `lan` is the operator's
@@ -311,7 +375,7 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   thing that mints one is the Server tab's `Ctrl+R`, which fills the row and writes it when you save.
   With an empty token `serve` is loopback-only, which is what the bind rule enforces; a first-run
   token is on the release checklist below, together with the requirement that showing it once must
-  not put it in the log. `TIPSY_CONFIG_DIR` moves `config.toml`, `tipsy-compadre.log` and a generated
+  not put it in the log. `TIPSY_CONFIG_DIR` moves `config.toml`, `tipsy-assistant.log` and a generated
   certificate somewhere else for one run, so the checks below never touch your own configuration.
 - A client's save **cannot move a provider's `base_url` or `key_name`, or `server.token`**: those
   three are not in the message a client sends (`Command::UpdateConfig` carries `ClientConfigView`),
@@ -325,8 +389,8 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   directory. It resolves `web/vendor/` from the `xtask` crate's own location and not from the
   directory you are standing in, so the fetched files always land where the embed reads them, and it
   prints the absolute path it wrote. (Before that correction it used a relative path: run from
-  `crates/tipsy-compadre` it printed `web/vendor is ready` while writing
-  `crates/tipsy-compadre/web/vendor/`, which nothing reads — a blank terminal from a command that
+  `crates/tipsy-assistant` it printed `web/vendor is ready` while writing
+  `crates/tipsy-assistant/web/vendor/`, which nothing reads — a blank terminal from a command that
   reported success.) Each run also re-checks the fetched files against the sha256 recorded in
   `web/vendor/README.md`, and refuses with both digests if one has been truncated or edited.
   `web/dist/` is emptied before `wasm-bindgen` writes it, so a renamed asset from an earlier build is
@@ -334,7 +398,7 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
   `cargo-xtask` on `PATH`, and the long form above is the one that works.
 - `--connect` runs the TUI and nothing else: it starts no server, builds no provider and reads no
   API key, because every provider call happens in the server process.
-- `--verbose` also writes the log to stderr. The log file is `tipsy-compadre.log`, beside
+- `--verbose` also writes the log to stderr. The log file is `tipsy-assistant.log`, beside
   `config.toml`, and it never contains the token, a key or audio: every complete line is scrubbed on
   its way out, and both copies go through the same scrubber. A `--connect` URL is printed without its
   query string, so a token somebody pasted into the URL stays out of the terminal, the log and the
@@ -345,7 +409,7 @@ cargo run -p tipsy-compadre -- --connect ws://192.168.1.20:7070/ws --token <the 
 `serve --tls` encrypts the connection, which is what makes the token and a newly set API key safe on
 a LAN. With no `--tls-cert`/`--tls-key` pair it generates a self-signed certificate once, beside
 `config.toml`, and the run that minted it records its SHA-256 fingerprint — as `AA:BB:…`, the string
-a browser's certificate viewer shows — in `tipsy-compadre.log`, so the two can be compared.
+a browser's certificate viewer shows — in `tipsy-assistant.log`, so the two can be compared.
 `--verbose` prints those lines too.
 
 **It does not unlock the browser's microphone from another machine.** Browsers expose
@@ -405,11 +469,11 @@ transcription provider. Nothing is sent anywhere else, and there is no telemetry
 those providers at a server on your own machine, nothing leaves it.
 
 API keys stay in the operating system's credential store — Windows Credential Manager, the macOS
-Keychain or the Secret Service on Linux — under the service `tipsy-compadre`, or in the environment
+Keychain or the Secret Service on Linux — under the service `tipsy-assistant`, or in the environment
 variable you exported. `key status` prints only a redacted form of a key, `key set` prints no more
 than that when it confirms, and nothing ever writes a key into `config.toml`.
 
-Nothing above reaches the log either, and that is enforced rather than promised: `tipsy-compadre.log`
+Nothing above reaches the log either, and that is enforced rather than promised: `tipsy-assistant.log`
 is written through a scrubber, so the server's token, every key value this process resolved and any
 sample dump of recorded audio are removed before a line reaches the file — and before it reaches the
 `--verbose` copy on stderr, which goes through the same scrubber.
@@ -425,8 +489,18 @@ never quotes them.
 
 - [`docs/architecture.md`](docs/architecture.md) — how the client, the session, the brain, the
   providers and the interface fit together.
-- [`docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md`](docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md)
-  — the v1 design spec: decisions, protocol, profiles, errors, milestones.
+
+## Licence
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE))
+- MIT license ([`LICENSE-MIT`](LICENSE-MIT))
+
+at your option — the choice most of the Rust ecosystem makes: take the permissive one, or take the one
+that also spells out the patent grant. Everything in this repository is covered, the shipped profiles'
+copy and voice instructions included, so a profile of your own may be written from them freely.
+Contributions are welcome as pull requests.
 
 ## Building
 
@@ -463,7 +537,7 @@ rustup target add wasm32-unknown-unknown
 
 The command runs `cargo build --target wasm32-unknown-unknown -p tipsy-web --release`,
 `wasm-bindgen --target web` (the CLI's version must be the one `Cargo.lock` pins — `cargo install -f
-wasm-bindgen-cli --version <that version>`), and finally `cargo build -p tipsy-compadre --release` with
+wasm-bindgen-cli --version <that version>`), and finally `cargo build -p tipsy-assistant --release` with
 the bundle embedded. Run it from somewhere inside the repository — its root or any crate directory:
 `dist` resolves `web/vendor/` from the `xtask` crate's own location rather than from your shell's
 working directory, so the fetched assets land where the embed reads them, and it prints the absolute
@@ -484,7 +558,7 @@ build has only the page (`web/client/index.html` is committed, `web/dist/` is no
 that page on such a build and the browser console shows the 404 for `/assets/dist/tipsy_web.js`; the
 page that says how to build the bundle is what a binary with no `web/client/index.html` at all
 serves. A *debug* build reads `web/` from
-the directory you run the binary from, so `cargo run -p tipsy-compadre` started at the repository root
+the directory you run the binary from, so `cargo run -p tipsy-assistant` started at the repository root
 serves a bundle that is already built, and a binary copied elsewhere does not.
 
 ## How to verify the web terminal
@@ -496,13 +570,13 @@ is verified by hand, once, with these steps. Everything a test can reach is in `
 tests: that the page is the one the bundle serves, that every asset it names is embedded, and that it
 is behind the same token rule the socket is.
 
-1. `cargo run -p xtask -- dist` and then `cargo run -p tipsy-compadre -- serve`. Start the first one
+1. `cargo run -p xtask -- dist` and then `cargo run -p tipsy-assistant -- serve`. Start the first one
    from inside the repository — its root or any crate directory, it does not matter which, because
    `dist` writes to the repository's own `web/vendor/` and prints the path it used; a shell standing
    outside the workspace cannot find the package at all. `serve` records where
-   it is listening in `tipsy-compadre.log`; `--verbose` prints the bound address too. It spawns its
+   it is listening in `tipsy-assistant.log`; `--verbose` prints the bound address too. It spawns its
    web terminal's child as **its own running binary** (`std::env::current_exe()`), never as
-   `tipsy-compadre` looked up in `PATH`: do not start a child by hand for this check, and if you do,
+   `tipsy-assistant` looked up in `PATH`: do not start a child by hand for this check, and if you do,
    give it an absolute path. A `PATH` entry that is empty, relative, or points into this checkout could
    otherwise plant the program that runs with your authority.
 2. Open `http://127.0.0.1:7070/terminal`. When the configuration holds a token, append
@@ -529,7 +603,7 @@ is behind the same token rule the socket is.
    server builds the frame with `serde_json::json!`, whose `Value` is a sorted map, so `code` precedes
    `type` on the wire. Nothing that parses JSON can tell, which is exactly why the bytes are written
    out here rather than the shape.
-7. After step 6, `tasklist | Select-String tipsy-compadre` lists nothing. If a `tipsy-compadre.exe`
+7. After step 6, `tasklist | Select-String tipsy-assistant` lists nothing. If a `tipsy-assistant.exe`
    is still there after the tab is closed, the teardown in `server/conn.rs` is leaking a child.
 
 ## Release checklist
@@ -549,10 +623,10 @@ what a test cannot hear.
       `response.output_audio_transcript.delta` are **inferred from sibling events in the research
       note, not verified** (its documentation page truncated before the Response section), so that
       shape is pinned in three places and nowhere else: the two `INFERRED PAYLOAD` fixtures in
-      `crates/tipsy-compadre/src/realtime/events.rs`, the reads beside them in the same file's mapping
+      `crates/tipsy-assistant/src/realtime/events.rs`, the reads beside them in the same file's mapping
       (`field(...)` for `delta`, and `optional_field(...)` for the `item_id` a frame may legitimately
       omit), and the two builders (`delta`, `transcript_delta`) in
-      `crates/tipsy-compadre/tests/realtime.rs`. They change together. If the transcript stays empty
+      `crates/tipsy-assistant/tests/realtime.rs`. They change together. If the transcript stays empty
       while the audio plays, that inference is what is wrong, and the field name in those three
       places is what to change.
 - [ ] Talk over the call mid-answer: the speech stops at once, the log keeps only what was said
@@ -564,10 +638,10 @@ what a test cannot hear.
       is ever raised). Both layers are also scrubbed on the way out, so the server's token, a key
       value this process resolved and any sample dump cannot reach the file or the `--verbose` copy.
       The same invariant sits beside `RealtimeSocket` in
-      `crates/tipsy-compadre/src/realtime/socket.rs`.
+      `crates/tipsy-assistant/src/realtime/socket.rs`.
 - [ ] **A live `serve` and a `--connect` attach.** Point `TIPSY_CONFIG_DIR` at a scratch directory so
-      none of this touches your own `%APPDATA%\tipsy-compadre`, start `tipsy-compadre serve` on a
-      loopback port, attach with `tipsy-compadre --connect ws://127.0.0.1:<port>/ws`, and type. Then
+      none of this touches your own `%APPDATA%\tipsy-assistant`, start `tipsy-assistant serve` on a
+      loopback port, attach with `tipsy-assistant --connect ws://127.0.0.1:<port>/ws`, and type. Then
       over the LAN: `serve --bind 0.0.0.0:7070` with a token, and attach from the other machine with
       `--token`. **The refusal path matters as much as the attach**: with no token, or a wrong one,
       the client must print `the server refused the connection: token_required` (or `token_invalid`)
@@ -577,14 +651,14 @@ what a test cannot hear.
       `https://127.0.0.1:<port>/?token=…` — or point a browser at it — then repeat with
       `--tls-cert`/`--tls-key` and a certificate the client already trusts. The generated pair sits
       beside `config.toml` and the run that minted it writes the SHA-256 fingerprint to
-      `tipsy-compadre.log`, which `--verbose` also prints: compare it with the browser's certificate
+      `tipsy-assistant.log`, which `--verbose` also prints: compare it with the browser's certificate
       viewer. **This item is why the check exists — the phase's first live run found that the TLS
       listener never started at all**, because `run` bound the port and then asked the TLS server to
       bind it a second time; the fix wave takes the socket that was already bound and checked.
 - [ ] **Generate a first-run token, and show it once.** *Not implemented today*: a fresh
       `config.toml` has `token = ""` and only the Server tab's `Ctrl+R` mints one. When it lands, a
       first run must write a token, show it to the user exactly once, and **showing it must not put
-      it in a log** — not in `tipsy-compadre.log`, not in the `--verbose` copy, not in a URL, and not
+      it in a log** — not in `tipsy-assistant.log`, not in the `--verbose` copy, not in a URL, and not
       in any socket frame the client has not authenticated for.
 - [ ] **The login door in the browser, with the system microphone disabled.** Rebuild the bundle first —
       the page loads `web/dist`, which is generated and never committed, so

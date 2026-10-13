@@ -1,13 +1,13 @@
 # Architecture
 
 > Status: **draft**, under design. This document captures the architecture agreed so far during
-> brainstorming. The full design spec will live in `docs/superpowers/specs/`.
+> brainstorming. The design specs each phase was built from are kept outside this repository.
 
-tipsy-compadre is a voice assistant for software developers with a strong regional personality
+tipsy-assistant is a voice assistant for software developers with a strong regional personality
 (the default one, *El Compae*, is a lazy, joking, slightly tipsy Andalusian). It is built as a
 **client-server** application written entirely in Rust:
 
-- The **server** (the native `tipsy-compadre` executable) does all the real work: speech-to-text,
+- The **server** (the native `tipsy-assistant` executable) does all the real work: speech-to-text,
   the LLM conversation, text-to-speech, voice activity detection, wake word detection,
   configuration, API keys and system stats.
 - **Clients** only draw the interface and move audio in and out. They all share the same ratatui
@@ -28,7 +28,7 @@ design trade-off arises, the terminal wins.
 ## Overview
 
 ```
-                        tipsy-compadre  (server, native)
+                        tipsy-assistant  (server, native)
  ┌────────────────────────────────────────────────────────────────┐
  │ brain (STT → LLM → TTS) · providers · config + keys · sysmon    │
  │ listening: VAD + wake word over whatever audio clients stream  │
@@ -76,9 +76,9 @@ client into `web/dist/`; the binary embeds that whole tree, so both host
 pages (`web/terminal/index.html` and `web/client/index.html`), the vendored `vendor/` files and the
 generated output under `dist/` are served from memory as `/assets/terminal/…`, `/assets/vendor/…` and
 `/assets/dist/…`. The folder attribute that names it is spelled `../../web/` in
-`crates/tipsy-compadre/src/server/assets.rs`, because `rust-embed` resolves a *relative* folder
+`crates/tipsy-assistant/src/server/assets.rs`, because `rust-embed` resolves a *relative* folder
 against the crate's own `CARGO_MANIFEST_DIR` and not against the repository root: the short spelling
-`web/dist/` names `crates/tipsy-compadre/web/dist/`, which nothing builds. Whatever directory
+`web/dist/` names `crates/tipsy-assistant/web/dist/`, which nothing builds. Whatever directory
 `dist` writes to must therefore stay **inside** `web/`.
 
 ## Workspace layout
@@ -92,13 +92,13 @@ WebAssembly. Native-only dependencies (multi-threaded tokio, `cpal`, `rodio`, `k
 | `tipsy-protocol` | library | `Command` / `Event` messages and the audio frame format | yes |
 | `tipsy-ui` | library | The front end's shared, wasm-safe half: the ratatui HUD (widgets, state and es/en strings), backend-agnostic, **and the decisions a client makes with no device, socket or clock in reach (`policy`)** | yes |
 | `tipsy-web` | cdylib | Web client: the Ratzilla backend, the browser's microphone and speakers, the WebSocket transport | yes |
-| `tipsy-compadre` | **binary** | The server (brain, providers, config, axum, the WebSocket door) plus the native TUI client | no |
-| `xtask` | **binary** | The build's own tool: `cargo run -p xtask -- dist` fetches and verifies the terminal assets, builds the wasm bundle, then builds the binary that embeds it | no |
+| `tipsy-assistant` | **binary** | The server (brain, providers, config, axum, the WebSocket door) plus the native TUI client | no |
+| `xtask` | **binary** | The build's own tool: `cargo run -p xtask -- dist` fetches and verifies the terminal assets, builds the wasm bundle, then builds the binary that embeds it, and `cargo run -p xtask -- shots` writes the README's pictures out of the application's own renderer into `docs/images/` | no |
 
 A client's turn, microphone and playback policy — which command starts a turn or quiets the device,
 when the microphone is wanted and where one captured frame goes, which cell a click landed on — lives in
 `tipsy_ui::policy`, and **both the terminal client and the browser client call it**, so the two cannot
-drift: `crates/tipsy-compadre/src/client.rs` is one caller and Plan 3's web client is the other. It is
+drift: `crates/tipsy-assistant/src/client.rs` is one caller and Plan 3's web client is the other. It is
 the wasm-safe half by construction — nothing there may reach for a device, a socket, the file system,
 this process's clock or `crossterm` — which is why `client.rs`'s `key_input` (a crossterm `KeyEvent`) and
 `clock_view` (this process's clock) stay per shell instead, and why Plan 3's browser client reads
@@ -112,7 +112,7 @@ opens with `use super::*` and resolves names it never imports itself (`CallSetup
 alone names breaks the children**: removing `CallSetup` and `Heard` from `use crate::realtime::{…}`
 produces `E0433: cannot find type CallSetup` in `client/call.rs`, which is where both are used.
 
-There is **a single executable**. The `tipsy-web` bundle is embedded into the `tipsy-compadre`
+There is **a single executable**. The `tipsy-web` bundle is embedded into the `tipsy-assistant`
 binary at build time and served from memory, so users download one file.
 
 Building the full distribution takes two steps (the WASM bundle first, then the binary that
@@ -184,8 +184,7 @@ Clients and server exchange:
   `Error`.
 - **Speech audio** (server → client), binary frames: mono 16-bit PCM, played by the client.
 
-The exact message schema is defined in the design spec
-(`docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md`, §4).
+The exact message schema is defined in the v1 design spec, §4.
 
 ## Listening modes
 
@@ -201,9 +200,9 @@ indicator whenever the mic is open.
 
 That promise is `hands_free`'s. The login screen is the other kind of recording: an explicit, visible
 one, opened by the screen itself and announced by the red `● rec` in its own title, which sends only
-the speech the local detector confirms and never the silence or the room before it
-(`docs/superpowers/specs/2026-10-11-login-screen-design.md`, §10). It is a ritual, not a security
-boundary: `server.token` below remains the only real requirement.
+the speech the local detector confirms and never the silence or the room before it (the login screen
+design spec, §10). It is a ritual, not a security boundary: `server.token` below remains the only real
+requirement.
 
 ## Security
 
@@ -244,9 +243,9 @@ The server spends the user's API keys and listens to their microphone, so:
 
 | Command | What runs |
 |---|---|
-| `tipsy-compadre` | Server + TUI client in the same process, talking through an in-process channel |
-| `tipsy-compadre serve` | Server only (headless); the web client is served at `http://127.0.0.1:<port>/` and the web terminal at `/terminal` |
-| `tipsy-compadre --connect <url>` | TUI client only, connected to a remote server |
+| `tipsy-assistant` | Server + TUI client in the same process, talking through an in-process channel |
+| `tipsy-assistant serve` | Server only (headless); the web client is served at `http://127.0.0.1:<port>/` and the web terminal at `/terminal` |
+| `tipsy-assistant --connect <url>` | TUI client only, connected to a remote server |
 
 ## Roadmap
 

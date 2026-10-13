@@ -11,24 +11,28 @@
 
 mod assets;
 mod dist;
+mod shots;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match std::env::args().nth(1).as_deref() {
-        Some("dist") => match dist::run(&repo_root()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(message) => {
-                eprintln!("xtask: {message}");
-                ExitCode::FAILURE
-            }
-        },
+    let task = std::env::args().nth(1);
+    let result = match task.as_deref() {
+        Some("dist") => dist::run(&repo_root()),
+        Some("shots") => shots::run(&repo_root()),
         Some(other) => {
-            eprintln!("xtask: unknown task `{other}`; the tasks are `dist`");
-            ExitCode::FAILURE
+            eprintln!("xtask: unknown task `{other}`; the tasks are `dist` and `shots`");
+            return ExitCode::FAILURE;
         }
         None => {
-            eprintln!("xtask: which task? `cargo run -p xtask -- dist`");
+            eprintln!("xtask: which task? `cargo run -p xtask -- dist` or `cargo run -p xtask -- shots`");
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("xtask: {message}");
             ExitCode::FAILURE
         }
     }
@@ -41,7 +45,7 @@ fn main() -> ExitCode {
 /// relative `Path::new("web/vendor")`. Run from an empty directory, it fetched, verified and printed
 /// "web/vendor is ready" into `<that directory>/web/vendor`, while `rust-embed` reads the
 /// repository's own `web/` (`` `#[folder = "../../web/"]` `` in `server/assets.rs`) — so the same command
-/// run from `crates/tipsy-compadre` reported success and left `/terminal` with no xterm.js and a blank
+/// run from `crates/tipsy-assistant` reported success and left `/terminal` with no xterm.js and a blank
 /// screen. `env!("CARGO_MANIFEST_DIR")` is baked in at compile time, so the assets land in the one
 /// directory the embed reads, whatever the shell's current directory is.
 ///
@@ -79,7 +83,7 @@ mod tests {
         let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("the workspace manifest");
         assert!(manifest.contains("[workspace]"), "the root's manifest is the workspace's");
         // And the one directory this matters for: the embed's folder, which `server/assets.rs` spells
-        // `../../web/` from the tipsy-compadre crate and which `dist` must therefore write into.
+        // `../../web/` from the tipsy-assistant crate and which `dist` must therefore write into.
         assert!(root.join("web").is_dir(), "the embed's folder lives at {}", root.join("web").display());
         assert!(root.join("web").join("vendor").is_dir(), "and the fetched assets live under it");
     }
