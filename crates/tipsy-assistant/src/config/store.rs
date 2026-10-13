@@ -82,10 +82,8 @@ pub fn load_or_create(path: &Path) -> std::io::Result<LoadOutcome> {
     match toml::from_str::<Config>(&text) {
         Ok(config) => Ok(LoadOutcome { config: config.with_builtin_profiles(), warning: None }),
         Err(e) => {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let stamp =
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             let backup = path.with_file_name(format!(
                 "{}.bad-{stamp}",
                 path.file_name().and_then(|n| n.to_str()).unwrap_or("config.toml")
@@ -104,7 +102,7 @@ pub fn load_or_create(path: &Path) -> std::io::Result<LoadOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LoginEntry, ProviderKind, Profile, ServerConfig};
+    use crate::config::{LoginEntry, Profile, ProviderKind, ServerConfig};
     use tipsy_protocol::ListeningMode;
 
     /// The override the live end-to-end check needs: one variable moves the configuration, its log
@@ -152,7 +150,9 @@ mod tests {
     fn partial_file_gets_defaults_and_keeps_user_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 active_profile = "mine"
 
 [listening]
@@ -162,7 +162,9 @@ mode = "auto"
 id = "mine"
 name = "Mi Compadre"
 language = "es-ES"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let c = load_or_create(&path).unwrap().config;
         assert_eq!(c.listening.mode, ListeningMode::Auto);
         assert_eq!(c.listening.silence_ms, 1000);
@@ -181,7 +183,9 @@ language = "es-ES"
         let dir = tempfile::tempdir().unwrap();
         let before = dir.path().join("before.toml");
         let after = dir.path().join("after.toml");
-        std::fs::write(&before, r#"
+        std::fs::write(
+            &before,
+            r#"
 active_persona = "mine"
 
 [listening]
@@ -191,8 +195,12 @@ mode = "auto"
 id = "mine"
 name = "Mi Compadre"
 language = "es-ES"
-"#).unwrap();
-        std::fs::write(&after, r#"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &after,
+            r#"
 active_profile = "mine"
 
 [listening]
@@ -202,7 +210,9 @@ mode = "auto"
 id = "mine"
 name = "Mi Compadre"
 language = "es-ES"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let from_before = load_or_create(&before).unwrap().config;
         let from_after = load_or_create(&after).unwrap().config;
@@ -252,7 +262,8 @@ language = "es-ES"
         let out = load_or_create(&path).unwrap();
         assert!(out.warning.is_some());
         assert_eq!(out.config, Config::default());
-        let backups: Vec<_> = std::fs::read_dir(dir.path()).unwrap()
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with("config.toml.bad-"))
             .collect();
@@ -279,7 +290,9 @@ language = "es-ES"
     fn plan_1_file_without_token_or_mic_device_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 active_profile = "compae"
 
 [server]
@@ -290,7 +303,9 @@ lan = false
 mode = "auto"
 silence_ms = 1500
 mic_gain = 9.5
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let out = load_or_create(&path).unwrap();
         assert!(out.warning.is_none(), "an old file is not a corrupt file: {:?}", out.warning);
@@ -407,7 +422,9 @@ mic_gain = 9.5
     fn a_config_written_before_this_plan_gets_the_realtime_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 active_profile = "compae"
 
 [providers.chat]
@@ -420,7 +437,9 @@ key = "openrouter"
 mode = "auto"
 silence_ms = 1500
 mic_gain = 9.5
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let out = load_or_create(&path).unwrap();
         assert!(out.warning.is_none(), "an old file is not a corrupt file: {:?}", out.warning);

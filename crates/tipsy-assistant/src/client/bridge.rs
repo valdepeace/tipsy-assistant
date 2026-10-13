@@ -116,8 +116,7 @@ type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStre
 /// The command itself comes from [`super::hello`], the one place it is built: the in-process client
 /// sends the same one, and a second copy here is exactly where the two paths would drift apart.
 async fn say_hello(socket: &mut Socket, token: Option<&str>, url: &str) -> Result<Event, BridgeError> {
-    let text = serde_json::to_string(&super::hello(token.map(str::to_string)))
-        .expect("a `Command` always serialises");
+    let text = serde_json::to_string(&super::hello(token.map(str::to_string))).expect("a `Command` always serialises");
     socket
         .send(Message::text(text))
         .await
@@ -287,7 +286,11 @@ mod tests {
         assert_eq!(DisplayUrl::new("ws://192.168.1.5:7070/ws?a=1&b=2").to_string(), "ws://192.168.1.5:7070/ws");
         assert_eq!(DisplayUrl::new("ws://host/ws#secret").to_string(), "ws://host/ws");
         assert_eq!(DisplayUrl::new("ws://host/ws?").to_string(), "ws://host/ws");
-        assert_eq!(DisplayUrl::new("ws://host:7070/ws").to_string(), "ws://host:7070/ws", "an address and a path survive");
+        assert_eq!(
+            DisplayUrl::new("ws://host:7070/ws").to_string(),
+            "ws://host:7070/ws",
+            "an address and a path survive"
+        );
         assert_eq!(
             format!("{:?}", DisplayUrl::new("ws://host/ws?token=abc")),
             "ws://host/ws",

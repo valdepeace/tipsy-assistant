@@ -16,7 +16,7 @@ use tipsy_protocol::{Capability, ErrorCode};
 
 use crate::audio::pcm::Pcm;
 use crate::config::{ProviderConfig, ProviderKind, ProvidersConfig};
-use crate::keys::{env_var_name, KeyError, KeyResolver};
+use crate::keys::{KeyError, KeyResolver, env_var_name};
 use elevenlabs::{ElevenLabsSpeech, ElevenLabsTranscribe};
 use gemini::{GeminiChat, GeminiSpeech};
 use openai_compat::OpenAiCompat;
@@ -119,11 +119,7 @@ impl ProviderError {
 
 impl From<reqwest::Error> for ProviderError {
     fn from(e: reqwest::Error) -> Self {
-        if e.is_timeout() {
-            ProviderError::Timeout
-        } else {
-            ProviderError::Network(e.to_string())
-        }
+        if e.is_timeout() { ProviderError::Timeout } else { ProviderError::Network(e.to_string()) }
     }
 }
 
@@ -230,9 +226,7 @@ fn speech_provider(cfg: &ProviderConfig, keys: &KeyResolver) -> Result<Arc<dyn S
     match cfg.kind {
         ProviderKind::OpenaiCompat => Ok(Arc::new(OpenAiCompat::new(&cfg.base_url, &cfg.model, key_for(cfg, keys)?))),
         ProviderKind::Gemini => Ok(Arc::new(GeminiSpeech::new(&cfg.base_url, &cfg.model, key_for(cfg, keys)?))),
-        ProviderKind::Elevenlabs => {
-            Ok(Arc::new(ElevenLabsSpeech::new(&cfg.base_url, &cfg.model, key_for(cfg, keys)?)))
-        }
+        ProviderKind::Elevenlabs => Ok(Arc::new(ElevenLabsSpeech::new(&cfg.base_url, &cfg.model, key_for(cfg, keys)?))),
     }
 }
 
@@ -414,9 +408,7 @@ async fn probe_speech(speech: &dyn SpeechProvider) -> Probe {
             // A 200 that synthesised nothing is a refusal: there is nothing to play from it.
             Probe::refused(latency_ms, "the provider returned no audio")
         }
-        Ok(pcm) => {
-            Probe::answered(latency_ms, format!("{} samples at {} Hz", pcm.samples.len(), pcm.sample_rate))
-        }
+        Ok(pcm) => Probe::answered(latency_ms, format!("{} samples at {} Hz", pcm.samples.len(), pcm.sample_rate)),
         Err(e) => Probe::refused(latency_ms, e.to_string()),
     }
 }
@@ -450,10 +442,7 @@ mod tests {
         );
         assert_eq!(ProviderError::from_status(403, "forbidden"), ProviderError::Auth("forbidden".into()));
         assert_eq!(ProviderError::from_status(504, ""), ProviderError::Timeout);
-        assert_eq!(
-            ProviderError::from_status(500, ""),
-            ProviderError::BadResponse("HTTP 500: HTTP 500".into())
-        );
+        assert_eq!(ProviderError::from_status(500, ""), ProviderError::BadResponse("HTTP 500: HTTP 500".into()));
         assert_eq!(
             ProviderError::from_status(400, r#"{"message":"Gemini TTS only supports pcm"}"#),
             ProviderError::BadResponse("HTTP 400: Gemini TTS only supports pcm".into())
@@ -623,7 +612,11 @@ mod build_tests {
         let _ = providers.chat.stream(ChatRequest { messages: vec![ChatMessage::user("hola")] }).await;
         let _ = providers
             .speech
-            .synthesize(SpeechRequest { text: "hola".into(), instructions: "andaluz".into(), voice: Some("Charon".into()) })
+            .synthesize(SpeechRequest {
+                text: "hola".into(),
+                instructions: "andaluz".into(),
+                voice: Some("Charon".into()),
+            })
             .await;
 
         let paths: Vec<String> =
@@ -663,7 +656,11 @@ mod build_tests {
 
         let _ = providers
             .speech
-            .synthesize(SpeechRequest { text: "hola".into(), instructions: String::new(), voice: Some("george".into()) })
+            .synthesize(SpeechRequest {
+                text: "hola".into(),
+                instructions: String::new(),
+                voice: Some("george".into()),
+            })
             .await;
         let _ = providers.transcribe.transcribe(Pcm { samples: vec![0.0; 1600], sample_rate: 16_000 }, "es-ES").await;
 
@@ -748,19 +745,14 @@ mod probe_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(std::time::Duration::from_millis(30))
-                    .set_body_raw(
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\ndata: [DONE]\n\n",
-                        "text/event-stream",
-                    ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(30)).set_body_raw(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\ndata: [DONE]\n\n",
+                "text/event-stream",
+            ))
             .mount(&server)
             .await;
 
-        let connector =
-            build_one(&row(&server.uri(), "m"), Capability::Chat, &resolver_with("openrouter")).unwrap();
+        let connector = build_one(&row(&server.uri(), "m"), Capability::Chat, &resolver_with("openrouter")).unwrap();
         let probe = connector.probe("es-ES").await;
 
         assert!(probe.ok, "{probe:?}");
@@ -809,15 +801,14 @@ mod probe_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                "data: {\"error\":{\"message\":\"insufficient credits\"}}\n\n",
-                "text/event-stream",
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("data: {\"error\":{\"message\":\"insufficient credits\"}}\n\n", "text/event-stream"),
+            )
             .mount(&server)
             .await;
 
-        let connector =
-            build_one(&row(&server.uri(), "m"), Capability::Chat, &resolver_with("openrouter")).unwrap();
+        let connector = build_one(&row(&server.uri(), "m"), Capability::Chat, &resolver_with("openrouter")).unwrap();
         let probe = connector.probe("es-ES").await;
 
         assert!(!probe.ok, "a 200 carrying an error is not an answer: {probe:?}");
@@ -831,14 +822,11 @@ mod probe_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"error":{"message":"no credit"}}"#,
-            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"error":{"message":"no credit"}}"#))
             .mount(&server)
             .await;
 
-        let connector =
-            build_one(&row(&server.uri(), "m"), Capability::Chat, &resolver_with("openrouter")).unwrap();
+        let connector = build_one(&row(&server.uri(), "m"), Capability::Chat, &resolver_with("openrouter")).unwrap();
         let probe = connector.probe("es-ES").await;
 
         assert!(!probe.ok, "{probe:?}");
@@ -921,7 +909,12 @@ mod probe_tests {
     /// `supports` is checked before any key is resolved, exactly as `build_providers` checks it.
     #[tokio::test]
     async fn a_capability_a_connector_does_not_offer_is_refused_without_a_call() {
-        let mut config = ProviderConfig { kind: ProviderKind::Gemini, base_url: "http://127.0.0.1:1".into(), model: "gemini-2.5-flash".into(), key: "google".into() };
+        let mut config = ProviderConfig {
+            kind: ProviderKind::Gemini,
+            base_url: "http://127.0.0.1:1".into(),
+            model: "gemini-2.5-flash".into(),
+            key: "google".into(),
+        };
         let error = build_one(&config, Capability::Transcribe, &empty_resolver()).err().unwrap();
         assert!(
             matches!(

@@ -37,8 +37,7 @@ const LABEL_MIN: u16 = 12;
 const LABEL_MAX: u16 = 26;
 /// The four tabs, in the order [`TAB_KEYS`] names their keys — the order `ConfigForm`'s own tab
 /// switching walks, so a click and a key reach the same tab.
-const TABS: [ConfigTab; 4] =
-    [ConfigTab::Providers, ConfigTab::Listening, ConfigTab::Profiles, ConfigTab::Server];
+const TABS: [ConfigTab; 4] = [ConfigTab::Providers, ConfigTab::Listening, ConfigTab::Profiles, ConfigTab::Server];
 /// The columns between the two buttons of the action line.
 const ACTION_GAP: u16 = 2;
 /// The edit cursor: a thin bar drawn between the committed value and the buffer being typed.
@@ -95,11 +94,7 @@ fn draw_tabs(frame: &mut Frame, form: &ConfigForm, strings: &Strings, area: Rect
     for (index, tab) in TABS.iter().enumerate() {
         let label = form.tab_title(*tab, strings);
         let width = text_width(label) as u16;
-        let style = if *tab == form.tab {
-            Style::new().fg(Color::Black).bg(CYAN).bold()
-        } else {
-            Style::new().fg(DIM)
-        };
+        let style = if *tab == form.tab { Style::new().fg(Color::Black).bg(CYAN).bold() } else { Style::new().fg(DIM) };
         if width > 0 && x.saturating_add(width) <= area.right() {
             hits.push(Hit {
                 area: Rect::new(x, area.y, width, 1),
@@ -152,10 +147,10 @@ fn draw_help(frame: &mut Frame, form: &ConfigForm, strings: &Strings, area: Rect
     // open: the whole screen's list does not fit beside them at the width the tests pin, and a help
     // line cut in the middle of a word tells nobody anything.
     let help = if form.editing.is_some() { strings.cfg_help_editing } else { strings.cfg_help };
-    frame.render_widget(Paragraph::new(cut_line(
-        vec![(help.to_string(), Style::new().fg(DIM))],
-        inner.width as usize,
-    )), inner);
+    frame.render_widget(
+        Paragraph::new(cut_line(vec![(help.to_string(), Style::new().fg(DIM))], inner.width as usize)),
+        inner,
+    );
 }
 
 /// The body: the rows of [`ConfigForm::rows`], and the action line under them. The rows are drawn on
@@ -213,8 +208,10 @@ fn draw_row(
     let focused = index == form.field;
     let bar = if focused { Style::new().bg(BAR) } else { Style::new() };
     let label_area = Rect { x: value.x.saturating_sub(label_w), y: value.y, width: label_w, height: 1 };
-    let label =
-        Span::styled(cut(row.label, label_area.width as usize, false), Style::new().fg(if focused { CYAN } else { DIM }));
+    let label = Span::styled(
+        cut(row.label, label_area.width as usize, false),
+        Style::new().fg(if focused { CYAN } else { DIM }),
+    );
     frame.render_widget(Paragraph::new(Line::from(vec![label])).style(bar), label_area);
 
     let width = value.width as usize;
@@ -256,10 +253,9 @@ fn draw_actions(frame: &mut Frame, strings: &Strings, area: Rect) -> Vec<Hit> {
     let mut runs = Vec::new();
     let mut hits = Vec::new();
     let mut x = area.x;
-    for (label, colour, action) in [
-        (strings.cfg_test, GOLD, ConfigAction::Test),
-        (strings.cfg_save, CYAN, ConfigAction::Save),
-    ] {
+    for (label, colour, action) in
+        [(strings.cfg_test, GOLD, ConfigAction::Test), (strings.cfg_save, CYAN, ConfigAction::Save)]
+    {
         let button = format!(" {label} ");
         let button_w = text_width(&button) as u16;
         // Half a button is not a button: one that does not fit the frame is not drawn and reports
@@ -356,11 +352,11 @@ mod tests {
     use super::*;
     use crate::config_form::{
         ConfigAction, ConfigEffect, ConfigTab, ListeningForm, NoticeKind, ProfileForm, ProviderForm,
-        ServerForm, SERVER_ROW_REGENERATE, SERVER_ROW_SAVE,
+        SERVER_ROW_REGENERATE, SERVER_ROW_SAVE, ServerForm,
     };
     use crate::strings::strings;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tipsy_protocol::{Capability, ListeningMode, UiLanguage};
 
     /// A frame's worth of symbols, exactly as `crates/tipsy-ui/tests/render.rs` reads them.
@@ -465,8 +461,7 @@ mod tests {
         let buffer = term.backend().buffer();
         let area = buffer.area;
         for y in area.top()..area.bottom() {
-            let text: String =
-                (area.left()..area.right()).map(|x| buffer[(x, y)].symbol().to_string()).collect();
+            let text: String = (area.left()..area.right()).map(|x| buffer[(x, y)].symbol().to_string()).collect();
             if let Some(at) = text.find(label) {
                 return Rect::new(area.left() + at as u16, y, label.chars().count() as u16, 1);
             }
@@ -556,10 +551,15 @@ mod tests {
         f.field = 1;
         f.editing = Some(String::new());
         let (text, _, _) = rendered(&f, UiLanguage::Es, 120, 40);
-        assert!(text.contains("https://openrouter.ai/api/v1")
-            || text.contains("https://openrouter.ai/api/v"), "the value stays on screen while it is edited:\n{text}");
+        assert!(
+            text.contains("https://openrouter.ai/api/v1") || text.contains("https://openrouter.ai/api/v"),
+            "the value stays on screen while it is edited:\n{text}"
+        );
         assert!(text.contains('│'), "the cursor is drawn:\n{text}");
-        assert!(text.contains(strings(UiLanguage::Es).cfg_help_editing), "and the help line says what Enter does:\n{text}");
+        assert!(
+            text.contains(strings(UiLanguage::Es).cfg_help_editing),
+            "and the help line says what Enter does:\n{text}"
+        );
 
         f.editing = Some("con".into());
         let (text, _, _) = rendered(&f, UiLanguage::Es, 120, 40);
@@ -616,7 +616,13 @@ mod tests {
         assert_eq!(labels[hits.len() - 1], es.cfg_save);
         // And the row hits are one per drawn row, on the row they name.
         let rows = f.rows();
-        assert_eq!(hits.len() - 6, rows.len(), "every row has exactly one hit: {} hits, {} rows", hits.len(), rows.len());
+        assert_eq!(
+            hits.len() - 6,
+            rows.len(),
+            "every row has exactly one hit: {} hits, {} rows",
+            hits.len(),
+            rows.len()
+        );
     }
 
     /// Geometry is the test above; this one is the semantics. Every control reports a `ConfigAction`
@@ -630,14 +636,8 @@ mod tests {
         let action = |hit: &Hit| hit.action.expect("every screen control names its own action");
 
         // The four tab labels, in the order `draw_form` reports them, each naming its own tab.
-        for (index, tab) in [
-            ConfigTab::Providers,
-            ConfigTab::Listening,
-            ConfigTab::Profiles,
-            ConfigTab::Server,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, tab) in
+            [ConfigTab::Providers, ConfigTab::Listening, ConfigTab::Profiles, ConfigTab::Server].into_iter().enumerate()
         {
             assert_eq!(action(&hits[index]), ConfigAction::SelectTab(tab), "tab {index}");
         }
@@ -655,22 +655,14 @@ mod tests {
                 assert_eq!(index as u16 + 3, hit.area.y, "the row hit at {index} is drawn on the row it names");
             }
         }
-        assert_eq!(
-            action(hits.iter().rev().nth(1).unwrap()),
-            ConfigAction::Test,
-            "the Test button names Test"
-        );
+        assert_eq!(action(hits.iter().rev().nth(1).unwrap()), ConfigAction::Test, "the Test button names Test");
         assert_eq!(action(hits.last().unwrap()), ConfigAction::Save, "the Save button names Save");
 
         // The Server tab draws the token's two rows, and each names its own action.
         f.tab = ConfigTab::Server;
         let (_, hits, _) = rendered(&f, UiLanguage::Es, 120, 40);
-        let named = |wanted: ConfigAction| {
-            hits.iter()
-                .find(|h| h.action == Some(wanted))
-                .map(|h| h.area.y)
-                .expect("a hit")
-        };
+        let named =
+            |wanted: ConfigAction| hits.iter().find(|h| h.action == Some(wanted)).map(|h| h.area.y).expect("a hit");
         let regenerate = named(ConfigAction::FocusRow(SERVER_ROW_REGENERATE));
         let save = named(ConfigAction::FocusRow(SERVER_ROW_SAVE));
         assert_eq!(regenerate + 1, save, "Regenerate sits on the row above Save");
@@ -705,10 +697,8 @@ mod tests {
         f.field = 0;
         let model = f.rows().iter().position(|r| r.label == strings(UiLanguage::Es).cfg_model).unwrap();
         let (_, hits, _) = rendered(&f, UiLanguage::Es, 120, 40);
-        let row = hits
-            .iter()
-            .find(|h| h.action == Some(ConfigAction::FocusRow(model)))
-            .expect("the model row is clickable");
+        let row =
+            hits.iter().find(|h| h.action == Some(ConfigAction::FocusRow(model))).expect("the model row is clickable");
         f.apply(row.action.unwrap());
         assert_eq!(f.field, model, "the clicked row is the focused one");
         assert_eq!(f.editing.as_deref(), Some(""), "and its buffer is the one that opened");
@@ -750,11 +740,7 @@ mod tests {
         let row = hits.iter().find(|h| h.key == KeyInput::Enter && h.area.y > 3).expect("a row hit");
         let drawn = text_at(&term, row.area);
         assert!(drawn.chars().all(|c| c == 'x' || c == ' '), "the value fills its column and stops: {drawn:?}");
-        assert!(
-            row.area.right() <= 60,
-            "the value's column ends at the frame: {:?}",
-            row.area
-        );
+        assert!(row.area.right() <= 60, "the value's column ends at the frame: {:?}", row.area);
     }
 
     #[test]
@@ -773,8 +759,7 @@ mod tests {
         // rather than by reporting a rectangle nobody can see. The sentinel is what proves the
         // closure ran at all: a draw that never happened would have left it in place.
         let mut term = Terminal::new(TestBackend::new(1, 1)).unwrap();
-        let mut hits =
-            vec![Hit { area: Rect::ZERO, key: KeyInput::Enter, action: None }];
+        let mut hits = vec![Hit { area: Rect::ZERO, key: KeyInput::Enter, action: None }];
         term.draw(|frame| hits = draw_form(frame, &providers(), strings(UiLanguage::Es), 0)).unwrap();
         assert!(hits.is_empty(), "a 1x1 frame has no clickable area, and it reports none: {hits:?}");
     }

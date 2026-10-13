@@ -60,10 +60,7 @@ pub fn judge(login: &LoginConfig, answer: &str) -> Verdict {
             let keywords = usable_keywords(entry);
             !keywords.is_empty() && keywords.iter().all(|keyword| contains_run(&said, keyword))
         })
-        .map(|entry| Verdict {
-            ok: true,
-            name: (!entry.name.trim().is_empty()).then(|| entry.name.clone()),
-        })
+        .map(|entry| Verdict { ok: true, name: (!entry.name.trim().is_empty()).then(|| entry.name.clone()) })
         .unwrap_or_else(Verdict::refused)
 }
 

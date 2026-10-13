@@ -367,8 +367,16 @@ mod tests {
         // whose synthesis took longer than the previous one takes to play. Its audio is whole and its
         // first words matter, so it is placed ahead of `now` and played from its start.
         let late = p.chunk(1, samples(1000, 24_000), 12.0).expect("plays");
-        assert_eq!(late.at, 12.0 + CUSHION_S, "in the future, never in the past: `start(when)` with a past `when` plays at once");
-        assert_eq!(late.samples.len(), 24_000, "and not one sample of it is dropped (the offset the prior art uses is rejected above)");
+        assert_eq!(
+            late.at,
+            12.0 + CUSHION_S,
+            "in the future, never in the past: `start(when)` with a past `when` plays at once"
+        );
+        assert_eq!(
+            late.samples.len(),
+            24_000,
+            "and not one sample of it is dropped (the offset the prior art uses is rejected above)"
+        );
         let next = p.chunk(2, samples(500, 24_000), 12.1).expect("plays");
         assert_eq!(next.at, 13.0 + CUSHION_S, "the timeline continues from the new anchor, gaplessly");
         assert_eq!(p.gaps(), 0, "a late chunk is not a gap: nothing was missing from the wire");
@@ -511,7 +519,11 @@ mod tests {
         assert_eq!(p.reply().len(), 48_000);
         // The sequence position is untouched: the turn that is still arriving continues where it was.
         let next = p.chunk(2, samples(500, 24_000), 11.6).expect("plays");
-        assert!((next.at - (12.08 + 48_000.0 / 24_000.0)).abs() < 1e-9, "the cursor moved by the replay, exactly as rodio's queue does: {}", next.at);
+        assert!(
+            (next.at - (12.08 + 48_000.0 / 24_000.0)).abs() < 1e-9,
+            "the cursor moved by the replay, exactly as rodio's queue does: {}",
+            next.at
+        );
         assert_eq!(p.gaps(), 0);
         // A replay asked for after the timeline went stale is still heard *now*: the user asked for it.
         let stale = p.replay(40.0).expect("the reply is still kept");
@@ -532,7 +544,10 @@ mod tests {
         let env = p.envelope();
         assert_eq!(env.len(), 3, "one value per 50 ms (`state.rs:14`, `render.rs:32`)");
         assert_eq!(env[0], 0.0);
-        assert!((env.iter().cloned().fold(0.0, f32::max) - 1.0).abs() < 1e-6, "normalised to the peak, as `pcm.rs:58-66` does");
+        assert!(
+            (env.iter().cloned().fold(0.0, f32::max) - 1.0).abs() < 1e-6,
+            "normalised to the peak, as `pcm.rs:58-66` does"
+        );
         // Silence is silence, and not a row of ones.
         let mut quiet = Playback::new();
         quiet.set_rate(24_000);
@@ -546,9 +561,7 @@ mod tests {
     /// was written, and those three are exactly the commands a writer of the client's policy would
     /// otherwise have to re-decide by hand.
     fn update_config() -> Command {
-        use tipsy_protocol::{
-            ClientConfigView, ClientServerView, ListeningView, LoginSettingsView, RealtimeView,
-        };
+        use tipsy_protocol::{ClientConfigView, ClientServerView, ListeningView, LoginSettingsView, RealtimeView};
         Command::UpdateConfig {
             config: Box::new(ClientConfigView {
                 active_profile: "compae".into(),
@@ -675,7 +688,11 @@ mod tests {
 
             let want = if flush_on_interrupt(interrupts, true) { vec![playing.id] } else { Vec::new() };
             assert_eq!(stop, want, "{command:?} silences exactly what the shared guard says");
-            assert_eq!(p.is_playing(10.0), want.is_empty(), "{command:?}: a silenced node is gone, and a kept one still plays");
+            assert_eq!(
+                p.is_playing(10.0),
+                want.is_empty(),
+                "{command:?}: a silenced node is gone, and a kept one still plays"
+            );
             assert_eq!(p.reply().is_empty(), starts, "{command:?}: the kept reply is stale exactly when a turn starts");
             assert_eq!(p.replay(11.0).is_none(), starts, "{command:?}: and a stale reply is not replayable");
         }

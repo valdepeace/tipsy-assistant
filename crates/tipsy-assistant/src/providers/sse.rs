@@ -64,11 +64,10 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{}}]}\n\n",
             "data: [DONE]\n\n",
         );
-        assert_eq!(p.push(input.as_bytes()), vec![
-            SseItem::Delta("Ozú".into()),
-            SseItem::Delta(", quillo".into()),
-            SseItem::Done,
-        ]);
+        assert_eq!(
+            p.push(input.as_bytes()),
+            vec![SseItem::Delta("Ozú".into()), SseItem::Delta(", quillo".into()), SseItem::Done,]
+        );
     }
 
     #[test]

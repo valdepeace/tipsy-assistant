@@ -39,12 +39,8 @@ pub fn spawn(tx: UnboundedSender<ToClient>) -> JoinHandle<()> {
             previous = totals;
             net_sampled_at = Instant::now();
 
-            let stats = Event::Stats {
-                cpu: system.global_cpu_usage(),
-                ram: used_ram_percent(&system),
-                net_in,
-                net_out,
-            };
+            let stats =
+                Event::Stats { cpu: system.global_cpu_usage(), ram: used_ram_percent(&system), net_in, net_out };
             if tx.send(ToClient::Event(stats)).is_err() {
                 // The client is gone: nothing left to report to.
                 break;

@@ -92,8 +92,8 @@ mod tests {
     use super::*;
     use tipsy_protocol::{
         AllowedPersonView, AssistantState, Capability, ClientKind, ConfigView, ErrorCode, Event, Frame, FrameError,
-        ListeningMode, ListeningView, LoginSettingsView, ProfileEntryView, ProfileView, ProviderView, RealtimeView,
-        ServerView, UiLanguage, PROTOCOL_VERSION,
+        ListeningMode, ListeningView, LoginSettingsView, PROTOCOL_VERSION, ProfileEntryView, ProfileView, ProviderView,
+        RealtimeView, ServerView, UiLanguage,
     };
 
     fn profile() -> ProfileView {

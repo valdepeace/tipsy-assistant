@@ -6,16 +6,16 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tipsy_protocol::{AssistantState, ErrorCode, Event, Frame, ToClient};
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::audio::pcm::{f32_to_i16, Pcm};
+use crate::audio::pcm::{Pcm, f32_to_i16};
 use crate::providers::{
     ChatMessage, ChatRequest, ProviderError, ProviderSlot, Providers, SpeechProvider, SpeechRequest, TextStream,
 };
-use crate::text::{clean_for_speech, is_speakable, SentenceSplitter};
+use crate::text::{SentenceSplitter, clean_for_speech, is_speakable};
 
 #[derive(Clone)]
 pub struct BrainConfig {
@@ -112,10 +112,13 @@ impl Brain {
                     history.push(ChatMessage::user(ask));
                     history.push(ChatMessage::assistant(turn.text.clone()));
                     send(&out, ToClient::Event(Event::Reply { text: turn.text }));
-                    send(&out, ToClient::Event(Event::Done {
-                        first_audio_ms: turn.first_audio_ms,
-                        total_ms: started.elapsed().as_millis() as u64,
-                    }));
+                    send(
+                        &out,
+                        ToClient::Event(Event::Done {
+                            first_audio_ms: turn.first_audio_ms,
+                            total_ms: started.elapsed().as_millis() as u64,
+                        }),
+                    );
                     send(&out, status(AssistantState::Idle));
                 }
             }
@@ -189,10 +192,13 @@ impl Brain {
             return;
         }
         send(out, ToClient::Event(Event::Reply { text: turn.text }));
-        send(out, ToClient::Event(Event::Done {
-            first_audio_ms: turn.first_audio_ms,
-            total_ms: started.elapsed().as_millis() as u64,
-        }));
+        send(
+            out,
+            ToClient::Event(Event::Done {
+                first_audio_ms: turn.first_audio_ms,
+                total_ms: started.elapsed().as_millis() as u64,
+            }),
+        );
         send(out, status(AssistantState::Idle));
     }
 

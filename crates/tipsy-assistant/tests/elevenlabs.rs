@@ -39,7 +39,11 @@ fn request(voice: Option<&str>) -> SpeechRequest {
 }
 
 fn request_with_text(text: &str, voice: Option<&str>) -> SpeechRequest {
-    SpeechRequest { text: text.into(), instructions: "voz andaluza y achispada".into(), voice: voice.map(str::to_string) }
+    SpeechRequest {
+        text: text.into(),
+        instructions: "voz andaluza y achispada".into(),
+        voice: voice.map(str::to_string),
+    }
 }
 
 async fn mount_voice_list(server: &MockServer) {
@@ -92,11 +96,7 @@ async fn speech_sends_pcm_24000_and_uses_a_voice_id_verbatim() {
     assert_eq!(pcm.sample_rate, 24_000);
     assert_eq!(pcm.samples.len(), 2);
     assert!((pcm.samples[0] - 0.5).abs() < 0.001 && (pcm.samples[1] + 0.5).abs() < 0.001);
-    assert_eq!(
-        provider.max_parallel(),
-        4,
-        "the trait default matches the note's Free-tier Flash concurrency (4)"
-    );
+    assert_eq!(provider.max_parallel(), 4, "the trait default matches the note's Free-tier Flash concurrency (4)");
 
     let reqs = requests(&server).await;
     let got = paths(&reqs);
@@ -178,10 +178,7 @@ async fn speech_reports_a_voice_list_it_cannot_use() {
             .await;
 
         let err = provider(&server).synthesize(request(None)).await.unwrap_err();
-        assert!(
-            matches!(&err, ProviderError::BadResponse(m) if !m.trim().is_empty()),
-            "{body} produced {err:?}"
-        );
+        assert!(matches!(&err, ProviderError::BadResponse(m) if !m.trim().is_empty()), "{body} produced {err:?}");
         assert_eq!(requests(&server).await.len(), 1, "{body} must not reach synthesis");
     }
 }
@@ -511,7 +508,8 @@ async fn transcription_keeps_multi_byte_text_intact() {
     Mock::given(method("POST"))
         .and(path("/v1/speech-to-text"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": "  ¿Y el ticket? ¡Ozú, mi arma! 😅  "})),
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"text": "  ¿Y el ticket? ¡Ozú, mi arma! 😅  "})),
         )
         .mount(&server)
         .await;

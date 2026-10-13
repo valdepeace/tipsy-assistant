@@ -255,7 +255,12 @@ pub async fn serve_with(
 ///
 /// A malformed command or audio frame is an `Error` event on the wire and **not** a panic and
 /// **not** a dropped connection (spec §10).
-async fn inbound(message: Message, to_server: &mpsc::UnboundedSender<ToServer>, peer: SocketAddr, tls: bool) -> Inbound {
+async fn inbound(
+    message: Message,
+    to_server: &mpsc::UnboundedSender<ToServer>,
+    peer: SocketAddr,
+    tls: bool,
+) -> Inbound {
     match message {
         // axum answers ping, pong and the close handshake itself; the close is handled by the loop.
         Message::Ping(_) | Message::Pong(_) | Message::Close(_) => Inbound::Nothing,
@@ -266,11 +271,7 @@ async fn inbound(message: Message, to_server: &mpsc::UnboundedSender<ToServer>, 
                     // The socket stays open: the screen can try again once the connection is TLS.
                     return Inbound::Send(refusal);
                 }
-                if to_server.send(message).is_err() {
-                    Inbound::Gone
-                } else {
-                    Inbound::Nothing
-                }
+                if to_server.send(message).is_err() { Inbound::Gone } else { Inbound::Nothing }
             }
             Err(e) => {
                 tracing::debug!(error = %e, "a text frame that is not a command");
@@ -552,9 +553,7 @@ async fn handle_terminal<S: TerminalRouteState>(mut socket: WebSocket, state: S,
     // how it is read. It blocks, so it runs on the blocking pool, and it is bounded so a child that
     // will not go cannot hold the socket.
     let exit = reap(session, observed).await;
-    let _ = socket
-        .send(Message::text(serde_json::json!({ "type": "exit", "code": exit }).to_string()))
-        .await;
+    let _ = socket.send(Message::text(serde_json::json!({ "type": "exit", "code": exit }).to_string())).await;
     let _ = socket.send(Message::Close(None)).await;
     drop(permit);
 }
@@ -866,12 +865,7 @@ fn release(session_id: u64) {
 /// What this connection is holding for its socket right now.
 #[cfg(test)]
 fn queued_on_the_write_side(session_id: u64) -> usize {
-    HELD_FOR_THE_SOCKET
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&session_id)
-        .copied()
-        .unwrap_or(0)
+    HELD_FOR_THE_SOCKET.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&session_id).copied().unwrap_or(0)
 }
 
 /// The no-op twins every other build uses, so the bridge's own code carries no `#[cfg(test)]` in the
@@ -1044,13 +1038,12 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:54123".parse().expect("a literal loopback address parses");
         // The production handler calls the same function, which is what makes one test of the
         // ceiling a test of both routes (M1).
-        super::with_limits(upgrade, options)
-            .on_upgrade(move |socket| async move {
-                // The hub's entry point: it allocates the session id, attaches the session before
-                // `Welcome` can be missed, and clones the fakes in its slot into the session.
-                let ends = hub.spawn(policy);
-                serve_with(socket, ends, hub.clone(), ClientKind::Web, options, peer, false).await;
-            })
+        super::with_limits(upgrade, options).on_upgrade(move |socket| async move {
+            // The hub's entry point: it allocates the session id, attaches the session before
+            // `Welcome` can be missed, and clones the fakes in its slot into the session.
+            let ends = hub.spawn(policy);
+            serve_with(socket, ends, hub.clone(), ClientKind::Web, options, peer, false).await;
+        })
     }
 
     /// Starts the listener and returns its address **and a handle to the hub behind it**. The
@@ -1065,16 +1058,10 @@ mod tests {
             config,
             config_path,
             keys(),
-            ProviderSlot::new(Providers {
-                chat,
-                speech: Arc::new(FakeSpeech),
-                transcribe: Arc::new(FakeTranscribe),
-            }),
+            ProviderSlot::new(Providers { chat, speech: Arc::new(FakeSpeech), transcribe: Arc::new(FakeTranscribe) }),
         );
         let state = ServeTest { hub: hub.clone(), options, policy };
-        let app = axum::Router::new()
-            .route("/ws", axum::routing::get(handler_with_state))
-            .with_state(state);
+        let app = axum::Router::new().route("/ws", axum::routing::get(handler_with_state)).with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1552,12 +1539,9 @@ mod tests {
     /// the write cannot happen: the socket is refused exactly as any other ungreeted first message is.
     #[tokio::test]
     async fn an_unadmitted_socket_cannot_write_the_configuration() {
-        let (addr, hub) = server_with_policy(
-            FakeChat::new(vec![]),
-            ConnOptions::default(),
-            SessionPolicy::exposed("the-token"),
-        )
-        .await;
+        let (addr, hub) =
+            server_with_policy(FakeChat::new(vec![]), ConnOptions::default(), SessionPolicy::exposed("the-token"))
+                .await;
         let before = std::fs::read(hub.path()).expect("the hub's file exists");
 
         // No `Hello`: the very first frame is the save an attacker would send.
@@ -1644,7 +1628,8 @@ mod tests {
 
         // `\u{fffb}` and `\u{fffd}` are the two chars a mouse report produces, and both truncate to
         // `0xFB` and `0xFD` — not to a multi-byte UTF-8 encoding of the char code.
-        let mouse: TerminalClientMessage = serde_json::from_str(r#"{"type":"mouse","data":"\u00ff\u00fb\u00fd"}"#).unwrap();
+        let mouse: TerminalClientMessage =
+            serde_json::from_str(r#"{"type":"mouse","data":"\u00ff\u00fb\u00fd"}"#).unwrap();
         assert_eq!(mouse.bytes().as_deref(), Some([0xffu8, 0xfb, 0xfd].as_slice()), "one byte per char code");
         assert_eq!(mouse.resize(), None);
 
@@ -1757,7 +1742,9 @@ mod tests {
         // `(content type, bytes)` in that order, which is what the tree's `asset` returns and what
         // the plan's copy of this test had backwards.
         let (content_type, bytes) = crate::server::assets::asset(path).unwrap_or_else(|| {
-            panic!("{path} is not in this bundle: the embed reads the repository's web/, so the page belongs at web/{path}")
+            panic!(
+                "{path} is not in this bundle: the embed reads the repository's web/, so the page belongs at web/{path}"
+            )
         });
         let page = String::from_utf8(bytes).expect("the page is UTF-8");
         assert!(content_type.starts_with("text/html"), "a page must be served as HTML, got {content_type}");

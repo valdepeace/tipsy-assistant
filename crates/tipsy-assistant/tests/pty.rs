@@ -319,8 +319,8 @@ fn a_resize_reaches_the_child_as_a_new_console_width() {
         "-File".into(),
         process::abs(dir.path(), "width.ps1"),
     ];
-    let session =
-        PtySession::spawn(Path::new(process::POWERSHELL), &args, 40, 20).expect("openpty and spawn_command must work on this machine");
+    let session = PtySession::spawn(Path::new(process::POWERSHELL), &args, 40, 20)
+        .expect("openpty and spawn_command must work on this machine");
     let mut terminal = Terminal::of(session);
 
     let before = terminal.wait_for_width_above(0);

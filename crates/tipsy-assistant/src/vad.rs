@@ -346,15 +346,8 @@ mod tests {
         assert_eq!(vad.push(&[1000; 1]), VadEvent::None, "the 256th completes it");
         assert_eq!(calls.lock().unwrap().sizes.as_slice(), &[FRAME]);
         assert_eq!(vad.push(&[1000; 320]), VadEvent::None);
-        assert_eq!(
-            calls.lock().unwrap().sizes.as_slice(),
-            &[FRAME, FRAME],
-            "320 samples are one window plus a carry"
-        );
-        assert!(
-            calls.lock().unwrap().sizes.iter().all(|n| *n == FRAME),
-            "earshot only ever sees {FRAME} samples"
-        );
+        assert_eq!(calls.lock().unwrap().sizes.as_slice(), &[FRAME, FRAME], "320 samples are one window plus a carry");
+        assert!(calls.lock().unwrap().sizes.iter().all(|n| *n == FRAME), "earshot only ever sees {FRAME} samples");
     }
 
     /// The crate itself, on a window of the wrong length: this is what would panic inside

@@ -303,11 +303,9 @@ impl ClientConfigView {
                 .providers
                 .into_iter()
                 .map(|server_row| match self.providers.iter().find(|row| row.capability == server_row.capability) {
-                    Some(client_row) => ProviderView {
-                        kind: client_row.kind.clone(),
-                        model: client_row.model.clone(),
-                        ..server_row
-                    },
+                    Some(client_row) => {
+                        ProviderView { kind: client_row.kind.clone(), model: client_row.model.clone(), ..server_row }
+                    }
                     None => server_row,
                 })
                 .collect(),
@@ -348,18 +346,32 @@ impl From<&ConfigView> for ClientConfigView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    Hello { token: Option<String>, client: ClientKind, protocol_version: u32 },
-    Ask { text: String },
-    Say { text: String },
+    Hello {
+        token: Option<String>,
+        client: ClientKind,
+        protocol_version: u32,
+    },
+    Ask {
+        text: String,
+    },
+    Say {
+        text: String,
+    },
     ListenStart,
     ListenStop,
     Cancel,
     Reset,
-    SetProfile { id: String },
-    SetListeningMode { mode: ListeningMode },
+    SetProfile {
+        id: String,
+    },
+    SetListeningMode {
+        mode: ListeningMode,
+    },
     /// The configuration screen's "Test" button: one minimal call against the connector for this
     /// capability. Plan 2B Task 7 runs the probe and answers with `Event::TestResult`.
-    TestProvider { capability: Capability },
+    TestProvider {
+        capability: Capability,
+    },
     /// The login screen is up and the microphone is opening (`login_start` on the wire). The server
     /// answers nothing: what it does is start collecting the audio the client is about to stream.
     LoginStart,
@@ -367,7 +379,9 @@ pub enum Command {
     LoginStop,
     /// A typed answer (`login_answer`). Judged whether or not a capture is active, so a typing-only
     /// client never has to send `LoginStart` at all.
-    LoginAnswer { text: String },
+    LoginAnswer {
+        text: String,
+    },
     /// The configuration screen opening: the session answers `Event::Config`.
     GetConfig,
     /// The configuration screen saving. The server replaces the editable configuration, persists it,
@@ -385,10 +399,15 @@ pub enum Command {
     /// findings out of one payload. Serde sees through a `Box`, so the wire JSON keeps its shape and
     /// `tests/roundtrip.rs` pins the fields that cross. Do not unbox these two fields without
     /// re-measuring the lint.
-    UpdateConfig { config: Box<ClientConfigView> },
+    UpdateConfig {
+        config: Box<ClientConfigView>,
+    },
     /// A new API key for the *server's* credential store. Refused unless the connection is loopback
     /// or TLS (spec §9.4), and answered with `Event::ConfigChanged` when it is accepted.
-    SetKey { name: String, value: String },
+    SetKey {
+        name: String,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -405,19 +424,48 @@ pub enum Event {
         #[serde(default)]
         login: Option<LoginView>,
     },
-    Status { state: AssistantState, detail: Option<String> },
-    Heard { text: String },
-    ReplyDelta { text: String },
-    Reply { text: String },
+    Status {
+        state: AssistantState,
+        detail: Option<String>,
+    },
+    Heard {
+        text: String,
+    },
+    ReplyDelta {
+        text: String,
+    },
+    Reply {
+        text: String,
+    },
     /// Header for the `Frame::Speech` with the same `seq` that follows it.
-    SpeechChunk { seq: u32, sample_rate: u32 },
-    Done { first_audio_ms: Option<u64>, total_ms: u64 },
-    Stats { cpu: f32, ram: f32, net_in: f64, net_out: f64 },
-    Error { code: ErrorCode, message: String, recoverable: bool },
+    SpeechChunk {
+        seq: u32,
+        sample_rate: u32,
+    },
+    Done {
+        first_audio_ms: Option<u64>,
+        total_ms: u64,
+    },
+    Stats {
+        cpu: f32,
+        ram: f32,
+        net_in: f64,
+        net_out: f64,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+        recoverable: bool,
+    },
     /// The answer to `Command::TestProvider`. `message` is never empty: the provider's own words
     /// on failure, a short human summary on success. `ok` is `true` only when a real minimal call
     /// answered — never for an error body.
-    TestResult { capability: Capability, ok: bool, latency_ms: u64, message: String },
+    TestResult {
+        capability: Capability,
+        ok: bool,
+        latency_ms: u64,
+        message: String,
+    },
     /// The server's answer to "is a realtime call live?": `active: true` when a call opens its
     /// socket and `false` when that call ends, by any of its endings (Plan 2C). An event rather
     /// than a new `AssistantState`: the server owns the socket, so the indicator cannot be on
@@ -425,17 +473,28 @@ pub enum Event {
     /// transition back to `Idle`, and `AssistantState` keeps meaning exactly one thing — what the
     /// assistant is doing during a turn. Nothing else about the protocol changes: a call's
     /// transcripts still arrive as `Heard`, `ReplyDelta` and `Reply`.
-    Live { active: bool },
+    Live {
+        active: bool,
+    },
     /// What the transcriber heard from a login utterance, before the verdict. The screen shows it so
     /// that a misheard accent is visible rather than mysterious.
-    LoginHeard { text: String },
+    LoginHeard {
+        text: String,
+    },
     /// The ruling: whether the door opens, and the matched entry's name when it does.
-    LoginVerdict { ok: bool, name: Option<String> },
+    LoginVerdict {
+        ok: bool,
+        name: Option<String>,
+    },
     /// The redacted configuration, answering `Command::GetConfig` (spec §4.4). Boxed for the same
     /// reason `UpdateConfig`'s payload is, and the note on that variant says why.
-    Config { config: Box<ConfigView> },
+    Config {
+        config: Box<ConfigView>,
+    },
     /// The active profile changed. Carries the same three fields `Welcome` carries.
-    ProfileChanged { profile: ProfileView },
+    ProfileChanged {
+        profile: ProfileView,
+    },
     /// The configuration changed. Deliberately no payload: a client that is showing it asks again
     /// with `GetConfig`, and sending the whole configuration on every save would put the token on the
     /// wire more often than it needs to be (spec §4.4).

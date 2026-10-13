@@ -56,7 +56,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use tipsy_protocol::{AssistantState, ClientConfigView, Command, Event, Frame, ToClient, ToServer};
-use tipsy_ui::{policy, ClockView, ConfigEffect, ConfigForm, Hit, NoticeKind, UiAction, UiState};
+use tipsy_ui::{ClockView, ConfigEffect, ConfigForm, Hit, NoticeKind, UiAction, UiState, policy};
 use wasm_bindgen::prelude::*;
 
 // `draw_web` and the three event hooks are `WebRenderer`'s, and the trait has to be in scope for
@@ -146,20 +146,21 @@ pub fn start() -> Result<(), JsValue> {
     //
     // Registered BEFORE `draw_web`: it consumes the `Terminal` by value, so a callback added
     // afterwards has nothing to attach to (`ratzilla-0.3.1/src/render.rs:67`).
-    terminal.on_key_event({
-        let shared = Rc::clone(&shared);
-        move |event: ratzilla::event::KeyEvent| {
-            // The whole translation is `hud`'s and is host-tested; this is the adapter's call site and
-            // nothing else. A key the HUD has no opinion about does not reach the queue at all.
-            if let Some(key) = hud::key_input(hud::raw_key(&event)) {
-                shared.borrow_mut().queued.push(hud::Input::Key(key));
+    terminal
+        .on_key_event({
+            let shared = Rc::clone(&shared);
+            move |event: ratzilla::event::KeyEvent| {
+                // The whole translation is `hud`'s and is host-tested; this is the adapter's call site and
+                // nothing else. A key the HUD has no opinion about does not reach the queue at all.
+                if let Some(key) = hud::key_input(hud::raw_key(&event)) {
+                    shared.borrow_mut().queued.push(hud::Input::Key(key));
+                }
             }
-        }
-    })
-    // The plan's Step 4 writes `?` here. It does not compile: `on_key_event` answers
-    // `Result<(), ratzilla::error::Error>`, and ratzilla's error type has no `From` into `JsValue` —
-    // so the conversion is the same one the two backend lines above use.
-    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        })
+        // The plan's Step 4 writes `?` here. It does not compile: `on_key_event` answers
+        // `Result<(), ratzilla::error::Error>`, and ratzilla's error type has no `From` into `JsValue` —
+        // so the conversion is the same one the two backend lines above use.
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     terminal
         .on_mouse_event({
             let shared = Rc::clone(&shared);
@@ -860,8 +861,7 @@ mod tests {
     /// under `cargo test -- --nocapture`). Both sides are recorded in the ledger.
     #[test]
     fn the_frames_a_real_server_sent_decode_and_schedule_on_this_client() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.target-sandbox/live-34/frames.txt");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.target-sandbox/live-34/frames.txt");
         let Ok(captured) = std::fs::read_to_string(&path) else {
             println!(
                 "skipping `{}`: it is not there. Run `.target-sandbox/live-34.ps1` (a real `serve`, a stub \
@@ -977,11 +977,8 @@ mod tests {
 
         state.show_config_form(ConfigForm::default());
         apply_screen_answer(&mut state, &result);
-        let (_, text) = state
-            .config_form
-            .as_ref()
-            .and_then(|form| form.notice.clone())
-            .expect("the answer is on the notice line");
+        let (_, text) =
+            state.config_form.as_ref().and_then(|form| form.notice.clone()).expect("the answer is on the notice line");
         assert!(text.contains("42"), "and the latency is what the row reports: {text}");
     }
 
@@ -1052,8 +1049,7 @@ mod tests {
     /// both sides are recorded in the ledger.
     #[test]
     fn the_header_a_real_server_announced_is_clickable_on_this_client() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.target-sandbox/live-35/welcome.json");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.target-sandbox/live-35/welcome.json");
         let Ok(text) = std::fs::read_to_string(&path) else {
             println!(
                 "skipping `{}`: it is not there. Run `.target-sandbox/live-35.ps1` (a real `serve`, a \
@@ -1086,9 +1082,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("a test terminal");
         let mut hits = Vec::new();
-        terminal
-            .draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, &title))
-            .expect("one frame");
+        terminal.draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, &title)).expect("one frame");
 
         assert!(hits.len() >= 2, "the header reports its two controls first: {hits:?}");
         let (mode, gear) = (hits[0], hits[1]);
@@ -1114,9 +1108,7 @@ mod tests {
     /// `.is_dir()` was true in a fresh clone because a `README.md` was committed and the skip became
     /// dead code. Every path it hands back is a message a real server sent over a real socket.
     fn live_37(name: &str) -> Option<String> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.target-sandbox/live-37")
-            .join(name);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.target-sandbox/live-37").join(name);
         match std::fs::read_to_string(&path) {
             Ok(text) => Some(text),
             Err(_) => {
@@ -1294,10 +1286,7 @@ mod tests {
 
         // And `F10` on the HUD: the notice line the HUD draws, and no call started.
         dispatch(UiAction::ToggleLive, &mut shared);
-        assert_eq!(
-            shared.state.borrow().notice.as_ref().map(|(text, _)| text.as_str()),
-            Some(es.live_web_unavailable)
-        );
+        assert_eq!(shared.state.borrow().notice.as_ref().map(|(text, _)| text.as_str()), Some(es.live_web_unavailable));
         assert!(!shared.state.borrow().live, "and it starts nothing, which is the point");
     }
 
@@ -1310,8 +1299,7 @@ mod tests {
     #[test]
     fn the_reply_is_scheduled_on_the_context_the_press_made_and_not_on_the_capture() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("lib.rs");
-        let source =
-            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         let production = &source[..source.find("#[cfg(test)]").expect("this module follows")];
         for call in ["let audio_now = audio_now(&shared.audio);", "present(&mut shared.playback, &shared.audio"] {
             assert!(production.contains(call), "the clock is the run's audio slot: `{call}` is missing");

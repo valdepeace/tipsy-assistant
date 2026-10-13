@@ -172,7 +172,20 @@ pub static ES: Strings = Strings {
     cleared: "Conversación borrada",
     help: " Enter preguntar · !texto recitar · Tab micro · F4 borrar · F10 llamada · ←→ chat/red · Esc salir",
     weekdays: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
-    months: ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
+    months: [
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    ],
     cfg_title: "CONFIGURACIÓN",
     cfg_providers: "Proveedores",
     cfg_listening: "Escucha",
@@ -265,7 +278,20 @@ pub static EN: Strings = Strings {
     cleared: "Conversation cleared",
     help: " Enter ask · !text recite · Tab mic · F4 clear · F10 call · ←→ chat/network · Esc quit",
     weekdays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
-    months: ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+    months: [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ],
     cfg_title: "CONFIGURATION",
     cfg_providers: "Providers",
     cfg_listening: "Listening",
@@ -418,13 +444,7 @@ mod tests {
             assert!(!table.cfg_regenerate_native.trim().is_empty(), "the token row has to say where");
             assert!(!table.live_web_unavailable.trim().is_empty(), "and F10 why it did nothing");
         }
-        assert_ne!(
-            strings(UiLanguage::Es).cfg_regenerate_native,
-            strings(UiLanguage::En).cfg_regenerate_native
-        );
-        assert_ne!(
-            strings(UiLanguage::Es).live_web_unavailable,
-            strings(UiLanguage::En).live_web_unavailable
-        );
+        assert_ne!(strings(UiLanguage::Es).cfg_regenerate_native, strings(UiLanguage::En).cfg_regenerate_native);
+        assert_ne!(strings(UiLanguage::Es).live_web_unavailable, strings(UiLanguage::En).live_web_unavailable);
     }
 }

@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::Subscriber;
+use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Layer;
 
 /// What a redacted value becomes. One token, so a reader can tell "there was something here" from
 /// "there was nothing".

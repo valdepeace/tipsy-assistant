@@ -93,7 +93,8 @@ impl PtySession {
                 command.env(name, value);
             }
         }
-        let child = pair.slave.spawn_command(command).map_err(|e| format!("the terminal child could not be started: {e}"))?;
+        let child =
+            pair.slave.spawn_command(command).map_err(|e| format!("the terminal child could not be started: {e}"))?;
 
         let reader = pair.master.try_clone_reader().map_err(|e| format!("no PTY reader: {e}"))?;
         // Taken here and nowhere else: "It is invalid to take the writer more than once."
@@ -118,7 +119,9 @@ impl PtySession {
     /// `tests/pty.rs` reads the new width back out of a child that asks the OS for it.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
         let master = self.master.lock().unwrap_or_else(|e| e.into_inner());
-        master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("the PTY could not be resized to {cols}x{rows}: {e}"))
+        master
+            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| format!("the PTY could not be resized to {cols}x{rows}: {e}"))
     }
 
     /// The reader, once. Dropping it does not touch the child; dropping the master does.

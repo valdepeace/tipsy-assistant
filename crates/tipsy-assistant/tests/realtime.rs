@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
+use serde_json::Value;
 use tipsy_assistant::config::RealtimeConfig;
 use tipsy_assistant::keys::{KeyResolver, MemoryStore, SecretStore};
 use tipsy_assistant::realtime::socket::{CallOptions, CallSpec, RealtimeError, RealtimeSocket, SocketEvent};
-use serde_json::Value;
 use tipsy_protocol::ErrorCode;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -32,8 +32,7 @@ const SESSION_CREATED: &str = r#"{"type":"session.created","session":{"id":"sess
 const SESSION_UPDATED: &str = r#"{"type":"session.updated","session":{"id":"sess_fixture"}}"#;
 const AUDIO_DELTA: &str = r#"{"type":"response.output_audio.delta","delta":"AAECAw=="}"#;
 const TRANSCRIPT_DELTA: &str = r#"{"type":"response.output_audio_transcript.delta","delta":"Ozú"}"#;
-const SPEECH_STARTED: &str =
-    r#"{"type":"input_audio_buffer.speech_started","item_id":"item_0","audio_start_ms":1200}"#;
+const SPEECH_STARTED: &str = r#"{"type":"input_audio_buffer.speech_started","item_id":"item_0","audio_start_ms":1200}"#;
 
 /// A line that is exactly this, instead of JSON, is sent as a WebSocket **ping**: keepalive traffic
 /// is real traffic, and the reader must skip it without disturbing the order of the events.
@@ -198,8 +197,7 @@ async fn serve(
         Script::Drop(lines) => (lines, Ending::Drop),
     };
     for line in lines {
-        let message =
-            if line == PING { Message::Ping(Vec::<u8>::new().into()) } else { Message::text(line) };
+        let message = if line == PING { Message::Ping(Vec::<u8>::new().into()) } else { Message::text(line) };
         if socket.send(message).await.is_err() {
             return;
         }
@@ -260,7 +258,8 @@ async fn the_handshake_carries_the_model_query_and_the_bearer_key() {
         "the note's endpoint with the model as a query parameter"
     );
     assert_eq!(
-        handshake.header("authorization"), Some("Bearer fake-key-for-tests-only"),
+        handshake.header("authorization"),
+        Some("Bearer fake-key-for-tests-only"),
         "the note: `Authorization: Bearer $OPENAI_API_KEY` on the handshake"
     );
     assert_eq!(handshake.header("openai-beta"), None, "GA needs no `OpenAI-Beta: realtime=v1`");
@@ -268,8 +267,14 @@ async fn the_handshake_carries_the_model_query_and_the_bearer_key() {
 
     let first: serde_json::Value = serde_json::from_str(&server.texts(1).await[0]).unwrap();
     assert_eq!(first["type"], "session.update");
-    assert_eq!(first["session"]["audio"]["input"]["format"], serde_json::json!({ "type": "audio/pcm", "rate": 24_000 }));
-    assert_eq!(first["session"]["audio"]["output"]["format"], serde_json::json!({ "type": "audio/pcm", "rate": 24_000 }));
+    assert_eq!(
+        first["session"]["audio"]["input"]["format"],
+        serde_json::json!({ "type": "audio/pcm", "rate": 24_000 })
+    );
+    assert_eq!(
+        first["session"]["audio"]["output"]["format"],
+        serde_json::json!({ "type": "audio/pcm", "rate": 24_000 })
+    );
     assert_eq!(first["session"]["audio"]["output"]["voice"], "marin");
     assert_eq!(first["session"]["audio"]["input"]["turn_detection"]["type"], "server_vad");
     assert_eq!(first["session"]["audio"]["input"]["turn_detection"]["silence_duration_ms"], serde_json::json!(1500));
@@ -321,10 +326,7 @@ async fn a_clean_close_is_reported_with_its_code_and_reason() {
     let mut socket = connect_to(&server).await;
 
     assert_eq!(socket.recv().await.unwrap(), SocketEvent::Text(SESSION_UPDATED.into()));
-    assert_eq!(
-        socket.recv().await.unwrap(),
-        SocketEvent::Closed { code: Some(1000), reason: "call ended".into() }
-    );
+    assert_eq!(socket.recv().await.unwrap(), SocketEvent::Closed { code: Some(1000), reason: "call ended".into() });
     // The socket reports, the caller decides: reopening at the cap is `session_expired`'s decision,
     // never a close code's (the note documents no code for the 60-minute limit). Closing twice is
     // fine, because a call that is already over is over.
@@ -351,11 +353,9 @@ async fn an_abrupt_death_is_a_network_error_not_a_hang() {
 /// minutes" and reconnection is app-managed.
 #[tokio::test]
 async fn a_call_reopens_when_the_session_cap_is_reached() {
-    let server = FakeServer::start(vec![
-        Script::Open(vec![SESSION_CREATED.into()]),
-        Script::Open(vec![SESSION_CREATED.into()]),
-    ])
-    .await;
+    let server =
+        FakeServer::start(vec![Script::Open(vec![SESSION_CREATED.into()]), Script::Open(vec![SESSION_CREATED.into()])])
+            .await;
     let options = CallOptions::at(server.url()).with_cap(Duration::from_millis(200));
     let mut socket =
         RealtimeSocket::connect_with(options, &resolver(), &RealtimeConfig::default(), &spec()).await.unwrap();
@@ -373,7 +373,10 @@ async fn a_call_reopens_when_the_session_cap_is_reached() {
     for text in &texts {
         let event: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(event["type"], "session.update", "the reopened call is configured like the first");
-        assert_eq!(event["session"]["audio"]["input"]["turn_detection"]["silence_duration_ms"], serde_json::json!(1500));
+        assert_eq!(
+            event["session"]["audio"]["input"]["turn_detection"]["silence_duration_ms"],
+            serde_json::json!(1500)
+        );
     }
 }
 
@@ -410,9 +413,8 @@ async fn a_missing_key_names_the_key_and_the_variable() {
 async fn an_empty_key_name_sends_no_authorization_header() {
     let server = FakeServer::start(vec![Script::Open(vec![SESSION_CREATED.into()])]).await;
     let config = RealtimeConfig { key: String::new(), ..RealtimeConfig::default() };
-    let _socket = RealtimeSocket::connect_with(CallOptions::at(server.url()), &resolver(), &config, &spec())
-        .await
-        .unwrap();
+    let _socket =
+        RealtimeSocket::connect_with(CallOptions::at(server.url()), &resolver(), &config, &spec()).await.unwrap();
 
     let handshake = server.handshake(0).await;
     assert_eq!(handshake.header("authorization"), None, "no key name, no header");
@@ -470,9 +472,7 @@ impl FakeCall {
     async fn recv_json(&mut self) -> Option<Value> {
         loop {
             match self.socket.next().await {
-                Some(Ok(Message::Text(text))) => {
-                    return Some(serde_json::from_str(text.as_str()).expect("JSON"))
-                }
+                Some(Ok(Message::Text(text))) => return Some(serde_json::from_str(text.as_str()).expect("JSON")),
                 // Pings and pongs are keepalive traffic, never client events; the test that cares
                 // about the call's own keepalive waits for the *next* text frame instead.
                 Some(Ok(Message::Close(_))) | None => return None,
@@ -745,10 +745,9 @@ async fn the_transcripts_of_a_call_reach_the_hud() {
     server.send(delta("item_a", 0, &[5i16; 480])).await;
     server.send(response_done("resp_1", "completed")).await;
 
-    let seen = collect_until(&mut from_call, |seen| {
-        events_of(seen).iter().any(|event| matches!(event, Event::Done { .. }))
-    })
-    .await;
+    let seen =
+        collect_until(&mut from_call, |seen| events_of(seen).iter().any(|event| matches!(event, Event::Done { .. })))
+            .await;
 
     // The three events the text pipeline also sends, in order: `Heard`, then `ReplyDelta`s, then
     // `Reply` — so the log, the tabs and the selection behave the same way in both modes.
@@ -813,9 +812,7 @@ async fn a_socket_that_dies_mid_answer_leaves_the_hud_out_of_the_live_state() {
     // the status comes back to rest so nothing is left spinning.
     assert_eq!(live_of(&seen), Some(false), "the call is over: {seen:#?}");
     assert!(
-        events_of(&seen)
-            .iter()
-            .any(|event| matches!(event, Event::Status { state: AssistantState::Idle, .. })),
+        events_of(&seen).iter().any(|event| matches!(event, Event::Status { state: AssistantState::Idle, .. })),
         "an ending status must follow: {seen:#?}"
     );
     // A readable error, never an empty string and never a panic.
@@ -893,9 +890,7 @@ async fn stopping_the_call_closes_the_socket() {
     let seen = collect_until(&mut from_call, |seen| live_of(seen) == Some(false) && idle_of(seen)).await;
     assert_eq!(live_of(&seen), Some(false), "the indicator goes down: {seen:#?}");
     assert!(
-        events_of(&seen)
-            .iter()
-            .any(|event| matches!(event, Event::Status { state: AssistantState::Idle, .. })),
+        events_of(&seen).iter().any(|event| matches!(event, Event::Status { state: AssistantState::Idle, .. })),
         "and the status comes back to rest: {seen:#?}"
     );
 }
@@ -1005,9 +1000,7 @@ async fn a_barge_in_truncates_the_item_at_the_milliseconds_that_were_heard() {
 
     // The research note's barge-in event names the *user's* item; the truncate must name the
     // assistant's, which is the one the device was playing.
-    server
-        .send(r#"{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":3200}"#)
-        .await;
+    server.send(r#"{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":3200}"#).await;
 
     // The socket task may reach its transition before this test's own `heard.push(...)` calls land —
     // it is a race the test does not control — and then nothing is ever sent. A few seconds bound it:
@@ -1041,19 +1034,16 @@ async fn what_arrives_after_a_barge_in_is_not_played() {
     let seen = collect_until(&mut from_call, |seen| audio_of(seen).len() == 3).await;
     assert_eq!(audio_of(&seen).len(), 3);
 
-    server
-        .send(r#"{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":3200}"#)
-        .await;
+    server.send(r#"{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":3200}"#).await;
     // The tail of the response the user talked over is still in flight, both before and after the
     // server's own cancellation.
     server.send(delta("item_a", 0, &[9i16; 480])).await;
     server.send(response_done("resp_1", "cancelled")).await;
     server.send(delta("item_a", 0, &[9i16; 480])).await;
 
-    let seen = collect_until(&mut from_call, |seen| {
-        events_of(seen).iter().any(|event| matches!(event, Event::Done { .. }))
-    })
-    .await;
+    let seen =
+        collect_until(&mut from_call, |seen| events_of(seen).iter().any(|event| matches!(event, Event::Done { .. })))
+            .await;
     assert!(audio_of(&seen).is_empty(), "none of it may reach the device: {:#?}", audio_of(&seen));
 }
 

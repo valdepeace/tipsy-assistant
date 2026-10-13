@@ -294,7 +294,14 @@ impl Terminal {
             .await
             .map_err(|_| format!("the upgrade of {url} never answered"))?;
         let (socket, _) = opened.map_err(|e| e.to_string())?;
-        Ok(Terminal { socket, bytes: Vec::new(), text: String::new(), control: Vec::new(), answered: false, saw_cursor_query: false })
+        Ok(Terminal {
+            socket,
+            bytes: Vec::new(),
+            text: String::new(),
+            control: Vec::new(),
+            answered: false,
+            saw_cursor_query: false,
+        })
     }
 
     /// One poll: one frame, at most, and the cursor report the first time ConPTY asks for it.
@@ -702,9 +709,8 @@ async fn a_foreign_origin_never_opens_a_terminal() {
         tokio_tungstenite::connect_async(request).await.map(|(socket, _)| socket).map_err(|e| e.to_string())
     }
 
-    let foreign = attach(addr, Some("http://evil.example"))
-        .await
-        .expect_err("another page's origin must not open a terminal");
+    let foreign =
+        attach(addr, Some("http://evil.example")).await.expect_err("another page's origin must not open a terminal");
     assert!(foreign.contains("403"), "refused before the upgrade, with a status instead of a token: {foreign}");
     assert_eq!(spawner.count(), 0, "a foreign page spawned a terminal child");
 
@@ -741,14 +747,8 @@ async fn killing_a_socket_takes_its_child_and_leaves_the_other_running() {
     assert!(process::alive(first_pid) && process::alive(second_pid), "both children must be running");
 
     first.hang_up().await;
-    assert!(
-        child_gone(first_pid).await,
-        "the child of a connection that ended is still running: pid {first_pid}"
-    );
-    assert!(
-        process::alive(second_pid),
-        "one socket's teardown killed the other connection's child: pid {second_pid}"
-    );
+    assert!(child_gone(first_pid).await, "the child of a connection that ended is still running: pid {first_pid}");
+    assert!(process::alive(second_pid), "one socket's teardown killed the other connection's child: pid {second_pid}");
 
     second.hang_up().await;
     assert!(child_gone(second_pid).await, "the second child outlived its socket: pid {second_pid}");

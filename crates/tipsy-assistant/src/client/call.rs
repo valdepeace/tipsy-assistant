@@ -76,11 +76,7 @@ impl Client {
             return Err("a remote client holds no keys; live calls run in the client that owns them".to_string());
         };
         if keys.resolve(&realtime.key).map_err(|e| e.to_string())?.is_none() {
-            return Err(format!(
-                "no key named `{}`: set {} or store it",
-                realtime.key,
-                env_var_name(&realtime.key)
-            ));
+            return Err(format!("no key named `{}`: set {} or store it", realtime.key, env_var_name(&realtime.key)));
         }
         let events = self.events.clone().ok_or("the client's frame loop is not running")?;
         // Whatever the session was still saying belongs to the pipeline the call replaces.

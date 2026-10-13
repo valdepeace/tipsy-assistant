@@ -42,7 +42,10 @@ use crate::playback::Playback;
 /// same crossterm-*shaped* vocabulary, a separate type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawKey {
-    Char { c: char, ctrl: bool },
+    Char {
+        c: char,
+        ctrl: bool,
+    },
     Enter,
     Backspace,
     Tab,
@@ -61,7 +64,10 @@ pub enum RawKey {
 pub enum Input {
     Key(KeyInput),
     /// The cell the pointer went down on, in the grid's own coordinates.
-    Click { col: u16, row: u16 },
+    Click {
+        col: u16,
+        row: u16,
+    },
 }
 
 /// Ratzilla's key event in this crate's vocabulary, one arm per variant of its `KeyCode` (0.3.1's
@@ -84,9 +90,12 @@ pub fn raw_key(event: &ratzilla::event::KeyEvent) -> RawKey {
         KeyCode::Left => RawKey::Left,
         KeyCode::Right => RawKey::Right,
         KeyCode::F(n) => RawKey::F(n),
-        KeyCode::Delete | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Unidentified => {
-            RawKey::Other
-        }
+        KeyCode::Delete
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Unidentified => RawKey::Other,
     }
 }
 
@@ -202,9 +211,9 @@ pub fn test_barge_in(playback: &mut Playback, capability: Capability, now: f64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::Terminal;
     use tipsy_protocol::ProfileView;
 
     fn welcome() -> tipsy_protocol::Event {
@@ -239,7 +248,11 @@ mod tests {
         // the control characters the screen's save and regenerate rows are bound to
         // (`ConfigForm::SAVE_KEY`, `ConfigForm::REGENERATE_KEY`).
         assert_eq!(key_input(RawKey::Char { c: 's', ctrl: true }), Some(KeyInput::Char('\u{13}')));
-        assert_eq!(key_input(RawKey::Char { c: 'S', ctrl: true }), Some(KeyInput::Char('\u{13}')), "the case folds first");
+        assert_eq!(
+            key_input(RawKey::Char { c: 'S', ctrl: true }),
+            Some(KeyInput::Char('\u{13}')),
+            "the case folds first"
+        );
         assert_eq!(key_input(RawKey::Char { c: 'r', ctrl: true }), Some(KeyInput::Char('\u{12}')));
         // A chord that names no ASCII letter is not a key this HUD has.
         assert_eq!(key_input(RawKey::Char { c: '1', ctrl: true }), None);
@@ -253,11 +266,19 @@ mod tests {
             Hit { area: Rect::new(20, 2, 4, 1), key: KeyInput::F(8), action: None },
         ];
         assert_eq!(hit_at(&hits, 10, 2).map(|h| h.key), Some(KeyInput::F(7)), "the first column is inside");
-        assert_eq!(hit_at(&hits, 15, 2).map(|h| h.key), Some(KeyInput::F(7)), "and so is the last: right() is exclusive");
+        assert_eq!(
+            hit_at(&hits, 15, 2).map(|h| h.key),
+            Some(KeyInput::F(7)),
+            "and so is the last: right() is exclusive"
+        );
         assert!(hit_at(&hits, 16, 2).is_none(), "one column past the end is not a hit");
         assert!(hit_at(&hits, 9, 2).is_none());
         assert!(hit_at(&hits, 10, 3).is_none(), "one row below is not a hit either");
-        assert_eq!(hit_at(&hits, 21, 2).map(|h| h.key), Some(KeyInput::F(8)), "overlapping rectangles report the first");
+        assert_eq!(
+            hit_at(&hits, 21, 2).map(|h| h.key),
+            Some(KeyInput::F(8)),
+            "overlapping rectangles report the first"
+        );
     }
 
     #[test]
@@ -265,11 +286,8 @@ mod tests {
         let mut state = UiState::new();
         state.apply(&welcome());
         let hits = vec![Hit { area: Rect::new(20, 2, 4, 1), key: KeyInput::F(8), action: None }];
-        let mut queued = vec![
-            Input::Key(KeyInput::Char('h')),
-            Input::Click { col: 20, row: 2 },
-            Input::Key(KeyInput::Char('i')),
-        ];
+        let mut queued =
+            vec![Input::Key(KeyInput::Char('h')), Input::Click { col: 20, row: 2 }, Input::Key(KeyInput::Char('i'))];
         let actions = drain(&mut state, &hits, &mut queued);
         assert!(actions.is_empty(), "none of these three asks the server for anything: {actions:?}");
         assert_eq!(state.input, "hi", "the two keys reached the question box in order, around the click");
@@ -410,9 +428,7 @@ mod tests {
         let clock = clock_from(17, 41, 3, 0, 11, 9);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("a test terminal");
         let mut hits = Vec::new();
-        terminal
-            .draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, "El Compae"))
-            .expect("one frame");
+        terminal.draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, "El Compae")).expect("one frame");
 
         assert_eq!(hits.len(), 5, "the header's two, then the log panel's three: {hits:?}");
         let (mode, gear) = (hits[0], hits[1]);
@@ -429,10 +445,7 @@ mod tests {
             vec![KeyInput::F(7), KeyInput::F(8), KeyInput::F(4)],
             "`CHAT`, `NETWORK` and the clear button, in the order `render.rs` reports them: {hits:?}"
         );
-        assert!(
-            hits[2..].iter().all(|hit| hit.area.y > 0),
-            "and none of them is on the header's own row: {hits:?}"
-        );
+        assert!(hits[2..].iter().all(|hit| hit.area.y > 0), "and none of them is on the header's own row: {hits:?}");
         assert!(
             mode.area.y == 0 && mode.area.height == 1 && gear.area.y == 0 && gear.area.height == 1,
             "both are on the header's own row and one row tall: {mode:?} {gear:?}"
@@ -449,10 +462,7 @@ mod tests {
         let header: String =
             (0..terminal.backend().buffer().area.width).map(|x| buffer_symbol(&terminal, x, 0)).collect();
         assert!(header.contains('◉'), "the badge's marker is on the header row: {header:?}");
-        assert!(
-            header.contains("EL COMPAE"),
-            "and the profile's own name, uppercased, is drawn beside it: {header:?}"
-        );
+        assert!(header.contains("EL COMPAE"), "and the profile's own name, uppercased, is drawn beside it: {header:?}");
 
         // The claim the hit test makes, on the frame that was just drawn: the top-left cell of the
         // gear is the gear, and the cell one row below it is nothing at all.
@@ -483,9 +493,7 @@ mod tests {
         let clock = clock_from(17, 41, 3, 0, 11, 9);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("a test terminal");
         let mut hits = Vec::new();
-        terminal
-            .draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, "El Compae"))
-            .expect("one frame");
+        terminal.draw(|frame| hits = tipsy_ui::draw(frame, &state, &clock, "El Compae")).expect("one frame");
         let gear = hits[1].area;
 
         let mut queued = vec![Input::Click { col: gear.x, row: 0 }];

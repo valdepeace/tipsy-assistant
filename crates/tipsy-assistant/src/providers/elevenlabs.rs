@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{ProviderError, SpeechProvider, SpeechRequest, TranscribeProvider};
-use crate::audio::pcm::{encode_wav_16k, pcm_s16le_to_pcm, Pcm};
+use crate::audio::pcm::{Pcm, encode_wav_16k, pcm_s16le_to_pcm};
 
 /// 30 s per sentence of speech (Global Constraints).
 const SPEECH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -122,8 +122,7 @@ impl ElevenLabsSpeech {
         if let Some(voices) = cache.voices.as_ref() {
             return Ok(voices.clone());
         }
-        let recent_failure =
-            cache.failure.as_ref().filter(|(at, _)| at.elapsed() < VOICES_FAILURE_TTL);
+        let recent_failure = cache.failure.as_ref().filter(|(at, _)| at.elapsed() < VOICES_FAILURE_TTL);
         if let Some((_, failure)) = recent_failure {
             return Err(failure.clone());
         }
@@ -144,12 +143,8 @@ impl ElevenLabsSpeech {
     /// The one `GET /v1/voices` request. Kept separate so `account_voices` can cache either
     /// outcome without holding the lock across two error paths.
     async fn fetch_voices(&self) -> Result<Vec<AccountVoice>, ProviderError> {
-        let resp = self
-            .http
-            .authed(self.http.client.get(self.http.url("v1/voices")))
-            .timeout(SPEECH_TIMEOUT)
-            .send()
-            .await?;
+        let resp =
+            self.http.authed(self.http.client.get(self.http.url("v1/voices"))).timeout(SPEECH_TIMEOUT).send().await?;
         let value: serde_json::Value = ElevenLabsHttp::check(resp).await?.json().await?;
         value
             .get("voices")
@@ -212,15 +207,10 @@ fn audio_bytes_to_pcm(bytes: &[u8], content_type: Option<&str>) -> Result<Pcm, P
     // A BOM-prefixed JSON body would otherwise start with the BOM's bytes rather than the brace, so
     // the BOM is stepped over before looking for the first meaningful byte.
     let payload = bytes.strip_prefix(b"\xEF\xBB\xBF".as_slice()).unwrap_or(bytes);
-    if matches!(
-        payload.iter().copied().find(|b| !b.is_ascii_whitespace()),
-        Some(b'{') | Some(b'[')
-    ) {
+    if matches!(payload.iter().copied().find(|b| !b.is_ascii_whitespace()), Some(b'{') | Some(b'[')) {
         // `chars().take(..)` keeps the preview on character boundaries (Review Focus 2).
         let preview: String = String::from_utf8_lossy(bytes).chars().take(200).collect();
-        return Err(ProviderError::BadResponse(format!(
-            "expected raw pcm_24000 audio but got a JSON body: {preview}"
-        )));
+        return Err(ProviderError::BadResponse(format!("expected raw pcm_24000 audio but got a JSON body: {preview}")));
     }
     if bytes.starts_with(b"RIFF") {
         return Err(ProviderError::BadResponse(
@@ -244,20 +234,11 @@ impl SpeechProvider for ElevenLabsSpeech {
         // `req.instructions` is deliberately not sent: the note records no general
         // instructions/style field, and `voice_settings.style` is V2+-only and raises latency.
         let body = serde_json::json!({ "text": req.text, "model_id": self.http.model });
-        let resp = self
-            .http
-            .authed(self.http.client.post(url))
-            .timeout(SPEECH_TIMEOUT)
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.http.authed(self.http.client.post(url)).timeout(SPEECH_TIMEOUT).json(&body).send().await?;
         let resp = ElevenLabsHttp::check(resp).await?;
         // The header has to be read before `bytes()` consumes the response.
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
+        let content_type =
+            resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
         let bytes = resp.bytes().await?;
         audio_bytes_to_pcm(&bytes, content_type.as_deref())
     }
@@ -292,8 +273,7 @@ impl TranscribeProvider for ElevenLabsTranscribe {
             .file_name("audio.wav")
             .mime_str("audio/wav")
             .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
-        let mut form =
-            reqwest::multipart::Form::new().text("model_id", self.http.model.clone()).part("file", file);
+        let mut form = reqwest::multipart::Form::new().text("model_id", self.http.model.clone()).part("file", file);
         if !primary.is_empty() {
             form = form.text("language_code", primary);
         }

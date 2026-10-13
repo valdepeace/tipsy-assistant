@@ -1,5 +1,5 @@
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use tipsy_protocol::*;
 use tipsy_ui::*;
 
@@ -42,9 +42,8 @@ fn text_at(term: &Terminal<TestBackend>, r: ratatui::layout::Rect) -> String {
 fn panel_inner(term: &Terminal<TestBackend>, title: &str) -> ratatui::layout::Rect {
     let buffer = term.backend().buffer();
     let area = buffer.area;
-    let text_row = |y: u16| -> String {
-        (area.left()..area.right()).map(|x| buffer[(x, y)].symbol().to_string()).collect()
-    };
+    let text_row =
+        |y: u16| -> String { (area.left()..area.right()).map(|x| buffer[(x, y)].symbol().to_string()).collect() };
 
     let top = (area.top()..area.bottom()).find(|&y| text_row(y).contains(title)).expect("the panel title");
     let title_x = {
@@ -60,7 +59,19 @@ fn panel_inner(term: &Terminal<TestBackend>, title: &str) -> ratatui::layout::Re
 #[test]
 fn spanish_hud_shows_every_panel() {
     let (text, _, _) = render(&state(UiLanguage::Es));
-    for needle in ["COMPAE · EL ASISTENTE DE GARRAFÓN", "HORA LOCAL", "10:42:07", "viernes, 10 de octubre", "NÚCLEO", "VOZ", "SISTEMA", "CHAT", "RED", "PREGUNTA", "Borrar"] {
+    for needle in [
+        "COMPAE · EL ASISTENTE DE GARRAFÓN",
+        "HORA LOCAL",
+        "10:42:07",
+        "viernes, 10 de octubre",
+        "NÚCLEO",
+        "VOZ",
+        "SISTEMA",
+        "CHAT",
+        "RED",
+        "PREGUNTA",
+        "Borrar",
+    ] {
         assert!(text.contains(needle), "missing {needle:?}");
     }
 }
@@ -128,11 +139,14 @@ fn clickable_areas_sit_on_their_labels() {
         .filter(|h| [KeyInput::F(7), KeyInput::F(8), KeyInput::F(4)].contains(&h.key))
         .map(|h| (text_at(&term, h.area), h.key))
         .collect();
-    assert_eq!(labels, vec![
-        (" CHAT ".to_string(), KeyInput::F(7)),
-        (" RED ".to_string(), KeyInput::F(8)),
-        (" ✗ Borrar ".to_string(), KeyInput::F(4)),
-    ]);
+    assert_eq!(
+        labels,
+        vec![
+            (" CHAT ".to_string(), KeyInput::F(7)),
+            (" RED ".to_string(), KeyInput::F(8)),
+            (" ✗ Borrar ".to_string(), KeyInput::F(4)),
+        ]
+    );
 }
 
 #[test]
@@ -162,7 +176,11 @@ fn rings_fit_inside_their_panel_when_it_is_not_wide_enough_for_them() {
         // The old one put the horizontal extremes of the ring outside the window, and ratatui drops
         // the points that fall outside it, so only the small centre circle was left visible.
         let span = last - first + 1;
-        assert!(span >= inner.width * 3 / 4, "the ring must fill its panel at {w}x{h}: {span} of {} columns", inner.width);
+        assert!(
+            span >= inner.width * 3 / 4,
+            "the ring must fill its panel at {w}x{h}: {span} of {} columns",
+            inner.width
+        );
     }
 }
 

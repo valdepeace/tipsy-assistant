@@ -302,11 +302,14 @@ mod tests {
         client.state.login.as_mut().unwrap().open = true;
         assert_eq!(sync_login(&mut client), vec![Command::LoginStart]);
 
-        client.on_message(&to_server, ToClient::Event(Event::Error {
-            code: tipsy_protocol::ErrorCode::NoKey,
-            message: "no key named `openrouter`".into(),
-            recoverable: true,
-        }));
+        client.on_message(
+            &to_server,
+            ToClient::Event(Event::Error {
+                code: tipsy_protocol::ErrorCode::NoKey,
+                message: "no key named `openrouter`".into(),
+                recoverable: true,
+            }),
+        );
         assert!(!client.state.login.as_ref().unwrap().open);
         assert_eq!(sync_login(&mut client), vec![Command::LoginStop]);
         assert!(client.state.mic_open, "the switch the user set is not the screen's to move");

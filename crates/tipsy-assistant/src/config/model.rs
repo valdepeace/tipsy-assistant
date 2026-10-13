@@ -289,9 +289,7 @@ mod tests {
         let ids: Vec<String> = crate::config::profiles::builtin_profiles().iter().map(|p| p.id.clone()).collect();
         assert_eq!(
             ids,
-            [
-                "compae", "meigo", "chulapo", "senyor", "good_ol_boy", "hustler", "mate", "bloke", "polite_one"
-            ]
+            ["compae", "meigo", "chulapo", "senyor", "good_ol_boy", "hustler", "mate", "bloke", "polite_one"]
         );
     }
 

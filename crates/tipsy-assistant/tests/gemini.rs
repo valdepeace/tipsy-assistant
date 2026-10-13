@@ -1,7 +1,7 @@
 //! Connector tests for the native Gemini API (spec §13: `wiremock` with recorded responses).
 
 use futures::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tipsy_assistant::providers::gemini::{GeminiChat, GeminiSpeech};
 use tipsy_assistant::providers::{
     ChatMessage, ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest,
@@ -111,7 +111,8 @@ const BRIEF: &str = concat!(
     "Acento andaluz natural y bien marcado: seseo, eses aspiradas, finales relajados y musicalidad andaluza."
 );
 /// The plan's decision: the first sentence of `voice_instructions` is the `style` sent to the API.
-const STYLE: &str = "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca.";
+const STYLE: &str =
+    "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca.";
 
 fn speech_request(text: &str, instructions: &str, voice: Option<&str>) -> SpeechRequest {
     SpeechRequest { text: text.into(), instructions: instructions.into(), voice: voice.map(str::to_string) }
@@ -314,9 +315,7 @@ async fn chat_surfaces_a_mid_stream_error_that_arrived_with_http_200() {
         out,
         vec![
             Ok("Ozú".to_string()),
-            Err(ProviderError::BadResponse(
-                "Failed to get completed interaction: Result not found.".to_string()
-            )),
+            Err(ProviderError::BadResponse("Failed to get completed interaction: Result not found.".to_string())),
         ]
     );
     assert!(out.last().unwrap().is_err(), "the error must end the reply, not complete it");
@@ -349,10 +348,7 @@ async fn chat_reports_a_stream_that_ends_without_its_completion_event() {
         }
         other => panic!("a truncated reply must end in an error, not a clean end: {other:?}"),
     }
-    assert!(
-        !out.iter().all(|item| item.is_ok()),
-        "the half-reply must never be presented as a complete one: {out:?}"
-    );
+    assert!(!out.iter().all(|item| item.is_ok()), "the half-reply must never be presented as a complete one: {out:?}");
 }
 
 #[tokio::test]
@@ -373,10 +369,11 @@ async fn speech_sends_the_style_the_profile_voice_and_the_audio_format() {
             "stream": false,
             "store": false
         })))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(audio_response("audio/wav", 24_000, &wav(&tone(440.0, 24_000, 10), 24_000))),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(audio_response(
+            "audio/wav",
+            24_000,
+            &wav(&tone(440.0, 24_000, 10), 24_000),
+        )))
         .mount(&server)
         .await;
     let p = GeminiSpeech::new(server.uri(), "gemini-3.8-flash-tts", Some("k123".into()));
@@ -401,10 +398,11 @@ async fn speech_sends_kore_when_the_profile_has_no_gemini_voice() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/interactions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(audio_response("audio/wav", 24_000, &wav(&tone(440.0, 24_000, 10), 24_000))),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(audio_response(
+            "audio/wav",
+            24_000,
+            &wav(&tone(440.0, 24_000, 10), 24_000),
+        )))
         .mount(&server)
         .await;
     // The `voices` table of this profile is empty, so `session.rs` resolves `voice: None`.

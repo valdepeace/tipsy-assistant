@@ -11,4 +11,4 @@ pub mod strings;
 pub use config_form::*;
 pub use render::*;
 pub use state::*;
-pub use strings::{strings, Strings};
+pub use strings::{Strings, strings};

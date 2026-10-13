@@ -22,7 +22,11 @@ fn roundtrip_event(e: Event) {
 
 #[test]
 fn commands_roundtrip() {
-    roundtrip_command(Command::Hello { token: Some("t".into()), client: ClientKind::Tui, protocol_version: PROTOCOL_VERSION });
+    roundtrip_command(Command::Hello {
+        token: Some("t".into()),
+        client: ClientKind::Tui,
+        protocol_version: PROTOCOL_VERSION,
+    });
     roundtrip_command(Command::Ask { text: "¿Qué pasa, compae? ñandú…".into() });
     roundtrip_command(Command::Say { text: "hola".into() });
     roundtrip_command(Command::ListenStart);
@@ -66,7 +70,10 @@ fn the_live_event_roundtrips() {
     }
     let json = serde_json::to_string(&Event::Live { active: true }).unwrap();
     assert_eq!(json, r#"{"type":"live","active":true}"#);
-    assert_eq!(serde_json::from_str::<Event>(r#"{"type":"live","active":false}"#).unwrap(), Event::Live { active: false });
+    assert_eq!(
+        serde_json::from_str::<Event>(r#"{"type":"live","active":false}"#).unwrap(),
+        Event::Live { active: false }
+    );
 }
 
 #[test]
@@ -316,10 +323,7 @@ fn the_configuration_messages_spell_their_tags_as_the_spec_says() {
         profile: ProfileView { id: "compae".into(), name: "El Compae".into(), language: "es-ES".into() },
     })
     .unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"profile_changed","profile":{"id":"compae","name":"El Compae","language":"es-ES"}}"#
-    );
+    assert_eq!(json, r#"{"type":"profile_changed","profile":{"id":"compae","name":"El Compae","language":"es-ES"}}"#);
 
     // `UpdateConfig` is the one shape whose whole payload is nested, so it is read apart in full:
     // the field name is `config`, and the view's own field names are the form's, unchanged.
@@ -328,8 +332,9 @@ fn the_configuration_messages_spell_their_tags_as_the_spec_says() {
     // `base_url` or a `key_name` and the server carries no `token`, so a save from a client cannot
     // move where the server sends its key, which key it spends, or its door password (spec §4.3,
     // §13.6). Every field a client *may* move is asserted present.
-    let json = serde_json::to_string(&Command::UpdateConfig { config: Box::new(ClientConfigView::from(&config_view())) })
-        .unwrap();
+    let json =
+        serde_json::to_string(&Command::UpdateConfig { config: Box::new(ClientConfigView::from(&config_view())) })
+            .unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["type"], "update_config");
     assert_eq!(value["config"]["active_profile"], "compae");
