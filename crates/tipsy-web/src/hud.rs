@@ -3,7 +3,7 @@
 //!
 //! `tipsy_ui::draw` is called verbatim on both clients (`render.rs:72`), and the translation from a
 //! terminal-shaped event to `KeyInput`/`UiAction` is what has to exist twice — once over crossterm's
-//! types (`crates/tipsy-compadre/src/client.rs:539-563`) and once over Ratzilla's. This module is the
+//! types (`crates/tipsy-assistant/src/client.rs:539-563`) and once over Ratzilla's. This module is the
 //! second one's decisions.
 //!
 //! **`key_input` and the clock's numbering are per shell on purpose, and that is not duplication to

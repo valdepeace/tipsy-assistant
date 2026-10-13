@@ -1,4 +1,4 @@
-//! Messages exchanged between the tipsy-compadre server and its clients.
+//! Messages exchanged between the tipsy-assistant server and its clients.
 //!
 //! Text messages are JSON (`Command`, `Event`, and the configuration they carry as `ConfigView`);
 //! audio travels as binary `Frame`s.

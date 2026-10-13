@@ -3,6 +3,7 @@ name = "tipsy-web"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "The browser client: Ratzilla backend, web-sys WebSocket, browser audio"
 
 # `cdylib` is the artifact wasm-bindgen processes; `rlib` is what the host test binary links.

@@ -21,7 +21,7 @@ pub enum Step {
     BuildWasm,
     /// `wasm-bindgen --target web --out-dir <bundle>`.
     Bindgen,
-    /// `cargo build -p tipsy-compadre --release`, which embeds the bundle Task 1.5's `assets.rs` names.
+    /// `cargo build -p tipsy-assistant --release`, which embeds the bundle Task 1.5's `assets.rs` names.
     BuildHost,
 }
 
@@ -272,13 +272,13 @@ pub fn run(root: &Path) -> Result<(), String> {
                         missing.join(", ")
                     ));
                 }
-                cargo(&["build", "-p", "tipsy-compadre", "--release"], &target)?;
+                cargo(&["build", "-p", "tipsy-assistant", "--release"], &target)?;
             }
         }
     }
 
     println!("xtask: the bundle is at {}", bundle.display());
-    let binary = target.join("release").join(format!("tipsy-compadre{}", std::env::consts::EXE_SUFFIX));
+    let binary = target.join("release").join(format!("tipsy-assistant{}", std::env::consts::EXE_SUFFIX));
     if binary.is_file() {
         println!("xtask: {} embeds it", binary.display());
     }
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn the_target_directory_is_the_environments_or_the_workspaces_own() {
-        let root = Path::new("E:/w/tipsy-compadre");
+        let root = Path::new("E:/w/tipsy-assistant");
         assert_eq!(target_dir(root, None), root.join("target"));
         assert_eq!(
             target_dir(root, Some("E:/w/.target-sandbox".into())),

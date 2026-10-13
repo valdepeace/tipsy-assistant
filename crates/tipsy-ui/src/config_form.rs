@@ -1,6 +1,6 @@
 //! The configuration screen's form view model.
 //!
-//! Plain values only: no `Config` (that type lives in `tipsy-compadre`, which this crate may not
+//! Plain values only: no `Config` (that type lives in `tipsy-assistant`, which this crate may not
 //! depend on), no clock, no terminal. The native client converts `Config` ⇄ `ConfigForm` and is the
 //! only thing that reads or writes the file; everything on this side is what the screen shows and
 //! what a key or a click does to it.
@@ -273,7 +273,7 @@ impl Default for ConfigForm {
 }
 
 /// The form as the wire's own shape. Same fields, so this is a rename and a move of plain values;
-/// the round-trip test in `tipsy-compadre` is what keeps it one shape.
+/// the round-trip test in `tipsy-assistant` is what keeps it one shape.
 impl From<&ConfigForm> for ConfigView {
     fn from(form: &ConfigForm) -> Self {
         Self {
@@ -2026,14 +2026,14 @@ mod tests {
             Capability::Chat,
             false,
             0,
-            "no API key named `openrouter`: run `tipsy-compadre key set openrouter` or set TIPSY_KEY_OPENROUTER"
+            "no API key named `openrouter`: run `tipsy-assistant key set openrouter` or set TIPSY_KEY_OPENROUTER"
                 .into(),
         );
         let (kind, text) = f.notice.clone().unwrap();
         assert_eq!(kind, NoticeKind::Error);
         assert_eq!(
             text,
-            "chat: no API key named `openrouter`: run `tipsy-compadre key set openrouter` or set TIPSY_KEY_OPENROUTER",
+            "chat: no API key named `openrouter`: run `tipsy-assistant key set openrouter` or set TIPSY_KEY_OPENROUTER",
             "a refusal carries the answer as it came, and no latency"
         );
 

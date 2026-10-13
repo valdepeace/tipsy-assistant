@@ -1,6 +1,6 @@
-//! The decisions a tipsy-compadre client makes, with no device, socket or clock in reach.
+//! The decisions a tipsy-assistant client makes, with no device, socket or clock in reach.
 //!
-//! Every function here was a private free function of `tipsy-compadre`'s `client.rs`. It lives in
+//! Every function here was a private free function of `tipsy-assistant`'s `client.rs`. It lives in
 //! `tipsy-ui` because that crate is the one both clients compile against — the native terminal client
 //! and Plan 3's browser client — and the one that must keep compiling to `wasm32-unknown-unknown`.
 //! That second fact is also the membership rule: nothing here may reach for a device, a socket, the

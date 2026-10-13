@@ -3,9 +3,17 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Build tasks for tipsy-compadre"
+license.workspace = true
+description = "Build tasks for tipsy-assistant"
 
 [dependencies]
+# `shots` draws the HUD and the configuration screen through the crates that own them: the pictures
+# are the application's own rendering, which is the whole point of generating them here. `dist` needs
+# none of this, but a task's dependencies are the crate's.
+tipsy-assistant.workspace = true
+tipsy-ui.workspace = true
+tipsy-protocol.workspace = true
+ratatui.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27"

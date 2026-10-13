@@ -129,7 +129,7 @@ pub struct Strings {
     pub web_online: &'static str,
     /// The browser gate's button. The v1 spec asks for it in as many words: "In the browser, audio
     /// capture requires a user gesture; the web client shows a 'press to start' screen until then"
-    /// (`docs/superpowers/specs/2026-10-10-tipsy-compadre-design.md:193-194`).
+    /// (the v1 design spec).
     pub mic_start: &'static str,
     /// The line beside that button while the microphone can be offered at all.
     pub mic_hint: &'static str,

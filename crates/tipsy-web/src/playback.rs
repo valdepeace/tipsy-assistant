@@ -282,8 +282,8 @@ impl Playback {
 
     /// The envelope of everything heard this turn: one value per 50 ms, peak-normalised.
     ///
-    /// The arithmetic is `crates/tipsy-compadre/src/audio/pcm.rs:58-66` (`hop = rate / 20`, `rms` per
-    /// hop, divided by the peak) with `i16_to_f32` from `:24-26`; `tipsy-compadre` is the native binary
+    /// The arithmetic is `crates/tipsy-assistant/src/audio/pcm.rs:58-66` (`hop = rate / 20`, `rms` per
+    /// hop, divided by the peak) with `i16_to_f32` from `:24-26`; `tipsy-assistant` is the native binary
     /// and is not a dependency of this crate, so the two implementations are the same twelve lines
     /// rather than one function — and the test above reproduces `pcm.rs:157-166`'s own fixture so a
     /// drift between them shows up as a failing test here. This is the *same observation* the native
@@ -525,7 +525,7 @@ mod tests {
     fn the_envelope_is_the_native_one_value_per_50_ms_normalised_to_the_peak() {
         let mut p = Playback::new();
         p.set_rate(24_000);
-        // The same fixture as `crates/tipsy-compadre/src/audio/pcm.rs:157-166`: 50 ms of silence and
+        // The same fixture as `crates/tipsy-assistant/src/audio/pcm.rs:157-166`: 50 ms of silence and
         // 100 ms of tone, which is three hops at 24 kHz.
         p.chunk(0, vec![0i16; 24_000 / 20], 0.0).expect("plays");
         p.chunk(1, sine(220.0, 24_000, 100), 0.0).expect("plays");

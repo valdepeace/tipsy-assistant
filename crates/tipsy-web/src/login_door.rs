@@ -21,7 +21,7 @@
 //!    commit `b9f2402` removed, and this module does not bring it back.
 //! 2. **The microphone follows `LoginState::open`, and nothing else.** The native client reads
 //!    `login.voice && login.open` once a frame and sends `LoginStart` / `LoginStop` **on the edges**
-//!    (`crates/tipsy-compadre/src/client/mic.rs`). The browser's `Tab`, its third refusal and a pass
+//!    (`crates/tipsy-assistant/src/client/mic.rs`). The browser's `Tab`, its third refusal and a pass
 //!    move exactly the same field (`crates/tipsy-ui/src/state.rs:414-424`, `:615-617`, `:607`), so the
 //!    same edge detector applies.
 //! 3. **A frame leaves the page behind one predicate, and that predicate has two cases.** This is the
@@ -100,7 +100,7 @@ impl Door {
     /// carries a `LoginView`, and on none after it. `UiState::show_login` is both the call and the
     /// rule — it returns whether *this* call was the one that showed the screen — so there is no
     /// guard to write here and no bit to keep (`crates/tipsy-ui/src/state.rs:293-314`, and the native
-    /// arm that does the same thing is `crates/tipsy-compadre/src/client.rs`'s `Welcome` branch).
+    /// arm that does the same thing is `crates/tipsy-assistant/src/client.rs`'s `Welcome` branch).
     ///
     /// Returns whether a screen went up, which is `show_login`'s own answer and is not re-derived.
     pub fn open_screen(&mut self, state: &mut UiState, login: Option<&LoginView>) -> bool {
