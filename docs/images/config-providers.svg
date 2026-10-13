@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1152" height="420" viewBox="0 0 1152 420" font-family="DejaVu Sans Mono,Cascadia Mono,Consolas,Liberation Mono,Menlo,monospace">
+<rect width="1152" height="420" fill="#0b0f14"/>
+<rect x="0.0" y="0.0" width="163.2" height="20" fill="#00d2ff" shape-rendering="crispEdges"/>
+<rect x="9.6" y="20.0" width="105.6" height="20" fill="#00d2ff" shape-rendering="crispEdges"/>
+<rect x="0.0" y="80.0" width="1152.0" height="20" fill="#001e28" shape-rendering="crispEdges"/>
+<rect x="0.0" y="380.0" width="76.8" height="20" fill="#ffbe3c" shape-rendering="crispEdges"/>
+<rect x="96.0" y="380.0" width="86.4" height="20" fill="#00d2ff" shape-rendering="crispEdges"/>
+<text x="9.6" y="15.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">◉</text>
+<text x="28.8" y="15.4" textLength="124.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">CONFIGURACIÓN</text>
+<text x="182.4" y="15.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#0dbc79" xml:space="preserve">●</text>
+<text x="201.6" y="15.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#0dbc79" xml:space="preserve">Listo,</text>
+<text x="268.8" y="15.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#0dbc79" xml:space="preserve">quillo</text>
+<text x="1075.2" y="15.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">push</text>
+<text x="1132.8" y="15.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffbe3c" font-weight="bold" xml:space="preserve">⚙</text>
+<text x="9.6" y="35.4" textLength="105.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">Proveedores</text>
+<text x="124.8" y="35.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Escucha</text>
+<text x="201.6" y="35.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfiles</text>
+<text x="288.0" y="35.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Servidor</text>
+<text x="0.0" y="75.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Conector</text>
+<text x="249.6" y="75.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">gemini</text>
+<text x="0.0" y="95.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#00d2ff" xml:space="preserve">URL</text>
+<text x="38.4" y="95.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#00d2ff" xml:space="preserve">base</text>
+<text x="249.6" y="95.4" textLength="393.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">https://generativelanguage.googleapis.com</text>
+<text x="0.0" y="115.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Modelo</text>
+<text x="249.6" y="115.4" textLength="153.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">gemini-2.5-flash</text>
+<text x="0.0" y="135.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Nombre</text>
+<text x="67.2" y="135.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">de</text>
+<text x="96.0" y="135.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">la</text>
+<text x="124.8" y="135.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">clave</text>
+<text x="249.6" y="135.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">google</text>
+<text x="0.0" y="155.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Probar</text>
+<text x="0.0" y="175.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Conector</text>
+<text x="249.6" y="175.4" textLength="96.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">elevenlabs</text>
+<text x="0.0" y="195.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">URL</text>
+<text x="38.4" y="195.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">base</text>
+<text x="249.6" y="195.4" textLength="268.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">https://api.elevenlabs.io/v1</text>
+<text x="0.0" y="215.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Modelo</text>
+<text x="249.6" y="215.4" textLength="211.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">eleven_multilingual_v2</text>
+<text x="0.0" y="235.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Nombre</text>
+<text x="67.2" y="235.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">de</text>
+<text x="96.0" y="235.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">la</text>
+<text x="124.8" y="235.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">clave</text>
+<text x="249.6" y="235.4" textLength="96.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">elevenlabs</text>
+<text x="0.0" y="255.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Probar</text>
+<text x="0.0" y="275.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Conector</text>
+<text x="249.6" y="275.4" textLength="124.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">openai_compat</text>
+<text x="0.0" y="295.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">URL</text>
+<text x="38.4" y="295.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">base</text>
+<text x="249.6" y="295.4" textLength="268.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">https://openrouter.ai/api/v1</text>
+<text x="0.0" y="315.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Modelo</text>
+<text x="249.6" y="315.4" textLength="220.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">openai/whisper-large-v3</text>
+<text x="0.0" y="335.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Nombre</text>
+<text x="67.2" y="335.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">de</text>
+<text x="96.0" y="335.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">la</text>
+<text x="124.8" y="335.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">clave</text>
+<text x="249.6" y="335.4" textLength="96.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">openrouter</text>
+<text x="0.0" y="355.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Probar</text>
+<text x="9.6" y="395.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">Probar</text>
+<text x="105.6" y="395.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">Guardar</text>
+<text x="19.2" y="415.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">F9</text>
+<text x="48.0" y="415.4" textLength="96.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">configurar</text>
+<text x="153.6" y="415.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="172.8" y="415.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">↑↓</text>
+<text x="201.6" y="415.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">fila</text>
+<text x="249.6" y="415.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="268.8" y="415.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">←→</text>
+<text x="297.6" y="415.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">pestaña</text>
+<text x="374.4" y="415.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="393.6" y="415.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Enter</text>
+<text x="451.2" y="415.4" textLength="144.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">editar/alternar</text>
+<text x="604.8" y="415.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="624.0" y="415.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">F2</text>
+<text x="652.8" y="415.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">probar</text>
+<text x="720.0" y="415.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="739.2" y="415.4" textLength="86.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">F4/Ctrl+S</text>
+<text x="835.2" y="415.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">guardar</text>
+<text x="912.0" y="415.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="931.2" y="415.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Esc</text>
+<text x="969.6" y="415.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">cerrar</text>
+</svg>
