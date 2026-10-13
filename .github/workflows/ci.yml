@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Format and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `cpal` builds `alsa-sys`, which finds ALSA through pkg-config, so the headers have to be
+      # installed on a runner that does not ship them. Nothing else in the workspace needs a system
+      # library: `keyring`'s default backend is pure Rust and only needs a running service at runtime.
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      # No toolchain action picks a version: `rust-toolchain.toml` names 1.96.1 and the components
+      # (rustfmt and clippy), and the runner's rustup installs exactly that on the first command.
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # The whole workspace, the browser client included: it is `crate-type = ["cdylib", "rlib"]` and
+      # its host tests are part of the suite, so this needs no wasm target.
+      - name: Tests
+        run: cargo test --workspace
