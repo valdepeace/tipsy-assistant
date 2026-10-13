@@ -1,5 +1,7 @@
 # tipsy-assistant
 
+[![CI](https://github.com/valdepeace/tipsy-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/valdepeace/tipsy-assistant/actions/workflows/ci.yml)
+
 tipsy-assistant is a voice assistant for software developers with a strong, affectionate regional
 personality. The default profile, *El Compae*, is a lazy, joking, slightly tipsy Andalusian who
 knows Jira, GitHub, GitLab, CI/CD and code review, dodges work with developer excuses and, in the
