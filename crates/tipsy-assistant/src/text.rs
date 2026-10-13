@@ -127,30 +127,38 @@ mod tests {
 
     #[test]
     fn splits_on_sentence_end_followed_by_space() {
-        let out = split_all(&["Ozú, quillo, esto es una frase larga. Y esta otra ", "también es bastante larga, compadre."]);
-        assert_eq!(out, vec![
-            "Ozú, quillo, esto es una frase larga.".to_string(),
-            "Y esta otra también es bastante larga, compadre.".to_string(),
-        ]);
+        let out =
+            split_all(&["Ozú, quillo, esto es una frase larga. Y esta otra ", "también es bastante larga, compadre."]);
+        assert_eq!(
+            out,
+            vec![
+                "Ozú, quillo, esto es una frase larga.".to_string(),
+                "Y esta otra también es bastante larga, compadre.".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn merges_short_sentences_with_the_next_one() {
         let out = split_all(&["¡Ja! Ozú. Los lunes son un castigo divino, illo. Fin."]);
-        assert_eq!(out, vec![
-            "¡Ja! Ozú. Los lunes son un castigo divino, illo.".to_string(),
-            "Fin.".to_string(),
-        ]);
+        assert_eq!(out, vec!["¡Ja! Ozú. Los lunes son un castigo divino, illo.".to_string(), "Fin.".to_string(),]);
     }
 
     #[test]
     fn handles_question_exclamation_and_ellipsis() {
-        let out = split_all(&["¿Tú has visto el pipeline en rojo otra vez? ", "Pues mira… ", "yo estaba compilando, de verdad te lo digo… y ya."]);
-        assert_eq!(out, vec![
-            "¿Tú has visto el pipeline en rojo otra vez?".to_string(),
-            "Pues mira… yo estaba compilando, de verdad te lo digo…".to_string(),
-            "y ya.".to_string(),
+        let out = split_all(&[
+            "¿Tú has visto el pipeline en rojo otra vez? ",
+            "Pues mira… ",
+            "yo estaba compilando, de verdad te lo digo… y ya.",
         ]);
+        assert_eq!(
+            out,
+            vec![
+                "¿Tú has visto el pipeline en rojo otra vez?".to_string(),
+                "Pues mira… yo estaba compilando, de verdad te lo digo…".to_string(),
+                "y ya.".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -176,10 +184,10 @@ mod tests {
     #[test]
     fn decimal_points_and_versions_do_not_split() {
         let out = split_all(&["Actualiza a la versión 2.5.1 del paquete antes de nada, compadre. Venga."]);
-        assert_eq!(out, vec![
-            "Actualiza a la versión 2.5.1 del paquete antes de nada, compadre.".to_string(),
-            "Venga.".to_string(),
-        ]);
+        assert_eq!(
+            out,
+            vec!["Actualiza a la versión 2.5.1 del paquete antes de nada, compadre.".to_string(), "Venga.".to_string(),]
+        );
     }
 
     #[test]
@@ -193,7 +201,10 @@ mod tests {
     fn cleans_apostrophes_markdown_and_emojis() {
         assert_eq!(clean_for_speech("pa' ná', la verdá"), "pa ná, la verdá");
         assert_eq!(clean_for_speech("pa’l barco"), "pal barco");
-        assert_eq!(clean_for_speech("usa `git reset --soft HEAD~1` y **listo**"), "usa git reset --soft HEAD~1 y listo");
+        assert_eq!(
+            clean_for_speech("usa `git reset --soft HEAD~1` y **listo**"),
+            "usa git reset --soft HEAD~1 y listo"
+        );
         assert_eq!(clean_for_speech("# Título\n_cursiva_"), "Título cursiva");
         assert_eq!(clean_for_speech("Ozú 🍺🙂  quillo"), "Ozú quillo");
         assert_eq!(clean_for_speech("'entre comillas'"), "'entre comillas");

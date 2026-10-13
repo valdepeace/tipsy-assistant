@@ -212,11 +212,7 @@ async fn connect_opens_with_a_hello_and_shuttles_both_channels() {
     let server = FakeServer::start(vec![Script::Serve]).await;
     let mut ends = bridge::connect(&server.url(), Some("s3cret")).await.expect("the fake server answers welcome");
 
-    assert_eq!(
-        server.target(0).await,
-        "/ws",
-        "the token travels in `Hello`, never as a query parameter (spec §9.2)"
-    );
+    assert_eq!(server.target(0).await, "/ws", "the token travels in `Hello`, never as a query parameter (spec §9.2)");
     match serde_json::from_str::<Command>(&server.hello(0).await).unwrap() {
         Command::Hello { token, client, protocol_version } => {
             assert_eq!(token.as_deref(), Some("s3cret"), "the token the CLI was given is what `Hello` carries");

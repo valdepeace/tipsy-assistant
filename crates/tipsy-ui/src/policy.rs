@@ -84,11 +84,7 @@ pub fn flush_on_interrupt(interrupting: bool, playing: bool) -> bool {
 pub fn takes_the_floor(command: &Command) -> bool {
     matches!(
         command,
-        Command::Ask { .. }
-            | Command::Say { .. }
-            | Command::ListenStart
-            | Command::ListenStop
-            | Command::Cancel
+        Command::Ask { .. } | Command::Say { .. } | Command::ListenStart | Command::ListenStop | Command::Cancel
     )
 }
 
@@ -147,9 +143,9 @@ pub fn speech_rate(event: &Event) -> Option<u32> {
 /// The rectangles are half-open: the cell at `area.right()` and the one at `area.bottom()` are
 /// outside. The native client's mouse path and Plan 3's browser path both call this.
 pub fn hit_at(hits: &[Hit], column: u16, row: u16) -> Option<Hit> {
-    hits.iter().copied().find(|hit| {
-        column >= hit.area.x && column < hit.area.right() && row >= hit.area.y && row < hit.area.bottom()
-    })
+    hits.iter()
+        .copied()
+        .find(|hit| column >= hit.area.x && column < hit.area.right() && row >= hit.area.y && row < hit.area.bottom())
 }
 
 #[cfg(test)]
@@ -298,10 +294,7 @@ mod tests {
     #[test]
     fn a_test_probe_is_not_a_turn_and_leaves_the_playing_audio_alone() {
         for capability in [Capability::Chat, Capability::Speech, Capability::Transcribe] {
-            assert!(
-                !test_interrupts_playback(capability),
-                "{capability} is a diagnostic, not a turn"
-            );
+            assert!(!test_interrupts_playback(capability), "{capability} is a diagnostic, not a turn");
             assert!(!interrupts_playback(&Command::TestProvider { capability }));
         }
         // The whole rule at once: audio is queued and the user asked for a Test, and the audio stays

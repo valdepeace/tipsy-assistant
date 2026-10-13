@@ -11,16 +11,16 @@
 //! mistake and not something to rewrite here; the configuration screen fixes the trap in Plan 2B.
 //! This connector sends the id it is given, verbatim.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{ChatProvider, ChatRequest, ProviderError, Role, SpeechProvider, SpeechRequest, TextStream};
-use crate::audio::pcm::{decode_audio, pcm_s16le_to_pcm, Pcm};
+use crate::audio::pcm::{Pcm, decode_audio, pcm_s16le_to_pcm};
 
 /// Every Gemini request carries the key in this header. `Authorization: Bearer` is the
 /// OpenAI-compatibility layer's style, and the legacy `?key=` query string leaks into logs.
@@ -289,15 +289,16 @@ impl ChatProvider for GeminiChat {
         // itself: only the completion event does. A body that ends without one is a truncated
         // reply, and it must reach the brain as a failure rather than as a stream that finished
         // normally, which would speak the half-reply and record it in history.
-        let tail = futures::stream::iter(std::iter::once_with(move || {
-            if finished.load(Ordering::Relaxed) {
-                Vec::new()
-            } else {
-                vec![Err(ProviderError::BadResponse(
-                    "the reply stream ended before the completion event".into(),
-                ))]
-            }
-        }).flatten());
+        let tail = futures::stream::iter(
+            std::iter::once_with(move || {
+                if finished.load(Ordering::Relaxed) {
+                    Vec::new()
+                } else {
+                    vec![Err(ProviderError::BadResponse("the reply stream ended before the completion event".into()))]
+                }
+            })
+            .flatten(),
+        );
         Ok(stream.chain(tail).boxed())
     }
 }
@@ -390,7 +391,7 @@ fn audio_block_to_pcm(block: &Value, bytes: Vec<u8>) -> Result<Pcm, ProviderErro
             return Err(ProviderError::BadResponse(format!(
                 "unsupported audio container `{other}` in the synthesis response: the request asked \
                  for `{{\"type\":\"audio\"}}`, whose unary default is `audio/wav`"
-            )))
+            )));
         }
     };
 
@@ -534,7 +535,8 @@ mod tests {
         "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca. ",
         "Acento andaluz natural y bien marcado: seseo, eses aspiradas, finales relajados y musicalidad andaluza."
     );
-    const STYLE: &str = "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca.";
+    const STYLE: &str =
+        "Voz masculina adulta, medio-grave y cálida, limpia y con apenas un leve toque rasposo, nada ronca.";
 
     #[test]
     fn decode_base64_decodes_standard_base64() {

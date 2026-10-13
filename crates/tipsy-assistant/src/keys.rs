@@ -63,10 +63,8 @@ impl SecretStore for MemoryStore {
 
 /// `openrouter` → `TIPSY_KEY_OPENROUTER`; `my-key.2` → `TIPSY_KEY_MY_KEY_2`.
 pub fn env_var_name(name: &str) -> String {
-    let suffix: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
-        .collect();
+    let suffix: String =
+        name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect();
     format!("TIPSY_KEY_{suffix}")
 }
 

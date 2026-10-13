@@ -90,10 +90,8 @@ impl Client {
     /// would make `F9` look broken for a round trip.
     pub(super) fn open_screen_remote(&mut self, to_server: &UnboundedSender<ToServer>) {
         let mut form = form_of(&self.config);
-        form.notice = Some((
-            NoticeKind::Warning,
-            format!("asking {} for its configuration", self.attachment.describe()),
-        ));
+        form.notice =
+            Some((NoticeKind::Warning, format!("asking {} for its configuration", self.attachment.describe())));
         self.state.show_config_form(form);
         let _ = to_server.send(ToServer::Command(Command::GetConfig));
     }
@@ -468,7 +466,10 @@ mod tests {
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(&path, permissions).unwrap();
-        assert!(std::fs::metadata(&path).unwrap().permissions().readonly(), "the file must be read-only for this test to prove anything");
+        assert!(
+            std::fs::metadata(&path).unwrap().permissions().readonly(),
+            "the file must be read-only for this test to prove anything"
+        );
 
         let (to_server, _commands) = tokio::sync::mpsc::unbounded_channel();
         let (events, _results) = tokio::sync::mpsc::unbounded_channel();
@@ -580,10 +581,7 @@ mod tests {
             commands.try_recv().unwrap(),
             ToServer::Command(Command::SetListeningMode { mode: ListeningMode::Auto })
         );
-        assert_eq!(
-            commands.try_recv().unwrap(),
-            ToServer::Command(Command::SetProfile { id: "senyor".into() })
-        );
+        assert_eq!(commands.try_recv().unwrap(), ToServer::Command(Command::SetProfile { id: "senyor".into() }));
     }
 
     /// Regenerating fills the row the screen shows and writes nothing: the file changes on save,
@@ -624,14 +622,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(std::time::Duration::from_millis(30))
-                    .set_body_raw(
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\ndata: [DONE]\n\n",
-                        "text/event-stream",
-                    ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(30)).set_body_raw(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\ndata: [DONE]\n\n",
+                "text/event-stream",
+            ))
             .mount(&server)
             .await;
 

@@ -373,8 +373,8 @@ fn attributes(style: Style) -> &'static str {
 /// 256-colour cube is the standard one so an indexed colour cannot come out wrong.
 fn hex(colour: Color, default: &str) -> String {
     const ANSI: [&str; 16] = [
-        "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5", "#666666",
-        "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
+        "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5", "#666666", "#f14c4c",
+        "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
     ];
     let cube = |n: u8| {
         let level = |c: u8| if c == 0 { 0 } else { 55 + c * 40 };
@@ -464,11 +464,7 @@ mod tests {
                 .collect();
             let last = rows.len() - 1;
             assert!(rows[last].contains("F9 configurar"), "{}: the help line is the last row", scene.name);
-            assert!(
-                rows[last - 1].contains("Guardar"),
-                "{}: the action line is the one above it",
-                scene.name
-            );
+            assert!(rows[last - 1].contains("Guardar"), "{}: the action line is the one above it", scene.name);
             assert!(
                 rows[last - 2].trim_matches(|c| c == ' ' || c == '│').is_empty(),
                 "{}: one blank line, no more",

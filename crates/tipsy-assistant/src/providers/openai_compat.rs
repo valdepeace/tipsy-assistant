@@ -7,7 +7,7 @@ use futures::StreamExt;
 
 use super::sse::{SseItem, SseParser};
 use super::{ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest, TextStream, TranscribeProvider};
-use crate::audio::pcm::{decode_audio, encode_wav_16k, pcm_s16le_to_pcm, Pcm};
+use crate::audio::pcm::{Pcm, decode_audio, encode_wav_16k, pcm_s16le_to_pcm};
 
 const CHAT_TIMEOUT: Duration = Duration::from_secs(30);
 const SPEECH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -144,12 +144,8 @@ impl SpeechProvider for OpenAiCompat {
         if quirks.instructions && !req.instructions.is_empty() {
             body["instructions"] = serde_json::json!(req.instructions);
         }
-        let resp = self
-            .authed(self.client.post(self.url("audio/speech")))
-            .timeout(SPEECH_TIMEOUT)
-            .json(&body)
-            .send()
-            .await?;
+        let resp =
+            self.authed(self.client.post(self.url("audio/speech"))).timeout(SPEECH_TIMEOUT).json(&body).send().await?;
         let bytes = Self::check(resp).await?.bytes().await?;
         match quirks.format {
             SpeechFormat::Pcm24k => Ok(pcm_s16le_to_pcm(&bytes, 24000)),

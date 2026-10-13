@@ -368,8 +368,7 @@ async fn run(
         silence_ms: setup.silence_ms,
     };
     let mut socket =
-        match RealtimeSocket::connect_with(setup.options.clone(), &setup.resolver, &setup.config, &spec).await
-        {
+        match RealtimeSocket::connect_with(setup.options.clone(), &setup.resolver, &setup.config, &spec).await {
             Ok(socket) => socket,
             Err(e) => {
                 // Nothing was ever live, and the client is told why; `Live { active: false }` still
@@ -564,11 +563,9 @@ fn on_event(
         // (research note, Interruption 2 and 3). The truncate is asked for, not sent: the caller
         // owns the socket by the time the arm is over.
         Action::SpeechStarted => {
-            let truncate = heard
-                .truncation()
-                .map(|(item_id, content_index, audio_end_ms)| {
-                    events::truncate_message(&item_id, content_index, audio_end_ms)
-                });
+            let truncate = heard.truncation().map(|(item_id, content_index, audio_end_ms)| {
+                events::truncate_message(&item_id, content_index, audio_end_ms)
+            });
             // The count is spent: a second barge-in counts from the next item, and nothing of this
             // one can be added to it by a delta that is still arriving.
             heard.clear();
@@ -595,7 +592,9 @@ fn on_event(
             // — it is the model's audio — but it leaves nothing safe to truncate later: it names no
             // item, so the bookkeeping keeps waiting for a name instead of storing a sentinel that no
             // later delta could ever match.
-            if turn.item.is_none() && let Some(named) = &item_id {
+            if turn.item.is_none()
+                && let Some(named) = &item_id
+            {
                 turn.item = Some((named.clone(), content_index));
                 heard.begin(named, content_index);
             }
@@ -606,7 +605,9 @@ fn on_event(
             // The gate fires on a *known* mismatch, never on a missing name: an unnamed delta is not
             // known to disagree with anything, and reading its absence as one would drop every later
             // delta of the response — named ones included — before any of them reached the device.
-            if let (Some((playing, _)), Some(named)) = (&turn.item, &item_id) && playing != named {
+            if let (Some((playing, _)), Some(named)) = (&turn.item, &item_id)
+                && playing != named
+            {
                 return (Step::Continue, None);
             }
             turn.spoke = true;

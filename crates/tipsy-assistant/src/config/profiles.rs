@@ -359,7 +359,6 @@ fn mate() -> Profile {
     }
 }
 
-
 fn bloke() -> Profile {
     Profile {
         id: "bloke".into(),
@@ -589,7 +588,11 @@ mod tests {
             // The no-apostrophe rule is a Spanish-texts rule; the English delivery briefs spell
             // their accent with apostrophes (`dropped r's`), so it stays in the Spanish table.
             if profile.language.starts_with("es") {
-                assert!(!profile.voice_instructions.contains('\''), "{}: delivery text carries no apostrophes", profile.id);
+                assert!(
+                    !profile.voice_instructions.contains('\''),
+                    "{}: delivery text carries no apostrophes",
+                    profile.id
+                );
             }
             assert!(!profile.greeting.trim().is_empty(), "{} needs a greeting", profile.id);
             assert!(!profile.wake_word.trim().is_empty(), "{} needs a wake word", profile.id);

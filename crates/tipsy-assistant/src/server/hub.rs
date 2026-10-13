@@ -108,12 +108,7 @@ impl Hub {
     /// an id twice replaces the entry, which is one session per id and nothing else. The second sender
     /// is named `events` because it is the channel every producer of `ToClient` writes to — the same
     /// name `SessionEnds` gives it (`session.rs:129`).
-    pub fn attach(
-        &self,
-        session_id: u64,
-        to_server: UnboundedSender<ToServer>,
-        events: UnboundedSender<ToClient>,
-    ) {
+    pub fn attach(&self, session_id: u64, to_server: UnboundedSender<ToServer>, events: UnboundedSender<ToClient>) {
         self.live
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -205,13 +200,8 @@ impl Hub {
     /// the only per-connection fact, because the configuration, the stack and the timeouts are all the
     /// hub's.
     pub fn spawn(&self, policy: SessionPolicy) -> SessionEnds {
-        let ends = spawn_with_events(
-            self.config(),
-            self.providers.clone(),
-            self.brain_config.clone(),
-            policy,
-            self.clone(),
-        );
+        let ends =
+            spawn_with_events(self.config(), self.providers.clone(), self.brain_config.clone(), policy, self.clone());
         self.attach(ends.session_id, ends.to_server.clone(), ends.events.clone());
         ends
     }

@@ -96,9 +96,7 @@ pub fn locked_wasm_bindgen(lock: &str) -> Option<String> {
         }
         if let Some(value) = line.strip_prefix("name = ") {
             name_matches = value.trim_matches('"') == "wasm-bindgen";
-        } else if name_matches
-            && let Some(value) = line.strip_prefix("version = ")
-        {
+        } else if name_matches && let Some(value) = line.strip_prefix("version = ") {
             return Some(value.trim_matches('"').to_string());
         }
     }
@@ -113,11 +111,7 @@ pub fn locked_wasm_bindgen(lock: &str) -> Option<String> {
 /// `.is_dir()` is always true and a skip under it is dead code. `web/dist/` is *not* committed at all,
 /// so a checkout where `dist` has never run fails this honestly instead of passing quietly.
 pub fn missing_assets(root: &Path, _bundle: &Path) -> Vec<String> {
-    REQUIRED
-        .iter()
-        .filter(|relative| !root.join(relative).is_file())
-        .map(|relative| relative.to_string())
-        .collect()
+    REQUIRED.iter().filter(|relative| !root.join(relative).is_file()).map(|relative| relative.to_string()).collect()
 }
 
 /// **The two inferred names, checked rather than trusted.** `wasm-bindgen` derives `tipsy_web.js` and
@@ -242,10 +236,7 @@ pub fn run(root: &Path) -> Result<(), String> {
                 println!("xtask: {} is ready", vendor.display());
             }
             Step::BuildWasm => {
-                cargo(
-                    &["build", "--target", "wasm32-unknown-unknown", "-p", "tipsy-web", "--release"],
-                    &target,
-                )?;
+                cargo(&["build", "--target", "wasm32-unknown-unknown", "-p", "tipsy-web", "--release"], &target)?;
                 ensure_wasm_built(&wasm_artifact(&target))?;
             }
             Step::Bindgen => {
@@ -293,11 +284,7 @@ fn run_tool(program: &str, args: &[&str]) -> Result<(), String> {
         .args(args)
         .status()
         .map_err(|error| format!("{program} could not be started: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} {} exited with {status}", args.join(" ")))
-    }
+    if status.success() { Ok(()) } else { Err(format!("{program} {} exited with {status}", args.join(" "))) }
 }
 
 /// `cargo`, with `--target-dir` explicit so the artifact's path is the one [`wasm_artifact`] computes
@@ -337,20 +324,14 @@ mod tests {
     fn the_target_directory_is_the_environments_or_the_workspaces_own() {
         let root = Path::new("E:/w/tipsy-assistant");
         assert_eq!(target_dir(root, None), root.join("target"));
-        assert_eq!(
-            target_dir(root, Some("E:/w/.target-sandbox".into())),
-            PathBuf::from("E:/w/.target-sandbox")
-        );
+        assert_eq!(target_dir(root, Some("E:/w/.target-sandbox".into())), PathBuf::from("E:/w/.target-sandbox"));
         assert_eq!(target_dir(root, Some("".into())), root.join("target"), "an empty value is not a directory");
     }
 
     #[test]
     fn the_wasm_artifact_is_cargos_path_for_the_crate() {
         let target = Path::new("E:/w/.target-sandbox");
-        assert_eq!(
-            wasm_artifact(target),
-            target.join("wasm32-unknown-unknown").join("release").join("tipsy_web.wasm")
-        );
+        assert_eq!(wasm_artifact(target), target.join("wasm32-unknown-unknown").join("release").join("tipsy_web.wasm"));
     }
 
     #[test]
@@ -454,8 +435,8 @@ version = "0.2.129"
         // gate that read them as a name mismatch would refuse every real run.
         std::fs::write(bundle.join("tipsy_web.d.ts"), b"").unwrap();
         std::fs::write(bundle.join("tipsy_web_bg.wasm.d.ts"), b"").unwrap();
-        let error = check_bundle_names(root, &bundle)
-            .expect_err("`tipsy_web_bg.wasm` is the WASM, and it was not written");
+        let error =
+            check_bundle_names(root, &bundle).expect_err("`tipsy_web_bg.wasm` is the WASM, and it was not written");
         assert!(error.contains("web/dist/tipsy_web_bg.wasm"), "the inferred name that is absent: {error}");
         assert!(error.contains("tipsy_web.js"), "and what is there instead: {error}");
 
@@ -502,7 +483,9 @@ version = "0.2.129"
         let probe = std::process::Command::new("wasm-bindgen").arg("--version").output();
         match probe {
             Err(error) => {
-                println!("skipping: `wasm-bindgen` is not on PATH ({error}). Install it with `cargo install -f wasm-bindgen-cli --version <the version Cargo.lock pins>`");
+                println!(
+                    "skipping: `wasm-bindgen` is not on PATH ({error}). Install it with `cargo install -f wasm-bindgen-cli --version <the version Cargo.lock pins>`"
+                );
                 return;
             }
             Ok(output) => {
@@ -538,10 +521,8 @@ version = "0.2.129"
         // repository's `web/` under `/assets/`, so `/assets/dist/tipsy_web.js` is
         // `web/dist/tipsy_web.js`, one of the files `REQUIRED` names. Renaming either side — the
         // `--out-dir`, the page's import or `REQUIRED` — breaks this before it breaks a browser.
-        let path = import
-            .split('"')
-            .nth(1)
-            .unwrap_or_else(|| panic!("the import line carries its path in quotes: {import}"));
+        let path =
+            import.split('"').nth(1).unwrap_or_else(|| panic!("the import line carries its path in quotes: {import}"));
         assert!(
             REQUIRED.contains(&format!("web{}", path.trim_start_matches("/assets")).as_str()),
             "the page imports {path}, which must be `web/` plus the `--out-dir`: {import}"

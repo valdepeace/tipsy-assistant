@@ -93,10 +93,10 @@ impl EventError {
 /// / `response.usage`, which nothing in this plan acts on yet.
 pub fn map(frame: &str) -> Result<Action, EventError> {
     let value: Value = serde_json::from_str(frame).map_err(|error| EventError::NotJson(error.to_string()))?;
-    let kind = value.get("type").and_then(Value::as_str).ok_or_else(|| EventError::MissingField {
-        kind: "<frame>".into(),
-        name: "type",
-    })?;
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| EventError::MissingField { kind: "<frame>".into(), name: "type" })?;
 
     match kind {
         // The first server event and the acknowledgement of our own `session.update`.
@@ -112,8 +112,7 @@ pub fn map(frame: &str) -> Result<Action, EventError> {
         // wrong type is the typed error every other read raises.
         "response.output_audio.delta" => {
             let delta = field(&value, kind, "delta")?;
-            let pcm = decode_base64(delta)
-                .map_err(|detail| EventError::BadAudio { kind: kind.to_string(), detail })?;
+            let pcm = decode_base64(delta).map_err(|detail| EventError::BadAudio { kind: kind.to_string(), detail })?;
             let item_id = optional_field(&value, kind, "item_id")?.map(str::to_string);
             // An index the frame does not carry, or one too large for a `u32`, is the note's own
             // fixed `0`: the note says `content_index` is `0`, so there is nothing to guess.
@@ -140,16 +139,18 @@ pub fn map(frame: &str) -> Result<Action, EventError> {
         "input_audio_buffer.speech_stopped" => Ok(Action::SpeechStopped),
 
         "response.done" => {
-            let status = value.pointer("/response/status").and_then(Value::as_str).ok_or_else(|| {
-                EventError::MissingField { kind: kind.to_string(), name: "response.status" }
-            })?;
+            let status = value
+                .pointer("/response/status")
+                .and_then(Value::as_str)
+                .ok_or_else(|| EventError::MissingField { kind: kind.to_string(), name: "response.status" })?;
             Ok(Action::ResponseDone { status: status.to_string() })
         }
 
         "error" => {
-            let message = value.pointer("/error/message").and_then(Value::as_str).ok_or_else(|| {
-                EventError::MissingField { kind: kind.to_string(), name: "error.message" }
-            })?;
+            let message = value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .ok_or_else(|| EventError::MissingField { kind: kind.to_string(), name: "error.message" })?;
             Ok(Action::ServerError { message: message.to_string() })
         }
 
@@ -214,11 +215,7 @@ pub fn base64_encode(bytes: &[u8]) -> String {
         let third = u32::from(*chunk.get(2).unwrap_or(&0));
         out.push(TABLE[(first >> 2) as usize] as char);
         out.push(TABLE[(((first & 0b11) << 4) | (second >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(((second & 0b1111) << 2) | (third >> 6)) as usize] as char
-        } else {
-            '='
-        });
+        out.push(if chunk.len() > 1 { TABLE[(((second & 0b1111) << 2) | (third >> 6)) as usize] as char } else { '=' });
         out.push(if chunk.len() > 2 { TABLE[(third & 0b11_1111) as usize] as char } else { '=' });
     }
     out
@@ -252,10 +249,11 @@ fn field<'a>(value: &'a Value, kind: &str, name: &'static str) -> Result<&'a str
 fn optional_field<'a>(value: &'a Value, kind: &str, name: &'static str) -> Result<Option<&'a str>, EventError> {
     match value.get(name) {
         None => Ok(None),
-        Some(found) => found
-            .as_str()
-            .map(Some)
-            .ok_or_else(|| EventError::NotAString { kind: kind.to_string(), name, found: json_kind(found) }),
+        Some(found) => found.as_str().map(Some).ok_or_else(|| EventError::NotAString {
+            kind: kind.to_string(),
+            name,
+            found: json_kind(found),
+        }),
     }
 }
 
@@ -299,11 +297,13 @@ mod tests {
 
     /// Confirmed: `item_id`, `audio_start_ms` (step 5). The payload carries more than the mapping
     /// reads, which is the point — stopping playback needs no field at all.
-    const SPEECH_STARTED: &str = r#"{"type":"input_audio_buffer.speech_started","event_id":"evt_6","item_id":"item_0","audio_start_ms":1200}"#;
+    const SPEECH_STARTED: &str =
+        r#"{"type":"input_audio_buffer.speech_started","event_id":"evt_6","item_id":"item_0","audio_start_ms":1200}"#;
 
     /// Confirmed: `item_id`, `audio_end_ms` (step 6). The turn-end half of the pair above; the
     /// mapping does not act on it, but it is a *known* type and must be read as one.
-    const SPEECH_STOPPED: &str = r#"{"type":"input_audio_buffer.speech_stopped","event_id":"evt_6b","item_id":"item_0","audio_end_ms":2600}"#;
+    const SPEECH_STOPPED: &str =
+        r#"{"type":"input_audio_buffer.speech_stopped","event_id":"evt_6b","item_id":"item_0","audio_end_ms":2600}"#;
 
     /// Confirmed: `response.status` (`completed`/`cancelled`), `response.output[]` and `response.usage`
     /// (step 17). The usage is carried by the payload and deliberately not mapped.
@@ -329,10 +329,7 @@ mod tests {
             Action::SessionConfigured { session_id: Some("sess_fixture".into()) }
         );
         // The session object is optional in the frame: an id we cannot read is not a failure.
-        assert_eq!(
-            map(r#"{"type":"session.updated"}"#).unwrap(),
-            Action::SessionConfigured { session_id: None }
-        );
+        assert_eq!(map(r#"{"type":"session.updated"}"#).unwrap(), Action::SessionConfigured { session_id: None });
         assert_eq!(
             map(r#"{"type":"session.updated","session":[]}"#).unwrap(),
             Action::SessionConfigured { session_id: None }
@@ -415,12 +412,9 @@ mod tests {
     fn a_known_event_with_a_malformed_payload_is_a_typed_error() {
         // The inferred audio payload is the riskiest shape in this plan: the message names the event
         // and the field, so a live mismatch is a readable log line rather than a panic.
-        let error = map(r#"{"type":"response.output_audio.delta","response_id":"resp_1","item_id":"item_1"}"#)
-            .unwrap_err();
-        assert_eq!(
-            error,
-            EventError::MissingField { kind: "response.output_audio.delta".into(), name: "delta" }
-        );
+        let error =
+            map(r#"{"type":"response.output_audio.delta","response_id":"resp_1","item_id":"item_1"}"#).unwrap_err();
+        assert_eq!(error, EventError::MissingField { kind: "response.output_audio.delta".into(), name: "delta" });
         assert_eq!(error.to_string(), "response.output_audio.delta carried no `delta`");
         assert_eq!(error.code(), ErrorCode::BadResponse);
 
@@ -456,12 +450,8 @@ mod tests {
         // shape a real server may send — but a name that is present and not a string is the same
         // malformed payload as `delta`: the read goes through the `field` family (`optional_field`),
         // so it is a readable error rather than an absence the mapping invented.
-        let error = map(r#"{"type":"response.output_audio.delta","item_id":7,"delta":"AAECAw=="}"#)
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "response.output_audio.delta carried `item_id` as a number, not a string"
-        );
+        let error = map(r#"{"type":"response.output_audio.delta","item_id":7,"delta":"AAECAw=="}"#).unwrap_err();
+        assert_eq!(error.to_string(), "response.output_audio.delta carried `item_id` as a number, not a string");
         assert_eq!(error.code(), ErrorCode::BadResponse);
     }
 
@@ -477,10 +467,7 @@ mod tests {
             (r#"{"type":"response.done","response":"cancelled"}"#, "carried no `response.status`"),
             (r#"{"type":"response.output_audio.delta","delta":null}"#, "carried `delta` as null"),
             (r#"{"type":"response.output_audio.delta","delta":[]}"#, "carried `delta` as an array"),
-            (
-                r#"{"type":"response.output_audio.delta","delta":{}}"#,
-                "carried `delta` as an object",
-            ),
+            (r#"{"type":"response.output_audio.delta","delta":{}}"#, "carried `delta` as an object"),
             // A truncated frame: JSON that stops mid-object, which is what a socket cut in half
             // leaves behind.
             (r#"{"type":"response.done","response":{"sta"#, "the frame is not JSON"),

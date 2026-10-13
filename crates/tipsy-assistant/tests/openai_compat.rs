@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use tipsy_assistant::audio::pcm::Pcm;
-use tipsy_assistant::providers::openai_compat::{speech_quirks, OpenAiCompat, SpeechFormat};
+use tipsy_assistant::providers::openai_compat::{OpenAiCompat, SpeechFormat, speech_quirks};
 use tipsy_assistant::providers::{
     ChatMessage, ChatProvider, ChatRequest, ProviderError, SpeechProvider, SpeechRequest, TranscribeProvider,
 };
@@ -216,10 +216,8 @@ async fn speech_errors_are_mapped() {
         .mount(&server)
         .await;
     let p = OpenAiCompat::new(format!("{}/v1", server.uri()), "x/y", None);
-    let err = p
-        .synthesize(SpeechRequest { text: "a".into(), instructions: String::new(), voice: None })
-        .await
-        .unwrap_err();
+    let err =
+        p.synthesize(SpeechRequest { text: "a".into(), instructions: String::new(), voice: None }).await.unwrap_err();
     assert!(matches!(err, ProviderError::BadResponse(m) if m.contains("only supports")));
 }
 

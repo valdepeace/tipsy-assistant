@@ -153,10 +153,7 @@ fn draw_header(frame: &mut Frame, state: &UiState, title: &str, dirty: Option<&s
     let [area, _, _, _] = Layout::vertical([Length(1), Min(10), Length(3), Length(1)]).areas(frame.area());
     let (line, mode, gear) = header(state, area, title, dirty);
     frame.render_widget(line, area);
-    [mode, gear]
-        .into_iter()
-        .filter(|hit| !hit.area.is_empty() && area.intersection(hit.area) == hit.area)
-        .collect()
+    [mode, gear].into_iter().filter(|hit| !hit.area.is_empty() && area.intersection(hit.area) == hit.area).collect()
 }
 
 /// One header row: the line to draw, and the two clickable areas on it.
@@ -236,9 +233,8 @@ fn header(state: &UiState, area: Rect, title: &str, dirty: Option<&str>) -> (Lin
     // a ready word, or a notice the screen itself repeats — takes what is left of the room.
     let used = drawn_width(&badge) + drawn_width(&gap);
     let room = usize::from(mode_x.saturating_sub(area.x));
-    let dirty = dirty
-        .map(|span| cut_to(span.content.as_ref(), span.style, room.saturating_sub(used)))
-        .unwrap_or_default();
+    let dirty =
+        dirty.map(|span| cut_to(span.content.as_ref(), span.style, room.saturating_sub(used))).unwrap_or_default();
     let dirty_w = drawn_width(&dirty);
     let status = cut_to(status.content.as_ref(), status.style, room.saturating_sub(used + dirty_w));
     let padding = room.saturating_sub(used + dirty_w + drawn_width(&status));
@@ -306,11 +302,7 @@ fn draw_clock(frame: &mut Frame, state: &UiState, clock: &ClockView, area: Rect)
         UiLanguage::Es => format!("{weekday}, {} de {month}", clock.day),
         UiLanguage::En => format!("{weekday}, {month} {}", clock.day),
     };
-    let text = vec![
-        Line::from(clock.time.clone()).fg(Color::White).bold(),
-        Line::from(""),
-        Line::from(date).fg(CYAN),
-    ];
+    let text = vec![Line::from(clock.time.clone()).fg(Color::White).bold(), Line::from(""), Line::from(date).fg(CYAN)];
     frame.render_widget(Paragraph::new(text).alignment(Alignment::Center).block(panel(strings.local_time)), area);
 }
 
@@ -468,7 +460,11 @@ fn take_row(row: &mut Vec<Piece>) -> Line<'static> {
     if let Some(last) = row.last_mut() {
         last.text = last.text.trim_end().to_string();
     }
-    let spans: Vec<Span> = row.drain(..).filter(|piece| !piece.text.is_empty()).map(|piece| Span::styled(piece.text, piece.style)).collect();
+    let spans: Vec<Span> = row
+        .drain(..)
+        .filter(|piece| !piece.text.is_empty())
+        .map(|piece| Span::styled(piece.text, piece.style))
+        .collect();
     Line::from(spans)
 }
 
@@ -528,10 +524,7 @@ fn draw_net(frame: &mut Frame, state: &UiState, area: Rect) {
                 .labels(["-2 min".fg(DIM), "ahora".fg(DIM)]),
         )
         .y_axis(
-            Axis::default()
-                .bounds([0.0, top])
-                .style(Style::new().fg(DIM))
-                .labels(["0".fg(DIM), human(top).fg(DIM)]),
+            Axis::default().bounds([0.0, top]).style(Style::new().fg(DIM)).labels(["0".fg(DIM), human(top).fg(DIM)]),
         )
         .legend_position(Some(LegendPosition::TopLeft));
     frame.render_widget(chart, area);
@@ -577,27 +570,18 @@ pub(crate) fn draw_core(frame: &mut Frame, state: &UiState, area: Rect) {
     let level = state.voice_level() as f64;
     let speed = if state.busy() { 2.2 } else { 0.5 };
     let (xr, yr) = ring_bounds(area);
-    let canvas = Canvas::default()
-        .marker(Marker::Braille)
-        .x_bounds([-xr, xr])
-        .y_bounds([-yr, yr])
-        .paint(move |ctx| {
-            ctx.draw(&Circle { x: 0.0, y: 0.0, radius: 46.0, color: DIM });
-            for (r, n, dir, color) in [(40.0, 3, 1.0, CYAN), (33.0, 6, -1.6, DIM), (27.0, 2, 2.4, GOLD)] {
-                for k in 0..n {
-                    let a0 = t * speed * dir + k as f64 * TAU / n as f64;
-                    arc(ctx, r, a0, a0 + TAU / (n as f64 * 2.0), color);
-                }
+    let canvas = Canvas::default().marker(Marker::Braille).x_bounds([-xr, xr]).y_bounds([-yr, yr]).paint(move |ctx| {
+        ctx.draw(&Circle { x: 0.0, y: 0.0, radius: 46.0, color: DIM });
+        for (r, n, dir, color) in [(40.0, 3, 1.0, CYAN), (33.0, 6, -1.6, DIM), (27.0, 2, 2.4, GOLD)] {
+            for k in 0..n {
+                let a0 = t * speed * dir + k as f64 * TAU / n as f64;
+                arc(ctx, r, a0, a0 + TAU / (n as f64 * 2.0), color);
             }
-            let pulse = 10.0 + 12.0 * level;
-            ctx.draw(&Circle {
-                x: 0.0,
-                y: 0.0,
-                radius: pulse,
-                color: if level > 0.05 { Color::White } else { CYAN },
-            });
-            ctx.print(-2.0, 2.0, Span::from("◉").fg(Color::White).bold());
-        });
+        }
+        let pulse = 10.0 + 12.0 * level;
+        ctx.draw(&Circle { x: 0.0, y: 0.0, radius: pulse, color: if level > 0.05 { Color::White } else { CYAN } });
+        ctx.print(-2.0, 2.0, Span::from("◉").fg(Color::White).bold());
+    });
     frame.render_widget(canvas, area);
 }
 
@@ -650,16 +634,8 @@ fn draw_system(frame: &mut Frame, state: &UiState, area: Rect) {
     if inner.is_empty() {
         return;
     }
-    let [cpu, ram, _, net_in, net_out, _, history] = Layout::vertical([
-        Length(1),
-        Length(1),
-        Length(1),
-        Length(1),
-        Length(1),
-        Length(1),
-        Min(1),
-    ])
-    .areas(inner);
+    let [cpu, ram, _, net_in, net_out, _, history] =
+        Layout::vertical([Length(1), Length(1), Length(1), Length(1), Length(1), Length(1), Min(1)]).areas(inner);
 
     frame.render_widget(gauge("CPU", state.cpu.clamp(0.0, 100.0) as u64), cpu);
     frame.render_widget(gauge("RAM", state.ram.clamp(0.0, 100.0) as u64), ram);
@@ -680,15 +656,9 @@ fn draw_system(frame: &mut Frame, state: &UiState, area: Rect) {
 fn draw_input(frame: &mut Frame, state: &UiState, area: Rect) {
     let strings = state.strings();
     let text = if state.input.is_empty() {
-        Line::from(vec![
-            Span::from("❯ ").fg(CYAN),
-            Span::from(strings.placeholder).fg(DIM).italic(),
-        ])
+        Line::from(vec![Span::from("❯ ").fg(CYAN), Span::from(strings.placeholder).fg(DIM).italic()])
     } else {
-        Line::from(vec![
-            Span::from("❯ ").fg(CYAN),
-            Span::from(state.input.clone()).fg(Color::White),
-        ])
+        Line::from(vec![Span::from("❯ ").fg(CYAN), Span::from(state.input.clone()).fg(Color::White)])
     };
     frame.render_widget(Paragraph::new(text).block(panel(strings.ask)), area);
     if area.width >= 2 && area.height >= 2 {
@@ -702,10 +672,7 @@ fn panel(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(DIM))
-        .title(Line::from(vec![
-            Span::from(format!(" {title} ")).fg(CYAN).bold(),
-            Span::from("● ").fg(Color::Green),
-        ]))
+        .title(Line::from(vec![Span::from(format!(" {title} ")).fg(CYAN).bold(), Span::from("● ").fg(Color::Green)]))
 }
 
 fn gauge(label: &str, pct: u64) -> Gauge<'static> {
@@ -754,10 +721,7 @@ mod tests {
     }
 
     fn rendered(lines: &[Line<'_>]) -> Vec<String> {
-        lines
-            .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
-            .collect()
+        lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()).collect()
     }
 
     #[test]
@@ -849,9 +813,6 @@ mod tests {
             let _ = draw(f, &s, &clock, "Compae · el asistente de garrafón");
         })
         .unwrap();
-        assert!(
-            !header_row(&term).contains(es().cfg_dirty),
-            "an untouched form must not be marked unsaved"
-        );
+        assert!(!header_row(&term).contains(es().cfg_dirty), "an untouched form must not be marked unsaved");
     }
 }

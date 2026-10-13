@@ -2,13 +2,11 @@
 
 use std::collections::VecDeque;
 
-use tipsy_protocol::{
-    AssistantState, Command, ErrorCode, Event, ListeningMode, ProfileView, UiLanguage,
-};
+use tipsy_protocol::{AssistantState, Command, ErrorCode, Event, ListeningMode, ProfileView, UiLanguage};
 
 use crate::config_form::{ConfigAction, ConfigEffect, ConfigForm};
 use crate::render::Hit;
-use crate::strings::{strings, Strings};
+use crate::strings::{Strings, strings};
 
 const NOTICE_MS: u64 = 3000;
 const HISTORY_LEN: usize = 120;
@@ -335,15 +333,11 @@ impl UiState {
             // key keeps one translation for both paths.
             ConfigAction::Save => self.config_key(KeyInput::F(4)),
             ConfigAction::Test => self.config_key(KeyInput::F(2)),
-            ConfigAction::RegenerateToken => {
-                self.config_key(KeyInput::Char(crate::config_form::REGENERATE_KEY))
-            }
+            ConfigAction::RegenerateToken => self.config_key(KeyInput::Char(crate::config_form::REGENERATE_KEY)),
             // The header's two controls, and the screen's door: a click on either toggles the screen
             // the way `F9` does. The door is the state's, not the form's — `Toggle` names it here so
             // that a click on the gear cannot be read as the keystroke of a screen control.
-            ConfigAction::Open | ConfigAction::Close | ConfigAction::Toggle => {
-                self.toggle_config_form()
-            }
+            ConfigAction::Open | ConfigAction::Close | ConfigAction::Toggle => self.toggle_config_form(),
             // Everything else the screen draws names a row or a tab, and the form decides what that
             // row's own action is: a buffer, a switch, a Test, a profile.
             _ => {
@@ -481,10 +475,7 @@ impl UiState {
                 // not available". The notice slot holds one message, so this only ever replaces a
                 // notice it left itself — a warning from the session keeps the screen.
                 if !self.web_bundle
-                    && self
-                        .notice
-                        .as_ref()
-                        .is_none_or(|(text, _)| text == self.strings().web_unavailable)
+                    && self.notice.as_ref().is_none_or(|(text, _)| text == self.strings().web_unavailable)
                 {
                     self.notify(self.strings().web_unavailable);
                 }
@@ -525,11 +516,7 @@ impl UiState {
                 }
             }
             Event::Heard { text } => {
-                let at = self
-                    .log
-                    .iter()
-                    .rposition(|e| e.pending && e.who == Who::Assistant)
-                    .unwrap_or(self.log.len());
+                let at = self.log.iter().rposition(|e| e.pending && e.who == Who::Assistant).unwrap_or(self.log.len());
                 self.log.insert(at, LogEntry::user(text.clone()));
             }
             Event::ReplyDelta { text } => {
@@ -710,7 +697,9 @@ impl UiState {
                 vec![UiAction::Send(Command::Reset)]
             }
             KeyInput::F(2) => match self.selected {
-                Some(i) if self.log.get(i).is_some_and(|e| e.who == Who::Assistant && !e.pending) => vec![UiAction::Replay(i)],
+                Some(i) if self.log.get(i).is_some_and(|e| e.who == Who::Assistant && !e.pending) => {
+                    vec![UiAction::Replay(i)]
+                }
                 _ => Vec::new(),
             },
             KeyInput::Left | KeyInput::Right | KeyInput::F(6) => {
@@ -1232,10 +1221,7 @@ mod tests {
         assert!(s.config_form.as_ref().is_some_and(|f| f.dirty), "and the form knows there is something to save");
 
         // The token generator lives on the native side too: the screen can only ask for it.
-        assert_eq!(
-            s.on_key(KeyInput::Char('\u{12}')),
-            vec![UiAction::Config(ConfigAction::RegenerateToken)]
-        );
+        assert_eq!(s.on_key(KeyInput::Char('\u{12}')), vec![UiAction::Config(ConfigAction::RegenerateToken)]);
 
         // A key that raises no effect is still nobody's business but the form's: typing inside a
         // buffer changes the buffer, and asks the client for nothing.
@@ -1287,21 +1273,13 @@ mod tests {
         assert!(s.config_form.is_some(), "the screen is still open");
 
         // A click on the second profile row makes it the active one, which no key could do before.
-        let row = Hit {
-            area: Rect::new(4, 4, 20, 1),
-            key: KeyInput::Enter,
-            action: Some(ConfigAction::FocusRow(1)),
-        };
+        let row = Hit { area: Rect::new(4, 4, 20, 1), key: KeyInput::Enter, action: Some(ConfigAction::FocusRow(1)) };
         assert_eq!(s.on_hit(&row), Vec::new());
         assert_eq!(s.config_form.as_ref().unwrap().active_profile, "meigo");
 
         // And the Save button means what Save means: the effect comes back as an action for the
         // client, exactly as it does from `Ctrl+S`.
-        let save = Hit {
-            area: Rect::new(1, 20, 4, 1),
-            key: KeyInput::F(4),
-            action: Some(ConfigAction::Save),
-        };
+        let save = Hit { area: Rect::new(1, 20, 4, 1), key: KeyInput::F(4), action: Some(ConfigAction::Save) };
         assert_eq!(s.on_hit(&save), vec![UiAction::Config(ConfigAction::Save)]);
     }
 
@@ -1691,4 +1669,3 @@ mod tests {
         assert_eq!(passed.login.as_ref().unwrap().line, LoginLine::Passed);
     }
 }
-

@@ -57,17 +57,15 @@ pub fn form_of(config: &Config) -> ConfigForm {
     form.login = LoginForm {
         enabled: config.login.enabled,
         voice: config.login.voice,
-        allowed: config.login
+        allowed: config
+            .login
             .allowed
             .iter()
             .map(|entry| AllowedPersonForm { name: entry.name.clone(), keywords: entry.keywords.clone() })
             .collect(),
     };
-    form.server = ServerForm {
-        bind: config.server.bind.clone(),
-        lan: config.server.lan,
-        token: config.server.token.clone(),
-    };
+    form.server =
+        ServerForm { bind: config.server.bind.clone(), lan: config.server.lan, token: config.server.token.clone() };
     form.notice = None;
     form.dirty = false;
     form.mark_filled();
@@ -91,11 +89,7 @@ pub fn config_from(form: &ConfigForm) -> Result<Config, String> {
     let profiles = form.profiles.iter().map(profile_from).collect();
     Ok(Config {
         active_profile: form.active_profile.clone(),
-        server: ServerConfig {
-            bind: form.server.bind.clone(),
-            lan: form.server.lan,
-            token: form.server.token.clone(),
-        },
+        server: ServerConfig { bind: form.server.bind.clone(), lan: form.server.lan, token: form.server.token.clone() },
         listening: ListeningConfig {
             mode: form.listening.mode,
             silence_ms: number("silence_ms", &form.listening.silence_ms)?,
@@ -342,7 +336,8 @@ mod tests {
         let mut config = Config::default();
         config.login.enabled = false;
         config.login.voice = false;
-        config.login.allowed = vec![LoginEntry { name: "Andrés".into(), keywords: vec!["andres".into(), "core".into()] }];
+        config.login.allowed =
+            vec![LoginEntry { name: "Andrés".into(), keywords: vec!["andres".into(), "core".into()] }];
 
         let form = form_of(&config);
         let back = config_from(&form).expect("an untouched form saves");
@@ -473,10 +468,7 @@ mod tests {
         // The sections, and the fields of the two the rule is about, so a new field cannot be added
         // in silence. Sorted, because `serde_json`'s map is ordered by key and not by this file.
         let sections = sorted_keys(&value);
-        assert_eq!(
-            sections,
-            ["active_profile", "listening", "login", "profiles", "providers", "realtime", "server"]
-        );
+        assert_eq!(sections, ["active_profile", "listening", "login", "profiles", "providers", "realtime", "server"]);
         assert_eq!(sorted_keys(&value["server"]), ["bind", "lan"]);
         for row in value["providers"].as_array().expect("the rows are a list") {
             assert_eq!(sorted_keys(row), ["capability", "kind", "model"], "{row}");

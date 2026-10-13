@@ -14,22 +14,22 @@ use ratatui::crossterm::execute;
 use tipsy_protocol::{
     Capability, ClientConfigView, ClientKind, Command, Event, Frame, PROTOCOL_VERSION, ToClient, ToServer,
 };
-use tipsy_ui::{
-    ClockView, ConfigEffect, ConfigForm, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw,
-};
 use tipsy_ui::policy::{
     MicRoute, flush_on_interrupt, hit_at, interrupts_playback, mic_route, speech_rate, starts_turn, takes_the_floor,
     test_interrupts_playback,
+};
+use tipsy_ui::{
+    ClockView, ConfigEffect, ConfigForm, Hit, KeyInput, LoginLine, LoginPhase, NoticeKind, UiAction, UiState, draw,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::device::{Mic, Player};
 use crate::audio::pcm::{envelope, i16_to_f32, rms};
+use crate::config::Config;
 use crate::config::form::{config_from, form_of, provider_config};
 use crate::config::store;
-use crate::config::Config;
-use crate::keys::{env_var_name, KeyResolver};
-use crate::providers::{build_one, build_providers, ProviderSlot};
+use crate::keys::{KeyResolver, env_var_name};
+use crate::providers::{ProviderSlot, build_one, build_providers};
 use crate::realtime::{Call, CallSetup, Heard};
 use crate::server::Hub;
 use crate::session::{SessionEnds, SessionPolicy};

@@ -21,8 +21,8 @@ use tipsy_assistant::server::Hub;
 use tipsy_assistant::session::{SessionPolicy, spawn_session, spawn_with_events};
 use tipsy_assistant::vad::{Earshot, Scorer, VadEvent, VadState};
 use tipsy_protocol::{
-    AssistantState, ClientKind, Command, ErrorCode, Event, Frame, ListeningMode, PROTOCOL_VERSION, ToClient,
-    ToServer, UiLanguage,
+    AssistantState, ClientKind, Command, ErrorCode, Event, Frame, ListeningMode, PROTOCOL_VERSION, ToClient, ToServer,
+    UiLanguage,
 };
 use tokio::sync::mpsc;
 
@@ -157,11 +157,8 @@ fn session_with_policy(
     transcript: &'static str,
     policy: SessionPolicy,
 ) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>, Arc<FakeTranscribe>, u64) {
-    let transcribe = Arc::new(FakeTranscribe {
-        text: transcript,
-        languages: Mutex::new(Vec::new()),
-        pcms: Mutex::new(Vec::new()),
-    });
+    let transcribe =
+        Arc::new(FakeTranscribe { text: transcript, languages: Mutex::new(Vec::new()), pcms: Mutex::new(Vec::new()) });
     let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
     let config = config();
     let hub = hub_on(&config, providers.clone());
@@ -172,8 +169,7 @@ fn session_with_policy(
     // what the test is about; the two token refusals keep the harness's handshake and send their own,
     // and send it first, because a second `Hello` after an admitted one ends the session.
     if !policy.require_token {
-        tx.send(ToServer::Command(hello(None, PROTOCOL_VERSION)))
-            .expect("the session must still be listening");
+        tx.send(ToServer::Command(hello(None, PROTOCOL_VERSION))).expect("the session must still be listening");
     }
     (tx, rx, transcribe, session_id)
 }
@@ -186,11 +182,8 @@ fn session_on_hub(
     speech: Arc<FakeSpeech>,
     transcript: &'static str,
 ) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>) {
-    let transcribe = Arc::new(FakeTranscribe {
-        text: transcript,
-        languages: Mutex::new(Vec::new()),
-        pcms: Mutex::new(Vec::new()),
-    });
+    let transcribe =
+        Arc::new(FakeTranscribe { text: transcript, languages: Mutex::new(Vec::new()), pcms: Mutex::new(Vec::new()) });
     let providers = ProviderSlot::new(Providers { chat, speech, transcribe });
     let hub = detached_hub(config(), providers);
     let ends = hub.spawn(SessionPolicy::local());
@@ -211,11 +204,7 @@ fn session(
 
 /// The only message that may precede any other, and the one the whole handshake is judged from.
 fn hello(token: Option<&str>, protocol_version: u32) -> Command {
-    Command::Hello {
-        token: token.map(str::to_string),
-        client: ClientKind::Tui,
-        protocol_version,
-    }
+    Command::Hello { token: token.map(str::to_string), client: ClientKind::Tui, protocol_version }
 }
 
 /// Everything the session sends until it closes its channel, or `wait_ms` passes with it still open.
@@ -313,8 +302,7 @@ async fn next_error(rx: &mut mpsc::UnboundedReceiver<ToClient>, wait_ms: u64) ->
 /// session that has ended by the time the last message has been read.
 #[tokio::test]
 async fn a_hello_with_the_wrong_protocol_version_is_refused_before_the_welcome() {
-    let (tx, mut rx, _, _) =
-        session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", SessionPolicy::local());
+    let (tx, mut rx, _, _) = session_with_policy(FakeChat::new(vec![]), FakeSpeech::new(), "", SessionPolicy::local());
     send(&tx, hello(None, PROTOCOL_VERSION + 1));
 
     let (code, message, recoverable) = next_error(&mut rx, 1000).await;
@@ -377,10 +365,7 @@ async fn the_right_version_and_token_are_welcomed() {
     send(&tx, hello(Some("s3cret"), PROTOCOL_VERSION));
 
     let first = next_matching(&mut rx, |_: &ToClient| true, 500).await;
-    assert!(
-        matches!(first, ToClient::Event(Event::Welcome { .. })),
-        "the accepted handshake is served: {first:?}"
-    );
+    assert!(matches!(first, ToClient::Event(Event::Welcome { .. })), "the accepted handshake is served: {first:?}");
     // The greeting turn then runs, which is the proof that nothing about a valid handshake changed.
     next_matching(&mut rx, is_done, 500).await;
 }
@@ -400,7 +385,10 @@ async fn a_first_message_that_is_not_a_hello_is_refused() {
 
     let seen = until_closed(&mut rx, 1000).await;
     assert!(!seen.iter().any(|m| matches!(m, ToClient::Event(Event::Welcome { .. }))), "{seen:#?}");
-    assert!(!seen.iter().any(|m| matches!(m, ToClient::Event(Event::Reply { .. }))), "the question was never asked: {seen:#?}");
+    assert!(
+        !seen.iter().any(|m| matches!(m, ToClient::Event(Event::Reply { .. }))),
+        "the question was never asked: {seen:#?}"
+    );
 }
 
 /// F2's consequence, and the ceiling that replaces what the route's `?token=` gate used to be: with
@@ -462,14 +450,9 @@ async fn welcome_then_greeting() {
             // `assert!(web_bundle)` would be red in a fresh clone and green only in a worktree where
             // `cargo run -p xtask -- dist` has run — the Phase 2 lesson, exactly. The property is
             // asserted instead, and the line says which side of it this tree is on.
-            let page = tipsy_assistant::server::assets::asset(
-                tipsy_assistant::server::assets::PAGE_CLIENT,
-            )
-            .is_some();
-            let script = tipsy_assistant::server::assets::asset(
-                tipsy_assistant::server::assets::PAGE_CLIENT_SCRIPT,
-            )
-            .is_some();
+            let page = tipsy_assistant::server::assets::asset(tipsy_assistant::server::assets::PAGE_CLIENT).is_some();
+            let script =
+                tipsy_assistant::server::assets::asset(tipsy_assistant::server::assets::PAGE_CLIENT_SCRIPT).is_some();
             assert_eq!(
                 web_bundle,
                 page && script,
@@ -524,16 +507,8 @@ async fn listen_stop_transcribes_buffered_mic_audio() {
 
     let pcms = transcribe.pcms.lock().unwrap();
     assert_eq!(pcms.len(), 1, "ListenStop must transcribe once, and only once: {pcms:#?}");
-    assert_eq!(
-        pcms[0].samples.len(),
-        3200,
-        "the ten 320-sample mic frames must reach the transcriber: {pcms:#?}"
-    );
-    assert_eq!(
-        pcms[0].sample_rate,
-        16000,
-        "mic audio must be resampled to 16 kHz before transcription: {pcms:#?}"
-    );
+    assert_eq!(pcms[0].samples.len(), 3200, "the ten 320-sample mic frames must reach the transcriber: {pcms:#?}");
+    assert_eq!(pcms[0].sample_rate, 16000, "mic audio must be resampled to 16 kHz before transcription: {pcms:#?}");
 }
 
 #[tokio::test]
@@ -595,10 +570,7 @@ async fn a_long_conversation_keeps_the_prompt_bounded() {
     assert!(sizes[0] < sizes[turns - 1], "the prompt must carry the conversation: {sizes:?}");
     // Once the history is full the prompt stops growing: the last ten questions all send the same
     // number of messages, however many were asked before them.
-    assert!(
-        sizes[turns - 10..].windows(2).all(|w| w[0] == w[1]),
-        "the prompt must stop growing: {sizes:?}"
-    );
+    assert!(sizes[turns - 10..].windows(2).all(|w| w[0] == w[1]), "the prompt must stop growing: {sizes:?}");
 
     let last = requests[turns - 1].messages.clone();
     assert_eq!(last[0].role, Role::System, "the profile prompt stays first: {last:#?}");
@@ -613,20 +585,13 @@ async fn a_rebuilt_provider_stack_answers_the_next_turn() {
     let first = FakeChat::new(vec![Ok(vec!["primera respuesta."])]);
     let second = FakeChat::new(vec![Ok(vec!["segunda respuesta."])]);
     let speech = FakeSpeech::new();
-    let transcribe = Arc::new(FakeTranscribe {
-        text: "",
-        languages: Mutex::new(Vec::new()),
-        pcms: Mutex::new(Vec::new()),
-    });
-    let slot = ProviderSlot::new(Providers {
-        chat: first.clone(),
-        speech: speech.clone(),
-        transcribe: transcribe.clone(),
-    });
+    let transcribe =
+        Arc::new(FakeTranscribe { text: "", languages: Mutex::new(Vec::new()), pcms: Mutex::new(Vec::new()) });
+    let slot =
+        ProviderSlot::new(Providers { chat: first.clone(), speech: speech.clone(), transcribe: transcribe.clone() });
     let config = config();
     let hub = hub_on(&config, slot.clone());
-    let (tx, mut rx) =
-        spawn_session(config, slot.clone(), BrainConfig::default(), SessionPolicy::local(), hub);
+    let (tx, mut rx) = spawn_session(config, slot.clone(), BrainConfig::default(), SessionPolicy::local(), hub);
     send(&tx, hello(None, PROTOCOL_VERSION));
     next_matching(&mut rx, is_done, 500).await; // the greeting
 
@@ -655,10 +620,7 @@ async fn a_rebuilt_provider_stack_answers_the_next_turn() {
 async fn a_new_listening_mode_is_announced_to_the_client() {
     let (tx, mut rx) = session_on_hub(FakeChat::new(vec![]), FakeSpeech::new(), "");
     let first = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::Welcome { .. })), 500).await;
-    assert!(
-        matches!(first, ToClient::Event(Event::Welcome { listening_mode: ListeningMode::Push, .. })),
-        "{first:?}"
-    );
+    assert!(matches!(first, ToClient::Event(Event::Welcome { listening_mode: ListeningMode::Push, .. })), "{first:?}");
 
     send(&tx, Command::SetListeningMode { mode: ListeningMode::Auto });
 
@@ -682,8 +644,7 @@ async fn switching_profile_changes_the_prompt_of_the_next_turn() {
     next_matching(&mut rx, is_done, 500).await; // the greeting
 
     send(&tx, Command::SetProfile { id: "senyor".into() });
-    let announced =
-        next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::ProfileChanged { .. })), 500).await;
+    let announced = next_matching(&mut rx, |m| matches!(m, ToClient::Event(Event::ProfileChanged { .. })), 500).await;
     match announced {
         ToClient::Event(Event::ProfileChanged { profile }) => {
             assert_eq!(profile.id, "senyor");
@@ -720,11 +681,8 @@ fn auto_session(
     transcript: &'static str,
     silence_ms: u32,
 ) -> (mpsc::UnboundedSender<ToServer>, mpsc::UnboundedReceiver<ToClient>, Arc<FakeTranscribe>) {
-    let transcribe = Arc::new(FakeTranscribe {
-        text: transcript,
-        languages: Mutex::new(Vec::new()),
-        pcms: Mutex::new(Vec::new()),
-    });
+    let transcribe =
+        Arc::new(FakeTranscribe { text: transcript, languages: Mutex::new(Vec::new()), pcms: Mutex::new(Vec::new()) });
     let providers = ProviderSlot::new(Providers { chat, speech, transcribe: transcribe.clone() });
     let config = auto_config(silence_ms);
     let hub = hub_on(&config, providers.clone());
@@ -853,11 +811,8 @@ fn clipped_chirp(i: usize) -> i16 {
     let s = i as f32 / SAMPLE_RATE % 2.0;
     // The integral of the frequency, so the phase stays continuous at the turn and at the wrap: both
     // ends of the sweep reach a whole number of cycles.
-    let cycles = if s < 1.0 {
-        100.0 * s + 1_950.0 * s * s
-    } else {
-        2_050.0 + 7_900.0 * (s - 1.0) - 1_950.0 * (s * s - 1.0)
-    };
+    let cycles =
+        if s < 1.0 { 100.0 * s + 1_950.0 * s * s } else { 2_050.0 + 7_900.0 * (s - 1.0) - 1_950.0 * (s * s - 1.0) };
     hard_clip((TAU * cycles).sin())
 }
 
@@ -953,9 +908,8 @@ fn voiced_wave() -> Wave {
         let scores = window_scores(&mut scorer, &stream);
         let voice_scores = &scores[ROOM_TONE_WINDOWS..];
         let loudest = voice_scores.iter().cloned().fold(f32::MIN, f32::max);
-        let first_run = voice_scores
-            .windows(ONSET_WINDOWS)
-            .position(|window| window.iter().all(|score| *score >= VOICE));
+        let first_run =
+            voice_scores.windows(ONSET_WINDOWS).position(|window| window.iter().all(|score| *score >= VOICE));
 
         // What the session's state machine — the same one the session runs, over the same detector —
         // does with those very frames.
@@ -978,12 +932,7 @@ fn voiced_wave() -> Wave {
              {onset:?}, ended {ended}, first voice scores {}",
             ONSET_WINDOWS,
             first_run.map_or("never".to_string(), |window| window.to_string()),
-            voice_scores
-                .iter()
-                .take(8)
-                .map(|score| format!("{score:.2}"))
-                .collect::<Vec<_>>()
-                .join(" "),
+            voice_scores.iter().take(8).map(|score| format!("{score:.2}")).collect::<Vec<_>>().join(" "),
         ));
 
         if onset.is_some_and(|frame| frame <= MAX_ONSET_FRAMES) && ended {
@@ -1030,10 +979,7 @@ async fn auto_mode_never_transcribes_silence_before_speech() {
 
     let seen = drain(&mut rx, 300).await;
     assert!(!seen.iter().any(is_heard), "silence must not reach transcription: {seen:#?}");
-    assert!(
-        transcribe.pcms.lock().unwrap().is_empty(),
-        "no audio the detector did not hear may be transcribed"
-    );
+    assert!(transcribe.pcms.lock().unwrap().is_empty(), "no audio the detector did not hear may be transcribed");
     assert_eq!(chat.calls(), 0, "and nothing may ask the chat provider");
 }
 
@@ -1164,10 +1110,7 @@ async fn the_assistants_own_voice_never_reopens_the_microphone() {
     }
     next_matching(&mut rx, is_done, 2000).await; // the reply ends
     let during = drain(&mut rx, 100).await;
-    assert!(
-        !during.iter().any(is_heard),
-        "the assistant's own voice must not become an utterance: {during:#?}"
-    );
+    assert!(!during.iter().any(is_heard), "the assistant's own voice must not become an utterance: {during:#?}");
 
     // The guard has elapsed and the detector is listening again. A fifth of a second of quiet —
     // past the 100 ms budget this session was built with — ends an utterance if one is open, and
@@ -1197,12 +1140,8 @@ async fn a_turn_started_inside_the_guard_keeps_the_detector_paused() {
     // 200 ms — so the stale deadline is certain to fall inside it. The second scripted outcome is
     // for the turn a leaked onset would start, so the failure is the assertion below and not the
     // chat fake running out of script.
-    let chat = FakeChat::slow(
-        vec![Ok(vec![S1, " ", S2, " ", S3]), Ok(vec![S2])],
-        Duration::from_millis(200),
-    );
-    let (tx, mut rx, transcribe) =
-        auto_session(chat, FakeSpeech::new(), "no debería oírse", SILENCE_MS);
+    let chat = FakeChat::slow(vec![Ok(vec![S1, " ", S2, " ", S3]), Ok(vec![S2])], Duration::from_millis(200));
+    let (tx, mut rx, transcribe) = auto_session(chat, FakeSpeech::new(), "no debería oírse", SILENCE_MS);
     next_matching(&mut rx, is_done, 500).await; // the greeting ends: its 300 ms guard is armed
 
     // The detector's choice, asked before the clock below matters: `voiced_wave` runs the real
@@ -1249,8 +1188,7 @@ async fn a_turn_started_inside_the_guard_keeps_the_detector_paused() {
 #[tokio::test]
 async fn reset_inside_the_guard_leaves_auto_mode_listening() {
     let chat = FakeChat::new(vec![Ok(vec![S1])]);
-    let (tx, mut rx, transcribe) =
-        auto_session(chat, FakeSpeech::new(), "¿y el ticket?", SILENCE_MS);
+    let (tx, mut rx, transcribe) = auto_session(chat, FakeSpeech::new(), "¿y el ticket?", SILENCE_MS);
     // `F4` as the session starts: the greeting's guard is up, the detector is paused, and this is the
     // moment that used to leave `auto` mode deaf for good. Nothing is awaited before or after it to
     // decide the timing, so the test cannot lose a race with the session's scheduling.

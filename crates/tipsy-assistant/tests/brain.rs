@@ -131,7 +131,9 @@ fn events(out: &[ToClient]) -> Vec<Event> {
 /// (seq, samples.len()) of every speech frame, in delivery order.
 fn speech_frames(out: &[ToClient]) -> Vec<(u32, usize)> {
     out.iter()
-        .filter_map(|m| if let ToClient::Audio(Frame::Speech { seq, samples }) = m { Some((*seq, samples.len())) } else { None })
+        .filter_map(|m| {
+            if let ToClient::Audio(Frame::Speech { seq, samples }) = m { Some((*seq, samples.len())) } else { None }
+        })
         .collect()
 }
 
@@ -139,9 +141,14 @@ fn speech_frames(out: &[ToClient]) -> Vec<(u32, usize)> {
 
 #[tokio::test]
 async fn ask_streams_text_and_speaks_sentences_in_order() {
-    let chat = FakeChat::new(vec![Ok(vec!["Ozú, quillo, esto es ", "la primera frase. Y esta es la segunda ", "frase, compadre."])]);
+    let chat = FakeChat::new(vec![Ok(vec![
+        "Ozú, quillo, esto es ",
+        "la primera frase. Y esta es la segunda ",
+        "frase, compadre.",
+    ])]);
     // The first sentence is slow, so the second finishes synthesis first; delivery must stay in order.
-    let speech = Arc::new(FakeSpeech { delays: HashMap::from([("Ozú", Duration::from_millis(80))]), ..Default::default() });
+    let speech =
+        Arc::new(FakeSpeech { delays: HashMap::from([("Ozú", Duration::from_millis(80))]), ..Default::default() });
     let (b, _) = brain(chat.clone(), speech.clone(), "");
     let mut history = Vec::new();
     let out = run(&b, &mut history, TurnInput::Ask("¿qué tal?".into())).await;
@@ -151,7 +158,8 @@ async fn ask_streams_text_and_speaks_sentences_in_order() {
     let ev = events(&out);
     assert_eq!(ev.first(), Some(&Event::Status { state: AssistantState::Thinking, detail: None }));
     assert_eq!(ev.last(), Some(&Event::Status { state: AssistantState::Idle, detail: None }));
-    let deltas: String = ev.iter().filter_map(|e| if let Event::ReplyDelta { text } = e { Some(text.as_str()) } else { None }).collect();
+    let deltas: String =
+        ev.iter().filter_map(|e| if let Event::ReplyDelta { text } = e { Some(text.as_str()) } else { None }).collect();
     assert_eq!(deltas, format!("{S1} {S2}"));
     assert!(ev.contains(&Event::Reply { text: format!("{S1} {S2}") }));
     assert!(ev.iter().any(|e| matches!(e, Event::Done { first_audio_ms: Some(_), .. })));
@@ -174,12 +182,15 @@ async fn chat_request_has_system_prompt_history_and_question() {
     let mut history = vec![ChatMessage::user("antes"), ChatMessage::assistant("respuesta de antes")];
     run(&b, &mut history, TurnInput::Ask("ahora".into())).await;
     let sent = chat.requests.lock().unwrap()[0].messages.clone();
-    assert_eq!(sent, vec![
-        ChatMessage::system("SYSTEM PROMPT"),
-        ChatMessage::user("antes"),
-        ChatMessage::assistant("respuesta de antes"),
-        ChatMessage::user("ahora"),
-    ]);
+    assert_eq!(
+        sent,
+        vec![
+            ChatMessage::system("SYSTEM PROMPT"),
+            ChatMessage::user("antes"),
+            ChatMessage::assistant("respuesta de antes"),
+            ChatMessage::user("ahora"),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -286,7 +297,10 @@ async fn speech_failure_stops_audio_but_keeps_text_and_history() {
 
 #[tokio::test]
 async fn cancel_stops_audio_and_keeps_only_spoken_sentences() {
-    let chat = FakeChat::slow(vec![Ok(vec![S1, " ", S2, " ", "Una tercera frase bastante larga también."])], Duration::from_millis(60));
+    let chat = FakeChat::slow(
+        vec![Ok(vec![S1, " ", S2, " ", "Una tercera frase bastante larga también."])],
+        Duration::from_millis(60),
+    );
     let (b, _) = brain(chat, Arc::new(FakeSpeech::default()), "");
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();

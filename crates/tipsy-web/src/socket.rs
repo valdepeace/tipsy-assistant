@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use tipsy_protocol::{ClientKind, Command, ToClient, ToServer, PROTOCOL_VERSION};
+use tipsy_protocol::{ClientKind, Command, PROTOCOL_VERSION, ToClient, ToServer};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -456,9 +456,7 @@ fn connect(
 async fn sleep(ms: u32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         let window = web_sys::window().expect("a window to set a timeout on");
-        window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-            .expect("a timer");
+        window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32).expect("a timer");
     });
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
@@ -564,10 +562,7 @@ mod tests {
             })),
             Err(WireError::NotOpen)
         );
-        assert_eq!(
-            outbox.send(ToServer::Audio(tipsy_protocol::Frame::Mic(vec![1, 2]))),
-            Err(WireError::NotOpen)
-        );
+        assert_eq!(outbox.send(ToServer::Audio(tipsy_protocol::Frame::Mic(vec![1, 2]))), Err(WireError::NotOpen));
         assert_eq!(
             outbox.send(ToServer::Reconfigure),
             Err(WireError::ServerOnly),

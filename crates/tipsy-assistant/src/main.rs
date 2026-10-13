@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use tipsy_assistant::client::bridge::DisplayUrl;
 use tipsy_assistant::client;
+use tipsy_assistant::client::bridge::DisplayUrl;
 use tipsy_assistant::config::store;
-use tipsy_assistant::keys::{redact, KeyResolver, KeySource, OsKeyring, SecretStore};
+use tipsy_assistant::keys::{KeyResolver, KeySource, OsKeyring, SecretStore, redact};
 use tipsy_assistant::logging;
 use tipsy_assistant::providers::{ProviderSlot, build_providers};
 
@@ -111,7 +111,9 @@ fn main() -> ExitCode {
         (None, None) => run_client(cli.verbose),
         (None, Some(Cmd::Key { command })) => key_command(command),
         (None, Some(Cmd::Config { command })) => config_command(command),
-        (None, Some(Cmd::Serve { bind, tls, tls_cert, tls_key })) => serve_command(bind, tls, tls_cert, tls_key, cli.verbose),
+        (None, Some(Cmd::Serve { bind, tls, tls_cert, tls_key })) => {
+            serve_command(bind, tls, tls_cert, tls_key, cli.verbose)
+        }
     }
 }
 
@@ -379,14 +381,8 @@ mod tests {
 
     #[test]
     fn the_cli_parses_a_remote_attach_and_the_serve_subcommand() {
-        let cli = Cli::try_parse_from([
-            "tipsy-assistant",
-            "--connect",
-            "ws://127.0.0.1:7070/ws",
-            "--token",
-            "abc",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["tipsy-assistant", "--connect", "ws://127.0.0.1:7070/ws", "--token", "abc"]).unwrap();
         assert_eq!(cli.connect.as_deref(), Some("ws://127.0.0.1:7070/ws"));
         assert_eq!(cli.token.as_deref(), Some("abc"));
         assert!(cli.command.is_none());
@@ -461,7 +457,8 @@ mod tests {
         }
 
         // Naming a pair is naming TLS: it is registered, and it is the pair that will be served.
-        let cli = Cli::try_parse_from(["tipsy-assistant", "serve", "--tls-cert", "c.pem", "--tls-key", "k.pem"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["tipsy-assistant", "serve", "--tls-cert", "c.pem", "--tls-key", "k.pem"]).unwrap();
         match cli.command {
             Some(Cmd::Serve { tls_cert, tls_key, .. }) => {
                 assert_eq!(tls_cert.as_deref(), Some(std::path::Path::new("c.pem")));

@@ -11,13 +11,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use serde::Deserialize;
 use tipsy_protocol::ClientKind;
 use tokio::sync::Semaphore;
@@ -129,12 +129,18 @@ pub enum TlsFiles {
 pub enum ServerError {
     /// `bind` is not an explicit `IP:port`. A hostname is refused on purpose: `TcpListener::bind`
     /// takes `ToSocketAddrs`, so an unqualified name can resolve to something off this machine.
-    BadBind { bind: String },
+    BadBind {
+        bind: String,
+    },
     /// Not loopback, and no token (spec §5.1 step 2, spec §10).
-    LanWithoutToken { addr: SocketAddr },
+    LanWithoutToken {
+        addr: SocketAddr,
+    },
     /// The bind landed somewhere other than what was asked for, with no token to guard it
     /// (spec §5.1 step 3).
-    BoundWiderThanAsked { addr: SocketAddr },
+    BoundWiderThanAsked {
+        addr: SocketAddr,
+    },
     Io(std::io::Error),
     /// TLS could not be set up: a pair the user named is absent or unparseable, or a self-signed pair
     /// could not be minted (spec §5.5, §10). **Task 1.8's variant**: it cannot come from Task 1.4,
@@ -177,10 +183,9 @@ impl std::fmt::Display for ServerError {
                 "refusing to bind {addr}: it is not a loopback address and no token is configured. \
                  Set a token in [server], or bind a loopback address such as 127.0.0.1:7070."
             ),
-            ServerError::BoundWiderThanAsked { addr } => write!(
-                f,
-                "bound to {addr}, which is not a loopback address, and no token is configured"
-            ),
+            ServerError::BoundWiderThanAsked { addr } => {
+                write!(f, "bound to {addr}, which is not a loopback address, and no token is configured")
+            }
             ServerError::Io(e) => write!(f, "cannot listen: {e}"),
             // Transparent on purpose: `TlsError`'s own sentence already names the paths a user has
             // to look at, and wrapping it again here would put a second prefix in front of them.
@@ -546,9 +551,7 @@ async fn asset_of(
 /// `no-store`, and nothing here is a page.
 fn asset_response(content_type: &'static str, body: Vec<u8>) -> Response {
     let mut response = Response::new(Body::from(body));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, content_type.parse().expect("a MIME type is a header value"));
+    response.headers_mut().insert(header::CONTENT_TYPE, content_type.parse().expect("a MIME type is a header value"));
     response
 }
 
@@ -956,7 +959,11 @@ mod tests {
 
         // An exposed listener: `0.0.0.0` is not loopback, so its sessions require the token.
         let mut exposed = settings("0.0.0.0:0", "correct-horse");
-        for provider in [&mut exposed.config.providers.chat, &mut exposed.config.providers.speech, &mut exposed.config.providers.transcribe] {
+        for provider in [
+            &mut exposed.config.providers.chat,
+            &mut exposed.config.providers.speech,
+            &mut exposed.config.providers.transcribe,
+        ] {
             provider.base_url = "http://127.0.0.1:9/v1".into();
         }
         exposed.providers = providers(&exposed.config);
@@ -975,7 +982,8 @@ mod tests {
         // A loopback listener is this machine, so its sessions require no token: the documented local
         // attach (`--connect ws://127.0.0.1:7070/ws`, no `--token`) works even with a token in the
         // file. The pages are the half that still demands it here.
-        let loopback = start(settings("127.0.0.1:0", "correct-horse")).await.expect("a loopback bind needs no token to be legal");
+        let loopback =
+            start(settings("127.0.0.1:0", "correct-horse")).await.expect("a loopback bind needs no token to be legal");
         let local = attach(loopback.port(), None).await;
         assert!(local.contains(r#""type":"welcome""#), "a loopback listener asks for no token: {local}");
     }
@@ -998,7 +1006,7 @@ mod tests {
     async fn a_foreign_origin_is_refused_and_a_client_with_no_origin_attaches() {
         use futures::{SinkExt, StreamExt};
         use tipsy_protocol::{ClientKind, Command, PROTOCOL_VERSION};
-        use tokio_tungstenite::tungstenite::{http::Uri, ClientRequestBuilder, Error, Message};
+        use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Error, Message, http::Uri};
 
         /// One attach to `host:port`. `Origin` is set when asked for and **absent** otherwise, which is
         /// exactly the request `--connect` sends: `tungstenite`'s `IntoClientRequest for &str` adds no
@@ -1011,7 +1019,10 @@ mod tests {
             }
             let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
             let hello = Command::Hello { token: None, client: ClientKind::Web, protocol_version: PROTOCOL_VERSION };
-            socket.send(Message::text(serde_json::to_string(&hello).unwrap())).await.expect("the socket must stay open");
+            socket
+                .send(Message::text(serde_json::to_string(&hello).unwrap()))
+                .await
+                .expect("the socket must stay open");
             let message = tokio::time::timeout(PATIENCE, socket.next())
                 .await
                 .expect("the bridge must answer inside the patience window")
@@ -1039,16 +1050,16 @@ mod tests {
 
         // The documented local attach: no `Origin` at all, and no token, against a listener whose
         // configuration holds one. This is the half the fix must not break.
-        let cli = attach("127.0.0.1", port, None).await.expect("a client that sends no Origin is the CLI, and must attach");
+        let cli =
+            attach("127.0.0.1", port, None).await.expect("a client that sends no Origin is the CLI, and must attach");
         assert!(cli.contains(r#""type":"welcome""#), "a loopback listener asks for no token: {cli}");
 
         // The listener's own page: it was served from this host, so this origin is this host — and
         // each spelling is compared against the `Host` the request arrived with, not against a name
         // written into the code.
-        for (host, origin) in [
-            ("127.0.0.1", format!("http://127.0.0.1:{port}")),
-            ("localhost", format!("http://localhost:{port}")),
-        ] {
+        for (host, origin) in
+            [("127.0.0.1", format!("http://127.0.0.1:{port}")), ("localhost", format!("http://localhost:{port}"))]
+        {
             let own = attach(host, port, Some(&origin))
                 .await
                 .unwrap_or_else(|error| panic!("the listener's own page at {origin} must attach: {error}"));
@@ -1088,7 +1099,10 @@ mod tests {
 
         // Absent is the CLI, and it is the half that must never be refused.
         assert!(origin_is_this_host(&headers(None, None)), "`--connect` sends no Origin at all");
-        assert!(origin_is_this_host(&headers(None, Some("127.0.0.1:7070"))), "and the check is about the header, not the host");
+        assert!(
+            origin_is_this_host(&headers(None, Some("127.0.0.1:7070"))),
+            "and the check is about the header, not the host"
+        );
 
         // The listener's own page, in either spelling, case-folded, and with a default port omitted
         // on both sides.
@@ -1104,7 +1118,10 @@ mod tests {
         assert!(!origin_is_this_host(&headers(Some("http://evil.example"), Some("127.0.0.1:7070"))));
         assert!(!origin_is_this_host(&headers(Some("http://localhost:7070"), Some("127.0.0.1:7070"))));
         assert!(!origin_is_this_host(&headers(Some("http://127.0.0.1:7071"), Some("127.0.0.1:7070"))), "another port");
-        assert!(!origin_is_this_host(&headers(Some("http://127.0.0.1:7070"), Some("127.0.0.1:7071"))), "either way round");
+        assert!(
+            !origin_is_this_host(&headers(Some("http://127.0.0.1:7070"), Some("127.0.0.1:7071"))),
+            "either way round"
+        );
 
         // Present and unreadable: not provably this host, so refused. `null` is what a sandboxed frame
         // and a `file://` page send, and neither scheme is one this listener serves a page over.
@@ -1195,10 +1212,7 @@ mod tests {
         settings.tls = Some(TlsFiles::Generated);
         let addr = start(settings).await.expect("a loopback bind needs no token, with TLS or without");
 
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .expect("a test client");
+        let client = reqwest::Client::builder().danger_accept_invalid_certs(true).build().expect("a test client");
         let response = tokio::time::timeout(
             Duration::from_secs(10),
             client.get(format!("https://{addr}/?token=correct-horse")).send(),
@@ -1273,8 +1287,7 @@ mod tests {
         let config = crate::config::store::load_or_create(&path).unwrap().config;
         let log = crate::logging::log_path(&path);
         let subscriber = crate::logging::subscriber_at(&log, crate::logging::Secrets::default(), false).unwrap();
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("this binary installs no other global subscriber");
+        tracing::subscriber::set_global_default(subscriber).expect("this binary installs no other global subscriber");
 
         let mut settings = settings("127.0.0.1:0", "");
         settings.lan = true;

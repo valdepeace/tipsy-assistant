@@ -217,9 +217,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use tipsy_protocol::{
-        ClientKind, Command, ListeningMode, ProfileView, UiLanguage, PROTOCOL_VERSION,
-    };
+    use tipsy_protocol::{ClientKind, Command, ListeningMode, PROTOCOL_VERSION, ProfileView, UiLanguage};
     use tipsy_ui::KeyInput;
 
     /// The `Welcome` the browser acts on.
@@ -342,10 +340,7 @@ mod tests {
         state.apply(&pass());
 
         assert_eq!(state.login.as_ref().unwrap().phase, LoginPhase::Passed);
-        assert!(
-            !state.login.as_ref().unwrap().open,
-            "the state closed the capture the moment the door opened"
-        );
+        assert!(!state.login.as_ref().unwrap().open, "the state closed the capture the moment the door opened");
         assert!(!door.sends_frames(&state), "so no frame may leave the page any more");
         assert!(!door.capture_open(&state), "and there is no capture to draw");
         assert_eq!(door.sync(&state), MicStep::Stop, "which is the LoginStop spec §6.2 asks for");
@@ -516,10 +511,7 @@ mod tests {
         let heard = Event::LoginHeard { text: "soy andres".into() };
         state.apply(&heard);
         assert!(!door.note_event(&mut state, &heard), "the door has no opinion about an utterance");
-        assert_eq!(
-            state.login.as_ref().unwrap().line,
-            tipsy_ui::LoginLine::Heard("soy andres".into())
-        );
+        assert_eq!(state.login.as_ref().unwrap().line, tipsy_ui::LoginLine::Heard("soy andres".into()));
 
         let refused = Event::LoginVerdict { ok: false, name: None };
         state.apply(&refused);
@@ -578,8 +570,7 @@ mod tests {
     #[test]
     fn the_one_send_site_guards_on_this_predicate_and_not_on_the_huds_switch() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mic.rs");
-        let source =
-            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         let start = source.find("pub fn drain_capture(").expect("`drain_capture` is the one send site");
         // Its body: from its signature to the first `}` in column 0, which is where it ends.
         let rest = &source[start..];
@@ -615,14 +606,8 @@ mod tests {
         );
 
         // The three login commands, as the wire spells them (login spec §4).
-        assert_eq!(
-            serde_json::to_string(&Command::LoginStart).unwrap(),
-            r#"{"type":"login_start"}"#
-        );
-        assert_eq!(
-            serde_json::to_string(&Command::LoginStop).unwrap(),
-            r#"{"type":"login_stop"}"#
-        );
+        assert_eq!(serde_json::to_string(&Command::LoginStart).unwrap(), r#"{"type":"login_start"}"#);
+        assert_eq!(serde_json::to_string(&Command::LoginStop).unwrap(), r#"{"type":"login_stop"}"#);
         assert_eq!(
             serde_json::to_string(&Command::LoginAnswer { text: "andres".into() }).unwrap(),
             r#"{"type":"login_answer","text":"andres"}"#

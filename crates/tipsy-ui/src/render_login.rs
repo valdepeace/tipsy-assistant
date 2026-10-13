@@ -188,8 +188,7 @@ pub fn draw_login(frame: &mut Frame, state: &UiState, area: Rect) -> Vec<Hit> {
 /// input row (spec §6).
 fn layout(widget: Rect) -> (Rect, Option<Rect>, Rect, Rect) {
     let title = Rect::new(widget.x, widget.y, widget.width, 1);
-    let inner =
-        Rect::new(widget.x + 1, widget.y + 1, widget.width.saturating_sub(2), widget.height.saturating_sub(2));
+    let inner = Rect::new(widget.x + 1, widget.y + 1, widget.width.saturating_sub(2), widget.height.saturating_sub(2));
     // The last two rows of the widget are the status line and the input, whatever is left above them.
     let input = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     let status = Rect::new(inner.x, input.y.saturating_sub(1), inner.width, 1);
@@ -373,7 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn the_veil_knows_the_palette_and_keeps_a_colour_it_does_not() {        let cases: &[(Color, Color)] = &[
+    fn the_veil_knows_the_palette_and_keeps_a_colour_it_does_not() {
+        let cases: &[(Color, Color)] = &[
             (CYAN, Color::Rgb(0, 80, 80)),
             (DIM, Color::Rgb(0, 80, 80)),
             (GOLD, Color::Rgb(90, 70, 30)),

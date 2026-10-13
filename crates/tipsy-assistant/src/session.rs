@@ -13,12 +13,12 @@ use tipsy_protocol::{
     AssistantState, Command, ErrorCode, Event, Frame, ListeningMode, LoginView, PROTOCOL_VERSION, ProfileView,
     ToClient, ToServer, UiLanguage,
 };
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::audio::device::MIC_SAMPLE_RATE;
-use crate::audio::pcm::{i16_to_f32, Pcm};
+use crate::audio::pcm::{Pcm, i16_to_f32};
 use crate::brain::{Brain, BrainConfig, TurnInput, TurnProfile};
 use crate::config::Config;
 use crate::providers::{ChatMessage, ProviderSlot, Role};
@@ -76,22 +76,12 @@ impl SessionPolicy {
     /// A session reached over the in-process channel: no token, none asked for, and the token still
     /// crosses to it, because it is the client's own machine (spec §4.3).
     pub fn local() -> Self {
-        Self {
-            require_token: false,
-            token: String::new(),
-            loopback: true,
-            handshake_timeout: HANDSHAKE_TIMEOUT,
-        }
+        Self { require_token: false, token: String::new(), loopback: true, handshake_timeout: HANDSHAKE_TIMEOUT }
     }
 
     /// A session behind a listener that is not loopback.
     pub fn exposed(token: impl Into<String>) -> Self {
-        Self {
-            require_token: true,
-            token: token.into(),
-            loopback: false,
-            handshake_timeout: HANDSHAKE_TIMEOUT,
-        }
+        Self { require_token: true, token: token.into(), loopback: false, handshake_timeout: HANDSHAKE_TIMEOUT }
     }
 
     /// The one place "may this client be served?" is decided, so the version check, the missing token
@@ -614,10 +604,7 @@ impl Session {
             // nobody heard.
             return;
         }
-        self.start(TurnInput::Utterance(Pcm {
-            samples: i16_to_f32(&samples),
-            sample_rate: MIC_SAMPLE_RATE,
-        }));
+        self.start(TurnInput::Utterance(Pcm { samples: i16_to_f32(&samples), sample_rate: MIC_SAMPLE_RATE }));
     }
 
     fn command(&mut self, command: Command) -> ControlFlow<()> {
@@ -725,9 +712,7 @@ impl Session {
                 // The session is the only thing that knows which it is, so it is the thing that says.
                 send(
                     &self.out,
-                    ToClient::Event(Event::Config {
-                        config: Box::new(self.hub.config_view(self.token_presented)),
-                    }),
+                    ToClient::Event(Event::Config { config: Box::new(self.hub.config_view(self.token_presented)) }),
                 );
                 ControlFlow::Continue(())
             }
@@ -774,10 +759,7 @@ impl Session {
             // fallback is what keeps it total rather than pretending a fourth case cannot be reached.
             _ => strings.err_handshake,
         };
-        send(
-            &self.out,
-            ToClient::Event(Event::Error { code, message: message.to_string(), recoverable: false }),
-        );
+        send(&self.out, ToClient::Event(Event::Error { code, message: message.to_string(), recoverable: false }));
     }
 
     /// Replaces the configuration this session is running and re-derives what comes from it: the
@@ -805,11 +787,8 @@ impl Session {
         // the *previous* profile's words while the header already showed the new name — which is what
         // "the profile does not change" looked like from the screen.
         self.greeting = profile.greeting.clone();
-        self.brain = Arc::new(Brain::new(
-            self.providers.clone(),
-            turn_profile(&self.config),
-            self.brain_config.clone(),
-        ));
+        self.brain =
+            Arc::new(Brain::new(self.providers.clone(), turn_profile(&self.config), self.brain_config.clone()));
     }
 
     /// Applies the listening mode and announces it again, which is what moves the header's indicator:
@@ -873,10 +852,7 @@ impl Session {
             self.idle();
             return;
         }
-        self.start(TurnInput::Utterance(Pcm {
-            samples: i16_to_f32(&samples),
-            sample_rate: MIC_SAMPLE_RATE,
-        }));
+        self.start(TurnInput::Utterance(Pcm { samples: i16_to_f32(&samples), sample_rate: MIC_SAMPLE_RATE }));
     }
 
     /// `LoginStart`: open the capture. Ignored when there is no screen to serve, and when a capture is
@@ -1130,10 +1106,7 @@ mod tests {
 
     /// One question and its reply, numbered so a window can be checked message by message.
     fn exchange(n: usize) -> [ChatMessage; 2] {
-        [
-            ChatMessage::user(format!("pregunta {n}")),
-            ChatMessage::assistant(format!("respuesta {n}")),
-        ]
+        [ChatMessage::user(format!("pregunta {n}")), ChatMessage::assistant(format!("respuesta {n}"))]
     }
 
     fn history_of(exchanges: usize) -> Vec<ChatMessage> {
@@ -1240,11 +1213,7 @@ mod tests {
 
         assert_eq!(session.profile.id, "bloke", "the header's own fact");
         assert_ne!(session.greeting, compae_greeting, "not the previous profile's greeting");
-        assert_eq!(
-            session.greeting,
-            session.config.active().greeting,
-            "but the active profile's"
-        );
+        assert_eq!(session.greeting, session.config.active().greeting, "but the active profile's");
     }
 
     /// A session whose transcriber answers `transcript`, whose chat and speech providers count their
@@ -1382,7 +1351,10 @@ mod tests {
     async fn events_until_verdict(rx: &mut UnboundedReceiver<ToClient>) -> Vec<Event> {
         let mut seen = Vec::new();
         loop {
-            let next = timeout(Duration::from_secs(2), rx.recv()).await.expect("the verdict must arrive").expect("the channel stays open");
+            let next = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("the verdict must arrive")
+                .expect("the channel stays open");
             if let ToClient::Event(event) = next {
                 let verdict = matches!(event, Event::LoginVerdict { .. });
                 seen.push(event);
@@ -1394,7 +1366,11 @@ mod tests {
     }
 
     fn allowed(name: &str, keywords: &[&str]) -> LoginConfig {
-        LoginConfig { enabled: true, voice: true, allowed: vec![LoginEntry { name: name.into(), keywords: keywords.iter().map(|k| (*k).into()).collect() }] }
+        LoginConfig {
+            enabled: true,
+            voice: true,
+            allowed: vec![LoginEntry { name: name.into(), keywords: keywords.iter().map(|k| (*k).into()).collect() }],
+        }
     }
 
     /// The whole voice path, and the three things that must *not* happen on it: no chat call, no
@@ -1402,17 +1378,34 @@ mod tests {
     #[tokio::test]
     async fn a_login_utterance_becomes_a_verdict_without_a_turn() {
         let config = Config { login: allowed("Andrés", &["andres", "core"]), ..Config::default() };
-        let (mut session, mut rx, chat_calls) = login_session(config, "yo soy Andrés del equipo del core", one_utterance(1000));
+        let (mut session, mut rx, chat_calls) =
+            login_session(config, "yo soy Andrés del equipo del core", one_utterance(1000));
 
         let _ = session.command(Command::LoginStart);
         assert!(session.login_active, "the capture opens");
         speak(&mut session, 70);
 
         let events = events_until_verdict(&mut rx).await;
-        assert!(events.iter().any(|e| matches!(e, Event::Status { state: AssistantState::Transcribing, .. })), "{events:?}");
-        assert!(events.iter().any(|e| matches!(e, Event::LoginHeard { text } if text == "yo soy Andrés del equipo del core")), "{events:?}");
-        assert!(events.iter().any(|e| matches!(e, Event::LoginVerdict { ok: true, name: Some(name) } if name == "Andrés")), "{events:?}");
-        assert!(!events.iter().any(|e| matches!(e, Event::Reply { .. } | Event::ReplyDelta { .. } | Event::SpeechChunk { .. })), "the login path never replies: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Status { state: AssistantState::Transcribing, .. })),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::LoginHeard { text } if text == "yo soy Andrés del equipo del core")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, Event::LoginVerdict { ok: true, name: Some(name) } if name == "Andrés")),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Reply { .. } | Event::ReplyDelta { .. } | Event::SpeechChunk { .. })),
+            "the login path never replies: {events:?}"
+        );
         assert_eq!(chat_calls.load(Ordering::SeqCst), 0, "the chat provider is never asked");
         assert!(session.history.is_empty(), "and the conversation is untouched");
     }

@@ -708,9 +708,7 @@ pub fn press_to_start(
                                 if let Err(error) = outbox.send(ToServer::Command(Command::ListenStart))
                                     && !matches!(error, crate::wire::WireError::NotOpen)
                                 {
-                                    web_sys::console::warn_1(&JsValue::from_str(&format!(
-                                        "tipsy-web: {error}"
-                                    )));
+                                    web_sys::console::warn_1(&JsValue::from_str(&format!("tipsy-web: {error}")));
                                 }
                             }
                             Err(name) => report_no_microphone(&state, &failure, &name, &document),
@@ -892,9 +890,7 @@ async fn open_capture(context: &web_sys::AudioContext) -> Result<Capture, String
     track.set_channel_count(&JsValue::from_f64(1.0));
     let constraints = web_sys::MediaStreamConstraints::new();
     constraints.set_audio_media_track_constraints(&track);
-    let promise = devices
-        .get_user_media_with_constraints(&constraints)
-        .map_err(|error| rejection_name(&error))?;
+    let promise = devices.get_user_media_with_constraints(&constraints).map_err(|error| rejection_name(&error))?;
     let stream: web_sys::MediaStream =
         JsFuture::from(promise).await.map_err(|error| rejection_name(&error))?.unchecked_into();
 
@@ -944,9 +940,7 @@ fn channels_from(data: &JsValue) -> Vec<Vec<f32>> {
         return Vec::new();
     }
     let channels = js_sys::Array::from(data);
-    (0..channels.length())
-        .map(|i| js_sys::Float32Array::new(&channels.get(i)).to_vec())
-        .collect()
+    (0..channels.length()).map(|i| js_sys::Float32Array::new(&channels.get(i)).to_vec()).collect()
 }
 
 #[cfg(test)]
@@ -1134,9 +1128,8 @@ mod tests {
 
         let relative = WORKLET_URL.strip_prefix("/assets/").expect("the bundle is served under /assets/");
         let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web").join(relative);
-        let bytes = std::fs::read(&file).unwrap_or_else(|error| {
-            panic!("{WORKLET_URL} must be a file in the bundle: {} ({error})", file.display())
-        });
+        let bytes = std::fs::read(&file)
+            .unwrap_or_else(|error| panic!("{WORKLET_URL} must be a file in the bundle: {} ({error})", file.display()));
         let source = String::from_utf8(bytes).expect("the worklet is a text module");
         assert!(
             source.contains("registerProcessor"),
@@ -1366,8 +1359,7 @@ mod tests {
     #[test]
     fn every_path_out_of_the_gate_takes_it_down() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("mic.rs");
-        let source =
-            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         // Production only: this test's own text names the strings it counts, so the module that holds
         // it has to be cut off first.
         let production = &source[..source.find("#[cfg(test)]").expect("this test's own module follows")];

@@ -11,7 +11,7 @@ use tipsy_protocol::{
 };
 
 use crate::state::KeyInput;
-use crate::strings::{strings, Strings};
+use crate::strings::{Strings, strings};
 
 /// The keyboard's `Ctrl+S`: `KeyInput::Char` carries no modifiers, and a control character is the
 /// one `char` a text row would never want, so the two chords the screen has need no new variant.
@@ -309,10 +309,7 @@ impl From<&ConfigForm> for ConfigView {
                     .login
                     .allowed
                     .iter()
-                    .map(|entry| AllowedPersonView {
-                        name: entry.name.clone(),
-                        keywords: entry.keywords.clone(),
-                    })
+                    .map(|entry| AllowedPersonView { name: entry.name.clone(), keywords: entry.keywords.clone() })
                     .collect(),
             },
             profiles: form
@@ -375,10 +372,7 @@ impl From<&ConfigForm> for ClientConfigView {
                     .login
                     .allowed
                     .iter()
-                    .map(|entry| AllowedPersonView {
-                        name: entry.name.clone(),
-                        keywords: entry.keywords.clone(),
-                    })
+                    .map(|entry| AllowedPersonView { name: entry.name.clone(), keywords: entry.keywords.clone() })
                     .collect(),
             },
             profiles: form
@@ -612,10 +606,18 @@ impl ConfigForm {
                 Some(if self.editing.is_some() { ConfigAction::CommitEdit } else { self.enter_action() })
             }
             KeyInput::Tab | KeyInput::Right => {
-                if self.editing.is_some() { None } else { Some(ConfigAction::NextTab) }
+                if self.editing.is_some() {
+                    None
+                } else {
+                    Some(ConfigAction::NextTab)
+                }
             }
             KeyInput::Left => {
-                if self.editing.is_some() { None } else { Some(ConfigAction::PrevTab) }
+                if self.editing.is_some() {
+                    None
+                } else {
+                    Some(ConfigAction::PrevTab)
+                }
             }
             KeyInput::Up => self.editing.is_none().then_some(ConfigAction::PrevField),
             KeyInput::Down => self.editing.is_none().then_some(ConfigAction::NextField),
@@ -628,22 +630,13 @@ impl ConfigForm {
             // The screen's tabs answer `F5`, `F6`, `F8` and `F10` — never `F9`, which is the door in
             // and out of the screen (`UiState::on_key`) and must not also be a tab.
             KeyInput::F(2) => {
-                (self.editing.is_none() && self.tab == ConfigTab::Providers)
-                    .then_some(ConfigAction::Test)
+                (self.editing.is_none() && self.tab == ConfigTab::Providers).then_some(ConfigAction::Test)
             }
             KeyInput::F(4) => self.editing.is_none().then_some(ConfigAction::Save),
-            KeyInput::F(5) => {
-                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Providers))
-            }
-            KeyInput::F(6) => {
-                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Listening))
-            }
-            KeyInput::F(8) => {
-                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Profiles))
-            }
-            KeyInput::F(10) => {
-                self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Server))
-            }
+            KeyInput::F(5) => self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Providers)),
+            KeyInput::F(6) => self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Listening)),
+            KeyInput::F(8) => self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Profiles)),
+            KeyInput::F(10) => self.editing.is_none().then_some(ConfigAction::SelectTab(ConfigTab::Server)),
             // Esc names itself in every state: the screen's close, and the buffer's discard. A key
             // a user presses to get out must never be silently inert, and `Close` is what the
             // outcome reports either way; the buffer is gone by the time the caller sees it.
@@ -915,7 +908,12 @@ impl ConfigForm {
             },
             ConfigTab::Profiles => self.commit_profile(buffer),
             ConfigTab::Server => {
-                if self.field == 0 { self.server.bind = buffer; true } else { false }
+                if self.field == 0 {
+                    self.server.bind = buffer;
+                    true
+                } else {
+                    false
+                }
             }
         };
         if ok {
@@ -992,11 +990,7 @@ impl ConfigForm {
 
     /// Writes `value` into the active profile's field the selector names. A form whose active
     /// profile is no longer in the list writes nothing rather than guessing which one it meant.
-    fn fill(
-        &mut self,
-        selector: impl FnOnce(&mut ProfileForm) -> Option<&mut String>,
-        value: String,
-    ) -> bool {
+    fn fill(&mut self, selector: impl FnOnce(&mut ProfileForm) -> Option<&mut String>, value: String) -> bool {
         let active = self.active_profile.clone();
         match self.profiles.iter_mut().find(|p| p.id == active).and_then(selector) {
             Some(field) => {
@@ -1106,24 +1100,14 @@ impl ConfigForm {
                 editable: true,
                 is_active: false,
             });
-            rows.push(FormRow {
-                label: es.cfg_model,
-                value: provider.model.clone(),
-                editable: true,
-                is_active: false,
-            });
+            rows.push(FormRow { label: es.cfg_model, value: provider.model.clone(), editable: true, is_active: false });
             rows.push(FormRow {
                 label: es.cfg_key_name,
                 value: provider.key_name.clone(),
                 editable: true,
                 is_active: false,
             });
-            rows.push(FormRow {
-                label: es.cfg_test,
-                value: String::new(),
-                editable: false,
-                is_active: false,
-            });
+            rows.push(FormRow { label: es.cfg_test, value: String::new(), editable: false, is_active: false });
         }
         rows
     }
@@ -1153,12 +1137,7 @@ impl ConfigForm {
         // An absent device is an absent row, not an empty one; a named device with an empty name is
         // still a choice, so it keeps its row.
         if let Some(device) = &self.listening.mic_device {
-            rows.push(FormRow {
-                label: es.cfg_mic_device,
-                value: device.clone(),
-                editable: true,
-                is_active: false,
-            });
+            rows.push(FormRow { label: es.cfg_mic_device, value: device.clone(), editable: true, is_active: false });
         }
         rows
     }
@@ -1172,12 +1151,7 @@ impl ConfigForm {
             // The active profile is marked in the row itself: a reader sees which profile the
             // assistant is on without a second marker column.
             let value = if active { format!("◉ {}", profile.name) } else { profile.name.clone() };
-            rows.push(FormRow {
-                label: es.cfg_profile,
-                value,
-                editable: false,
-                is_active: active,
-            });
+            rows.push(FormRow { label: es.cfg_profile, value, editable: false, is_active: active });
         }
         // The field rows belong to the active profile, in this order (the id last). This order is
         // what `commit_profile` maps a row back to, and the two live side by side so a reorder of
@@ -1203,12 +1177,7 @@ impl ConfigForm {
                     editable: false,
                     is_active: false,
                 });
-                rows.push(FormRow {
-                    label: es.cfg_voices,
-                    value: voice.clone(),
-                    editable: true,
-                    is_active: false,
-                });
+                rows.push(FormRow { label: es.cfg_voices, value: voice.clone(), editable: true, is_active: false });
             }
         }
         rows
@@ -1220,12 +1189,7 @@ impl ConfigForm {
     fn server_rows(&self) -> Vec<FormRow> {
         let es = strings(UiLanguage::Es);
         vec![
-            FormRow {
-                label: es.cfg_bind,
-                value: self.server.bind.clone(),
-                editable: true,
-                is_active: false,
-            },
+            FormRow { label: es.cfg_bind, value: self.server.bind.clone(), editable: true, is_active: false },
             FormRow {
                 label: es.cfg_lan,
                 value: if self.server.lan { es.cfg_on } else { es.cfg_off }.to_owned(),
@@ -1238,18 +1202,8 @@ impl ConfigForm {
                 editable: false,
                 is_active: false,
             },
-            FormRow {
-                label: es.cfg_regenerate,
-                value: String::new(),
-                editable: false,
-                is_active: false,
-            },
-            FormRow {
-                label: es.cfg_save,
-                value: String::new(),
-                editable: false,
-                is_active: false,
-            },
+            FormRow { label: es.cfg_regenerate, value: String::new(), editable: false, is_active: false },
+            FormRow { label: es.cfg_save, value: String::new(), editable: false, is_active: false },
         ]
     }
 
@@ -1282,7 +1236,7 @@ fn active_voices(form: &ConfigForm) -> &[(String, String)] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strings::{strings, EN, ES};
+    use crate::strings::{EN, ES, strings};
 
     /// A form open on Providers: what `ConfigAction::Open` must produce, spelled out. It is filled,
     /// because a form that a client converted from a file is the only one that can be saved.
@@ -1692,11 +1646,7 @@ mod tests {
             let mut f = profiles();
             // `meigo` is the active profile, so its field rows start just past the two list rows.
             let row = f.profiles.len() + offset;
-            assert_eq!(
-                f.rows()[row].value,
-                active_fields(&f)[offset],
-                "{attribute}: the row shows its own value"
-            );
+            assert_eq!(f.rows()[row].value, active_fields(&f)[offset], "{attribute}: the row shows its own value");
             let before = active_fields(&f);
 
             f.field = row;
@@ -1705,10 +1655,7 @@ mod tests {
             f.apply(ConfigAction::CommitEdit);
 
             let after = active_fields(&f);
-            assert_eq!(
-                after[offset], written,
-                "{attribute}: the value landed in the wrong field: {after:?}"
-            );
+            assert_eq!(after[offset], written, "{attribute}: the value landed in the wrong field: {after:?}");
             if offset == 6 {
                 // The id is the one field the active-profile pointer follows, or a rename would
                 // switch the assistant to a profile that no longer exists.
@@ -1716,10 +1663,7 @@ mod tests {
                 continue;
             }
             assert_eq!(after[6], before[6], "{attribute}: the id must not move");
-            assert_eq!(
-                f.active_profile, before[6],
-                "{attribute}: no other profile may become active"
-            );
+            assert_eq!(f.active_profile, before[6], "{attribute}: no other profile may become active");
             for (index, expected) in before.iter().enumerate() {
                 if index == offset {
                     // The field the value was written into is the one that must have changed; every
@@ -1736,12 +1680,9 @@ mod tests {
     #[test]
     fn the_tab_keys_select_tabs_and_never_f9() {
         let mut f = providers();
-        for (key, tab) in [
-            (5u8, ConfigTab::Providers),
-            (6, ConfigTab::Listening),
-            (8, ConfigTab::Profiles),
-            (10, ConfigTab::Server),
-        ] {
+        for (key, tab) in
+            [(5u8, ConfigTab::Providers), (6, ConfigTab::Listening), (8, ConfigTab::Profiles), (10, ConfigTab::Server)]
+        {
             f.tab = ConfigTab::Providers;
             f.field = 3;
             assert_eq!(f.key(KeyInput::F(key)).action, Some(ConfigAction::SelectTab(tab)));
@@ -1799,9 +1740,7 @@ mod tests {
         assert!(f.dirty);
 
         // Every capability has a Test row, and the row names the connector to probe.
-        for (field, capability) in
-            [(1, Capability::Chat), (6, Capability::Speech), (11, Capability::Transcribe)]
-        {
+        for (field, capability) in [(1, Capability::Chat), (6, Capability::Speech), (11, Capability::Transcribe)] {
             f.tab = ConfigTab::Providers;
             f.field = field;
             assert_eq!(
@@ -1837,11 +1776,7 @@ mod tests {
         assert!(!placeholder.filled(), "a placeholder is not filled");
         assert!(effects(placeholder.apply(ConfigAction::Save)).is_empty(), "and it refuses to save");
         assert!(!placeholder.dirty, "a refused save is not an unsaved change");
-        assert_eq!(
-            placeholder.key(KeyInput::Char(SAVE_KEY)).effects,
-            Vec::new(),
-            "Ctrl+S is refused the same way"
-        );
+        assert_eq!(placeholder.key(KeyInput::Char(SAVE_KEY)).effects, Vec::new(), "Ctrl+S is refused the same way");
 
         placeholder.mark_filled();
         assert!(placeholder.filled());
@@ -2003,8 +1938,7 @@ mod tests {
         f.tab = ConfigTab::Providers;
         for label in f.row_labels() {
             assert!(
-                [ES.cfg_connector, ES.cfg_base_url, ES.cfg_model, ES.cfg_key_name, ES.cfg_test]
-                    .contains(&label),
+                [ES.cfg_connector, ES.cfg_base_url, ES.cfg_model, ES.cfg_key_name, ES.cfg_test].contains(&label),
                 "an unknown row label: {label:?}"
             );
         }

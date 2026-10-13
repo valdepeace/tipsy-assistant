@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::config::RealtimeConfig;
-use crate::keys::{env_var_name, KeyResolver};
+use crate::keys::{KeyResolver, env_var_name};
 
 /// The note's WebSocket endpoint, before the model query (its "Endpoints" section):
 /// `wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1`. A native desktop client uses this
@@ -137,9 +137,7 @@ impl RealtimeError {
     pub fn from_status(status: u16, body: &str) -> Self {
         let message = serde_json::from_str::<serde_json::Value>(body)
             .ok()
-            .and_then(|value| {
-                value.pointer("/error/message").and_then(serde_json::Value::as_str).map(str::to_string)
-            })
+            .and_then(|value| value.pointer("/error/message").and_then(serde_json::Value::as_str).map(str::to_string))
             .filter(|message| !message.is_empty())
             .unwrap_or_else(|| {
                 let trimmed: String = body.chars().take(300).collect();
@@ -236,11 +234,7 @@ impl RealtimeSocket {
     /// Opens a call against the note's endpoint with the production cap and open timeout. It does
     /// **not** read `RealtimeConfig::enabled`: whether a call may start is the client's decision
     /// (Review Focus 3), and a socket that refused to open would put that rule in two places.
-    pub async fn connect(
-        keys: &KeyResolver,
-        config: &RealtimeConfig,
-        spec: &CallSpec,
-    ) -> Result<Self, RealtimeError> {
+    pub async fn connect(keys: &KeyResolver, config: &RealtimeConfig, spec: &CallSpec) -> Result<Self, RealtimeError> {
         Self::connect_with(CallOptions::default(), keys, config, spec).await
     }
 
@@ -262,10 +256,7 @@ impl RealtimeSocket {
             let key = match keys.resolve(&config.key) {
                 Ok(Some((value, _source))) => value,
                 Ok(None) => {
-                    return Err(RealtimeError::MissingKey {
-                        name: config.key.clone(),
-                        env: env_var_name(&config.key),
-                    })
+                    return Err(RealtimeError::MissingKey { name: config.key.clone(), env: env_var_name(&config.key) });
                 }
                 Err(error) => return Err(RealtimeError::Store(error.to_string())),
             };
@@ -279,10 +270,9 @@ impl RealtimeSocket {
         // GA needs no beta header (the note: the beta interface was removed on 2026-05-12), and the
         // optional `OpenAI-Safety-Identifier` is not sent because this process has no hashed user id.
 
-        let (stream, _response) =
-            tokio::time::timeout(options.open_timeout, tokio_tungstenite::connect_async(request))
-                .await
-                .map_err(|_| RealtimeError::Timeout)??;
+        let (stream, _response) = tokio::time::timeout(options.open_timeout, tokio_tungstenite::connect_async(request))
+            .await
+            .map_err(|_| RealtimeError::Timeout)??;
 
         let mut socket = Self {
             stream,
@@ -345,9 +335,7 @@ impl RealtimeSocket {
                 Some(Err(error)) => return Err(error.into()),
                 // The stream ended without a close frame. A *clean* close arrives as a
                 // `Message::Close` below, so reaching here means the peer never said goodbye.
-                None => {
-                    return Err(RealtimeError::Network("the socket closed without a close frame".into()))
-                }
+                None => return Err(RealtimeError::Network("the socket closed without a close frame".into())),
             };
             match message {
                 Message::Text(text) => return Ok(SocketEvent::Text(text.as_str().to_string())),
@@ -358,7 +346,7 @@ impl RealtimeSocket {
                             reason: frame.reason.as_str().to_string(),
                         },
                         None => SocketEvent::Closed { code: None, reason: String::new() },
-                    })
+                    });
                 }
                 Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
             }
@@ -390,17 +378,15 @@ impl RealtimeSocket {
         tokio::time::timeout(self.options.open_timeout, async {
             loop {
                 match self.recv().await? {
-                    SocketEvent::Text(text) if event_type(&text).as_deref() == Some("session.created") => {
-                        return Ok(())
-                    }
+                    SocketEvent::Text(text) if event_type(&text).as_deref() == Some("session.created") => return Ok(()),
                     SocketEvent::Text(text) => self.pending.push_back(text),
                     SocketEvent::Closed { code, reason } => {
                         return Err(RealtimeError::Network(match code {
-                            Some(code) => format!(
-                                "the server closed the socket before the session opened (code {code} {reason})"
-                            ),
+                            Some(code) => {
+                                format!("the server closed the socket before the session opened (code {code} {reason})")
+                            }
                             None => "the server closed the socket before the session opened".to_string(),
-                        }))
+                        }));
                     }
                 }
             }
@@ -512,14 +498,8 @@ mod tests {
         assert_eq!(session["instructions"], "Habla como un compae andaluz, con cariño y sin prisa.");
         assert_eq!(session["output_modalities"], serde_json::json!(["audio"]));
         // Both directions are PCM16 at 24 kHz: the note says the PCM variant supports only 24 kHz.
-        assert_eq!(
-            session["audio"]["input"]["format"],
-            serde_json::json!({ "type": "audio/pcm", "rate": 24_000 })
-        );
-        assert_eq!(
-            session["audio"]["output"]["format"],
-            serde_json::json!({ "type": "audio/pcm", "rate": 24_000 })
-        );
+        assert_eq!(session["audio"]["input"]["format"], serde_json::json!({ "type": "audio/pcm", "rate": 24_000 }));
+        assert_eq!(session["audio"]["output"]["format"], serde_json::json!({ "type": "audio/pcm", "rate": 24_000 }));
         assert_eq!(session["audio"]["output"]["voice"], "cedar");
         // Server-side turn detection, with `[listening] silence_ms` and not a `[realtime] silence_ms`.
         let turn = &session["audio"]["input"]["turn_detection"];
@@ -567,10 +547,7 @@ mod tests {
         assert_eq!(RealtimeError::from_status(403, "forbidden"), RealtimeError::Auth("forbidden".into()));
         assert_eq!(RealtimeError::from_status(429, ""), RealtimeError::RateLimited("HTTP 429".into()));
         assert_eq!(RealtimeError::from_status(504, ""), RealtimeError::Timeout);
-        assert_eq!(
-            RealtimeError::from_status(500, ""),
-            RealtimeError::BadResponse("HTTP 500: HTTP 500".into())
-        );
+        assert_eq!(RealtimeError::from_status(500, ""), RealtimeError::BadResponse("HTTP 500: HTTP 500".into()));
     }
 
     #[test]
