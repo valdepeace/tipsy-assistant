@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tipsy Floating Window Spike",
+  "version": "0.1.0",
+  "identifier": "dev.tipsy.floating-window-spike",
+  "build": { "frontendDist": "src" },
+  "app": { "windows": [], "security": { "csp": null } },
+  "bundle": { "active": false }
+}

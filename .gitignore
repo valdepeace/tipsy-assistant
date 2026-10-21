@@ -1,0 +1,29 @@
+.env
+.env.*
+!.env.example
+!**/.env.example
+target/
+out/
+.crush/
+.serena/
+.tipsy-config/
+.target-sandbox/
+.cargo/
+# The wasm-bindgen output `cargo run -p xtask -- dist` writes: a build artifact, never committed.
+# Root-anchored on purpose, so a `git add -A` can never commit a wasm bundle.
+/web/dist/
+.venv/
+__pycache__/
+*.log
+.superpowers/
+web/vendor/*
+!web/vendor/README.md
+# The screen recordings the README's browser and web-terminal pictures are cut from: raw footage, too
+# heavy for the history. The SVGs `cargo run -p xtask -- shots` writes are committed; these are not.
+/docs/images/raw/
+# The working notes, out of the published repository on purpose: `CLAUDE.md` is the agent's own
+# instruction file (budget, environment traps, a queue of pending requests) and `docs/superpowers/` is
+# the record of how each phase was planned and reviewed. Both stay on this machine and both are
+# ignored rather than tracked, so a `git add -A` cannot put them back.
+/CLAUDE.md
+/docs/superpowers/

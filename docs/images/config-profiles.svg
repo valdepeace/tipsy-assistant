@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1152" height="520" viewBox="0 0 1152 520" font-family="DejaVu Sans Mono,Cascadia Mono,Consolas,Liberation Mono,Menlo,monospace">
+<rect width="1152" height="520" fill="#0b0f14"/>
+<rect x="0.0" y="0.0" width="163.2" height="20" fill="#00d2ff" shape-rendering="crispEdges"/>
+<rect x="201.6" y="20.0" width="76.8" height="20" fill="#00d2ff" shape-rendering="crispEdges"/>
+<rect x="0.0" y="120.0" width="1152.0" height="20" fill="#001e28" shape-rendering="crispEdges"/>
+<rect x="0.0" y="480.0" width="76.8" height="20" fill="#ffbe3c" shape-rendering="crispEdges"/>
+<rect x="96.0" y="480.0" width="86.4" height="20" fill="#00d2ff" shape-rendering="crispEdges"/>
+<text x="9.6" y="15.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">◉</text>
+<text x="28.8" y="15.4" textLength="124.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">CONFIGURACIÓN</text>
+<text x="182.4" y="15.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#0dbc79" font-weight="bold" xml:space="preserve">Listo,</text>
+<text x="249.6" y="15.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#0dbc79" font-weight="bold" xml:space="preserve">quillo</text>
+<text x="1075.2" y="15.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">push</text>
+<text x="1132.8" y="15.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffbe3c" font-weight="bold" xml:space="preserve">⚙</text>
+<text x="9.6" y="35.4" textLength="105.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Proveedores</text>
+<text x="124.8" y="35.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Escucha</text>
+<text x="201.6" y="35.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">Perfiles</text>
+<text x="288.0" y="35.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Servidor</text>
+<text x="0.0" y="75.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="75.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffbe3c" xml:space="preserve">◉</text>
+<text x="268.8" y="75.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffbe3c" xml:space="preserve">El</text>
+<text x="297.6" y="75.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffbe3c" xml:space="preserve">Compae</text>
+<text x="0.0" y="95.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="95.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">O</text>
+<text x="268.8" y="95.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Meigo</text>
+<text x="0.0" y="115.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="115.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">El</text>
+<text x="278.4" y="115.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Chulapo</text>
+<text x="0.0" y="135.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#00d2ff" xml:space="preserve">Perfil</text>
+<text x="249.6" y="135.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">El</text>
+<text x="278.4" y="135.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Senyor</text>
+<text x="0.0" y="155.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="155.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">The</text>
+<text x="288.0" y="155.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Good</text>
+<text x="336.0" y="155.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Ol'</text>
+<text x="374.4" y="155.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Boy</text>
+<text x="0.0" y="175.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="175.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">The</text>
+<text x="288.0" y="175.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Hustler</text>
+<text x="0.0" y="195.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="195.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">The</text>
+<text x="288.0" y="195.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Mate</text>
+<text x="0.0" y="215.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="215.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">The</text>
+<text x="288.0" y="215.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Bloke</text>
+<text x="0.0" y="235.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="235.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">The</text>
+<text x="288.0" y="235.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Polite</text>
+<text x="355.2" y="235.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">One</text>
+<text x="0.0" y="255.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Nombre</text>
+<text x="249.6" y="255.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">El</text>
+<text x="278.4" y="255.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Compae</text>
+<text x="0.0" y="275.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Idioma</text>
+<text x="249.6" y="275.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">es-ES</text>
+<text x="0.0" y="295.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Prompt</text>
+<text x="249.6" y="295.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Eres</text>
+<text x="297.6" y="295.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">«el</text>
+<text x="336.0" y="295.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Compae»,</text>
+<text x="422.4" y="295.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">un</text>
+<text x="451.2" y="295.4" textLength="86.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">asistente</text>
+<text x="547.2" y="295.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">de</text>
+<text x="576.0" y="295.4" textLength="96.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">desarrollo</text>
+<text x="681.6" y="295.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">de</text>
+<text x="710.4" y="295.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">software</text>
+<text x="796.8" y="295.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">andaluz,</text>
+<text x="883.2" y="295.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">con</text>
+<text x="921.6" y="295.4" textLength="86.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">muchísima</text>
+<text x="1017.6" y="295.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">guasa,</text>
+<text x="1084.8" y="295.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">casi</text>
+<text x="1132.8" y="295.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">bo</text>
+<text x="0.0" y="315.4" textLength="124.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Instrucciones</text>
+<text x="134.4" y="315.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">de</text>
+<text x="163.2" y="315.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">voz</text>
+<text x="249.6" y="315.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Voz</text>
+<text x="288.0" y="315.4" textLength="86.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">masculina</text>
+<text x="384.0" y="315.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">adulta,</text>
+<text x="460.8" y="315.4" textLength="105.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">medio-grave</text>
+<text x="576.0" y="315.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">y</text>
+<text x="595.2" y="315.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">cálida,</text>
+<text x="672.0" y="315.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">limpia</text>
+<text x="739.2" y="315.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">y</text>
+<text x="758.4" y="315.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">con</text>
+<text x="796.8" y="315.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">apenas</text>
+<text x="864.0" y="315.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">un</text>
+<text x="892.8" y="315.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">leve</text>
+<text x="940.8" y="315.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">toque</text>
+<text x="998.4" y="315.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">rasposo,</text>
+<text x="1084.8" y="315.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">nada</text>
+<text x="1132.8" y="315.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">ro</text>
+<text x="0.0" y="335.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Saludo</text>
+<text x="249.6" y="335.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Ozú,</text>
+<text x="297.6" y="335.4" textLength="86.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">quillo...</text>
+<text x="393.6" y="335.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">ya</text>
+<text x="422.4" y="335.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">estoy</text>
+<text x="480.0" y="335.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">aquí,</text>
+<text x="537.6" y="335.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">ya.</text>
+<text x="576.0" y="335.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">¿Qué</text>
+<text x="624.0" y="335.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">querías,</text>
+<text x="710.4" y="335.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">mi</text>
+<text x="739.2" y="335.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">arma?</text>
+<text x="796.8" y="335.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Que</text>
+<text x="835.2" y="335.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">sea</text>
+<text x="873.6" y="335.4" textLength="76.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">cortito,</text>
+<text x="960.0" y="335.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">¿eh?</text>
+<text x="0.0" y="355.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Palabra</text>
+<text x="76.8" y="355.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">clave</text>
+<text x="249.6" y="355.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">oye</text>
+<text x="288.0" y="355.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">compae</text>
+<text x="0.0" y="375.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Perfil</text>
+<text x="249.6" y="375.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">compae</text>
+<text x="0.0" y="395.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Voces</text>
+<text x="249.6" y="395.4" textLength="96.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">elevenlabs</text>
+<text x="0.0" y="415.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Voces</text>
+<text x="249.6" y="415.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">george</text>
+<text x="0.0" y="435.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Voces</text>
+<text x="249.6" y="435.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">gemini</text>
+<text x="0.0" y="455.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Voces</text>
+<text x="249.6" y="455.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#ffffff" xml:space="preserve">Charon</text>
+<text x="9.6" y="495.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">Probar</text>
+<text x="105.6" y="495.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#000000" font-weight="bold" xml:space="preserve">Guardar</text>
+<text x="19.2" y="515.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">F9</text>
+<text x="48.0" y="515.4" textLength="96.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">configurar</text>
+<text x="153.6" y="515.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="172.8" y="515.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">↑↓</text>
+<text x="201.6" y="515.4" textLength="38.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">fila</text>
+<text x="249.6" y="515.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="268.8" y="515.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">←→</text>
+<text x="297.6" y="515.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">pestaña</text>
+<text x="374.4" y="515.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="393.6" y="515.4" textLength="48.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Enter</text>
+<text x="451.2" y="515.4" textLength="144.0" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">editar/alternar</text>
+<text x="604.8" y="515.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="624.0" y="515.4" textLength="19.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">F2</text>
+<text x="652.8" y="515.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">probar</text>
+<text x="720.0" y="515.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="739.2" y="515.4" textLength="86.4" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">F4/Ctrl+S</text>
+<text x="835.2" y="515.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">guardar</text>
+<text x="912.0" y="515.4" textLength="9.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">·</text>
+<text x="931.2" y="515.4" textLength="28.8" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">Esc</text>
+<text x="969.6" y="515.4" textLength="57.6" lengthAdjust="spacingAndGlyphs" font-size="16" fill="#005f7d" xml:space="preserve">cerrar</text>
+</svg>

@@ -1,0 +1,73 @@
+[package]
+name = "tipsy-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The browser client: Ratzilla backend, web-sys WebSocket, browser audio"
+
+# `cdylib` is the artifact wasm-bindgen processes; `rlib` is what the host test binary links.
+# Both are needed, and the workspace has no other crate-type (codebase-recon.md §1.1, §11.2).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tipsy-protocol.workspace = true
+tipsy-ui.workspace = true
+# Task 3.5: `Hit.area` is a `ratatui::layout::Rect`, so the tests that build one need the crate by
+# name, and `hud.rs`'s own rendering test needs `Terminal` and `TestBackend`. The **workspace** entry
+# and not a fresh one: it is `{ version = "0.30", default-features = false, features = ["std",
+# "layout-cache", "all-widgets"] }` and therefore carries **no crossterm**, which is the property that
+# keeps the wasm build plausible. It resolves to the same `ratatui 0.30.2` `tipsy-ui` and `ratzilla`
+# already share — `Hit` would be a different type otherwise.
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Pinned as Task 3.1's verdict recorded them: `=0.3.1` because a bump to ratatui 0.31 while the
+# workspace stays on 0.30 would silently produce two `Frame` types (ratzilla-and-wasm-audio.md:359).
+# The other four are the versions `Cargo.lock` already held when this crate was added, which is why
+# they introduce no new crate resolution (web-transport-and-terminal.md, ratzilla-and-wasm-audio.md).
+ratzilla = "=0.3.1"
+wasm-bindgen = "0.2.129"
+js-sys = "0.3.106"
+wasm-bindgen-futures = "0.4.79"
+
+[dependencies.web-sys]
+version = "0.3.106"
+features = [
+  # The socket and the page's own location.
+  "Window", "Location", "UrlSearchParams", "Document", "Element", "HtmlElement", "Node", "console",
+  "WebSocket", "BinaryType", "MessageEvent",
+  # Task 3.3: the microphone. Every name was checked against web-sys 0.3.106's own generated
+  # bindings and its feature list, and the three the plan's list carries that are *not* here are
+  # absent on purpose: **`AudioNode`** is where `connect_with_audio_node` lives — the plan omits it and
+  # the source-to-node connection cannot be spelled without it; **`PermissionDescriptor` and
+  # `PermissionName`** cannot be used at all, because `PermissionName` has no `Microphone` variant in
+  # 0.3.106 and `Permissions::query` takes a `&js_sys::Object` (`gen_Permissions.rs`); and
+  # **`CssStyleDeclaration`** is for styling the gate, which is Task 3.5's look and not this task's.
+  "Navigator", "MediaDevices", "MediaStream", "MediaStreamConstraints", "MediaTrackConstraints",
+  "AudioContext", "AudioContextOptions", "BaseAudioContext", "AudioWorklet", "Worklet",
+  "AudioWorkletNode", "AudioWorkletNodeOptions", "AudioNode", "MediaStreamAudioSourceNode",
+  "MessagePort", "Permissions", "PermissionStatus", "PermissionState",
+  # Task 3.3: the gate's own DOM. `disabled` lives on the button element, not on `HtmlElement`.
+  "HtmlButtonElement",
+  # Task 3.4: playback. `create_buffer_source` needs `AudioBufferSourceNode` (which pulls in
+  # `AudioScheduledSourceNode`), `set_buffer` needs `AudioBuffer`, and **`ctx.destination()` needs
+  # `AudioDestinationNode` — a feature the plan's own Step 4 list omits**, measured: without it the
+  # wasm build fails with E0599 on `destination`, which is the one call that reaches the speakers.
+  "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode",
+]
+
+# **Why Task 3.2's wasm-only dependencies are still here and not under a
+# `[target.'cfg(target_arch = "wasm32")'.dependencies]` block, which is what the plan's Step 4 asks
+# for.** That step's premise is that only the pure half compiles for the host. It is not true of this
+# tree: Task 3.3 put **sixteen host tests inside `mic.rs`**, and `mic.rs`, `socket.rs` and
+# `web_audio.rs` all name `web_sys`/`wasm_bindgen` types in *production* code that the host test binary
+# links. Moving the block leaves the host build unable to resolve `wasm_bindgen` at all — measured, and
+# recorded in the ledger's induced failures: `cargo test -p tipsy-web` then fails to compile `mic.rs`
+# and `socket.rs`, which is sixteen test names lost and no test run at all. The dependencies compile on
+# this host (`web-sys`'s items are `extern "C"` declarations and `wasm-bindgen` emits a panicking
+# fallback), which is the fact Task 3.2 measured before Task 3.3's tests depended on it. If a later task
+# wants the target-specific block, the wasm half of all three modules has to be gated with it in one
+# move — a manifest-level decision no single task should take from the middle.
