@@ -129,8 +129,8 @@ The local model notes above come from prior knowledge, not from a fresh search; 
 v2.
 
 **Cloning:** only with one's own or designed voices, never with a third party's voice without
-consent. The project's reference voice (`assets/voice_ref.wav`) was designed from a text
-description with Qwen3-TTS VoiceDesign and belongs to no real person.
+consent. The local reference voice was designed from a text description with Qwen3-TTS VoiceDesign
+and belongs to no real person; its audio file is kept outside Git.
 
 ## Pending before implementation
 
