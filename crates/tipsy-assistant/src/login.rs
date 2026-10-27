@@ -176,7 +176,10 @@ mod tests {
     #[test]
     fn a_multi_word_keyword_must_be_said_in_one_run() {
         let config = login(true, vec![entry("Huésped", &["huesped con acceso", "core"])]);
-        assert_eq!(judge(&config, "soy huesped con acceso autorizado"), Verdict { ok: true, name: Some("Huésped".into()) });
+        assert_eq!(
+            judge(&config, "soy huesped con acceso autorizado"),
+            Verdict { ok: true, name: Some("Huésped".into()) }
+        );
         assert_eq!(judge(&config, "soy huesped, acceso autorizado y core"), Verdict::refused());
     }
 

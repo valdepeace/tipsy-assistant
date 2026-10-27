@@ -598,7 +598,8 @@ mod tests {
     #[test]
     fn every_brief_the_speech_provider_receives_opens_with_the_tone_floor() {
         for profile in crate::config::profiles::builtin_profiles() {
-            let config = crate::config::Config { active_profile: profile.id.clone(), ..crate::config::Config::default() };
+            let config =
+                crate::config::Config { active_profile: profile.id.clone(), ..crate::config::Config::default() };
             let composed = crate::turn_profile(&config);
             assert_eq!(
                 super::first_sentence(&composed.voice_instructions),

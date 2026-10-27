@@ -13,4 +13,4 @@ pub use config_form::*;
 pub use render::*;
 pub use state::*;
 pub use strings::{Strings, strings};
-pub use tone::{first_sentence, prompt_with_floor, brief_with_floor, TONE_FLOOR_EN, TONE_FLOOR_ES, TONE_FLOOR_LABEL};
+pub use tone::{TONE_FLOOR_EN, TONE_FLOOR_ES, TONE_FLOOR_LABEL, brief_with_floor, first_sentence, prompt_with_floor};

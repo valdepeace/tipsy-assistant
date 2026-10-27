@@ -18,8 +18,8 @@ pub const TONE_FLOOR_LABEL: &str = "Tone floor:";
 /// Stops at the first `.`, `!`, `?`, or `-` (em dash).
 pub fn first_sentence(text: &str) -> &str {
     let em_dash = '\u{2014}';
-    let terminators = ['.','!','?',em_dash];
-    
+    let terminators = ['.', '!', '?', em_dash];
+
     let mut pos = 0;
     for &terminator in terminators.iter() {
         if let Some(idx) = text.find(terminator) {
@@ -27,7 +27,7 @@ pub fn first_sentence(text: &str) -> &str {
             break;
         }
     }
-    
+
     &text[..pos]
 }
 

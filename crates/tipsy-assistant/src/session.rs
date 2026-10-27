@@ -25,7 +25,6 @@ use crate::providers::{ChatMessage, ProviderSlot, Role};
 use crate::server::Hub;
 use crate::vad::{Scorer, VadEvent, VadState};
 
-
 /// The session ids this process has handed out. One session per connection means the id can no
 /// longer be a constant (spec §5.2): two clients connected at once have to be told apart, and
 /// `Welcome.session_id` is what tells them apart. The first session is `1`, so a single-client run
