@@ -1,0 +1,66 @@
+name: Build
+
+on:
+  push:
+    branches: [master, alpha]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64
+            os: windows-latest
+            artifact: windows-x86_64
+          - name: Linux x86_64
+            os: ubuntu-latest
+            artifact: linux-x86_64
+          - name: macOS ARM64
+            os: macos-latest
+            artifact: macos-arm64
+          - name: macOS Intel
+            os: macos-15-intel
+            artifact: macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux audio headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Install WebAssembly target and matching wasm-bindgen CLI
+        shell: pwsh
+        run: |
+          rustup target add wasm32-unknown-unknown
+          $lock = Get-Content Cargo.lock -Raw
+          $match = [regex]::Match($lock, '(?ms)\[\[package\]\]\r?\nname = "wasm-bindgen"\r?\nversion = "([^"]+)"')
+          if (-not $match.Success) { throw 'wasm-bindgen was not found in Cargo.lock' }
+          cargo install wasm-bindgen-cli --version $match.Groups[1].Value --locked
+
+      - name: Build distribution
+        run: cargo run -p xtask -- dist
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'tipsy-assistant'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $binary = if ($IsWindows) { 'target/release/tipsy-assistant.exe' } else { 'target/release/tipsy-assistant' }
+          Copy-Item $binary $stage
+          Copy-Item README.md, LICENSE-APACHE, LICENSE-MIT $stage
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath "tipsy-assistant-${{ matrix.artifact }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tipsy-assistant-${{ matrix.artifact }}
+          path: tipsy-assistant-${{ matrix.artifact }}.zip
+          if-no-files-found: error

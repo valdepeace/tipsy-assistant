@@ -9,6 +9,12 @@ end, always gives a correct and useful answer. The project is meant to be shared
 community: a single executable, cloud providers that anyone can use with their own key, and
 profiles that anyone can write for their own region.
 
+## Acknowledgements
+
+To my coworkers: thank you for the conversations, ideas and camaraderie that inspired Tipsy.
+
+A mis compañeros de trabajo: gracias por las conversaciones, las ideas y el compañerismo que inspiraron Tipsy.
+
 **Status: Alpha (`0.1.0-alpha.1`).** This is an early preview; features, configuration and protocol
 may change between prereleases. The workspace, the protocol, the
 configuration and the key handling, the chat, speech and transcription providers (the
@@ -23,7 +29,12 @@ builds the browser HUD into `web/dist/`, the binary embeds it, and `/` renders t
 WebAssembly with the browser's own microphone and speakers (Phase 3), behind the login door when
 `[login]` is configured. Still to come: `hands_free` (it waits for the wake word) and stable releases.
 GitHub Actions runs formatting and the workspace tests on pushes to `master` or `alpha`, version tags,
-and pull requests.
+and pull requests. A separate [Build workflow](.github/workflows/build.yml) builds the full distribution
+for Windows, Linux and macOS; its ZIP files are available as artifacts on each workflow run. See the
+[branch and release policy](docs/RELEASING.md) for versioning and publication rules.
+The static [presentation site](site/index.html) is available in Spanish, English, Simplified Chinese
+and Japanese; it includes a setup guide. [docs/WEBSITE.md](docs/WEBSITE.md) records how to preview it
+and connect a custom domain later.
 
 ## Screenshots
 
