@@ -240,6 +240,7 @@ mod tests {
                 voice_instructions: "andaluz, tranquilo".into(),
                 greeting: "¿Qué pasa, quillo?".into(),
                 wake_word: "oye compae".into(),
+                tone_floor: "Tono de prueba.".into(),
                 voices: BTreeMap::from([
                     ("gemini".to_string(), "Charon".to_string()),
                     ("elevenlabs".to_string(), "george".to_string()),
