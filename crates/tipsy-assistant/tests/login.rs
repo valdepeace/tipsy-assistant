@@ -224,7 +224,7 @@ async fn a_typed_answer_is_judged_without_ever_asking_the_chat_provider() {
     assert_eq!(refused, Event::LoginVerdict { ok: false, name: None });
 
     to_server
-        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado".into() }))
+        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado y core".into() }))
         .unwrap();
     let opened = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
     assert_eq!(opened, Event::LoginVerdict { ok: true, name: Some("Huésped".into()) });
@@ -309,7 +309,7 @@ async fn the_greeting_waits_for_the_login_verdict() {
     assert!(quiet.is_err(), "a refused visitor is not greeted, got {:?}", quiet.map(|m| m.map(|m| format!("{m:?}"))));
 
     to_server
-        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado".into() }))
+        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado y core".into() }))
         .unwrap();
     let opened = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
     assert_eq!(opened, Event::LoginVerdict { ok: true, name: Some("Huésped".into()) });
@@ -330,7 +330,7 @@ async fn a_second_ok_verdict_does_not_greet_twice() {
     let _ = next_event(&mut from_server).await; // Welcome, and no greeting behind it
 
     to_server
-        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado".into() }))
+        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado y core".into() }))
         .unwrap();
     let opened = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
     assert_eq!(opened, Event::LoginVerdict { ok: true, name: Some("Huésped".into()) });
@@ -340,7 +340,7 @@ async fn a_second_ok_verdict_does_not_greet_twice() {
     let _ = drain(&mut from_server, 50).await;
 
     to_server
-        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado".into() }))
+        .send(ToServer::Command(Command::LoginAnswer { text: "yo soy Huésped con acceso autorizado y core".into() }))
         .unwrap();
     let again = next_event_matching(&mut from_server, |e| matches!(e, Event::LoginVerdict { .. }), 2000).await;
     assert_eq!(again, Event::LoginVerdict { ok: true, name: Some("Huésped".into()) });

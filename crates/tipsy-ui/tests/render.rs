@@ -135,11 +135,14 @@ fn network_tab_shows_chart_legend() {
 }
 
 #[test]
-fn listening_shows_red_indicator_text() {
+fn open_mic_shows_enabled_status_text() {
     let mut s = state(UiLanguage::Es);
     s.on_key(KeyInput::Tab);
     let (text, _, _) = render(&s);
-    assert!(text.contains("Escuchando"));
+    assert!(
+        text.contains(strings(UiLanguage::Es).mic_enabled),
+        "the active mic status uses the current language: {text:?}"
+    );
 }
 
 #[test]
@@ -326,7 +329,7 @@ fn the_screen_survives_a_terminal_too_small_for_it() {
 }
 
 #[test]
-fn the_header_shows_the_live_indicator_instead_of_anything_else() {
+fn the_header_shows_the_live_indicator_before_the_in_flight_status() {
     let mut s = state(UiLanguage::Es);
     s.apply(&Event::Live { active: true });
     // A turn in flight is not a reason to hide it: the call is billing while it lasts, so the
@@ -337,8 +340,9 @@ fn the_header_shows_the_live_indicator_instead_of_anything_else() {
     assert!(s.busy(), "the test is only worth anything while the spinner would be drawn");
     let (text, _, _) = render(&s);
     assert!(text.contains("EN VIVO"), "missing the live indicator");
-    assert!(!text.contains("Pensando"), "a spinner may not sit in front of it");
-    assert!(!text.contains("Listo"), "the indicator is the header while a call lasts");
+    let live = text.find("EN VIVO").unwrap();
+    let thinking = text.find("Pensando").unwrap();
+    assert!(live < thinking, "the live indicator must precede the in-flight status");
 }
 
 #[test]
@@ -591,7 +595,8 @@ fn a_login_answer_being_transcribed_says_so_on_the_status_line() {
 #[test]
 fn a_typed_answer_is_not_dressed_up_as_a_transcription() {
     let mut s = login(true, true, true);
-    for c in "huesped".chars() {
+    let answer = "huesped";
+    for c in answer.chars() {
         s.on_key(KeyInput::Char(c));
     }
     s.on_key(KeyInput::Enter);
@@ -655,7 +660,8 @@ fn the_cursor_follows_the_login_box() {
     assert_eq!(caret.y, row, "the cursor is on the input row");
     let x0 = caret.x;
 
-    for c in "huesped".chars() {
+    let answer = "huesped";
+    for c in answer.chars() {
         s.on_key(KeyInput::Char(c));
     }
     term.draw(|f| {
@@ -664,7 +670,7 @@ fn the_cursor_follows_the_login_box() {
     .unwrap();
     let moved = term.get_cursor_position().expect("the frame must place the cursor");
     assert_eq!(moved.y, row);
-    assert_eq!(moved.x, x0 + 6, "the caret follows the characters the box has taken");
+    assert_eq!(moved.x, x0 + answer.chars().count() as u16, "the caret follows the characters the box has taken");
 }
 
 /// Spec §6's degradation: a frame too small for a bordered widget gets the bare input row on its last

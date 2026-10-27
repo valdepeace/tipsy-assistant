@@ -658,8 +658,12 @@ async fn switching_profile_changes_the_prompt_of_the_next_turn() {
 
     let sent = chat.requests.lock().unwrap()[0].messages.clone();
     assert_eq!(sent[0].role, Role::System);
-    let senyor = config().profiles.into_iter().find(|p| p.id == "senyor").unwrap().prompt;
-    assert_eq!(sent[0].content, senyor, "the next turn must speak as the profile just chosen: {sent:#?}");
+    let senyor = config().profiles.into_iter().find(|p| p.id == "senyor").unwrap();
+    assert_eq!(
+        sent[0].content,
+        tipsy_ui::tone::prompt_with_floor(&senyor.prompt, &senyor.tone_floor),
+        "the next turn must speak as the profile just chosen: {sent:#?}"
+    );
 }
 
 // ---------- auto mode ----------

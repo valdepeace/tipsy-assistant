@@ -973,7 +973,7 @@ mod tests {
         s.set_mic_open(true);
         s.notify("aviso visible");
         let text = rendered(&[header(&s, Rect::new(0, 0, 240, 1), "Tipsy", None).0]).concat();
-        for expected in ["LIVE", "MIC", es().output_badge, es().output_local, "aviso visible"] {
+        for expected in [es().live, "MIC", es().output_badge, es().output_local, "aviso visible"] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
 
@@ -992,7 +992,7 @@ mod tests {
         });
         s.local_output = true;
         let failed = rendered(&[header(&s, Rect::new(0, 0, 240, 1), "Tipsy", None).0]).concat();
-        for expected in [es().reply_failed, "LIVE", "MIC", es().output_badge] {
+        for expected in [es().reply_failed, es().live, "MIC", es().output_badge] {
             assert!(failed.contains(expected), "missing {expected:?} in {failed:?}");
         }
     }
