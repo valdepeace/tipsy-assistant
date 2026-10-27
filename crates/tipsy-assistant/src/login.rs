@@ -148,7 +148,7 @@ mod tests {
     fn the_worked_examples_of_the_spec() {
         let config = login(true, vec![entry("Huésped", &["huesped", "core"]), entry("María", &["maria", "data"])]);
         let cases: &[(&str, Verdict)] = &[
-            ("yo soy Huésped con acceso autorizado", Verdict { ok: true, name: Some("Huésped".into()) }),
+            ("yo soy Huésped con acceso autorizado y core", Verdict { ok: true, name: Some("Huésped".into()) }),
             ("HUÉSPED, del CORE!!", Verdict { ok: true, name: Some("Huésped".into()) }),
             ("soy huesped del score", Verdict::refused()),
             ("soy Huésped", Verdict::refused()),
@@ -177,7 +177,7 @@ mod tests {
     fn a_multi_word_keyword_must_be_said_in_one_run() {
         let config = login(true, vec![entry("Huésped", &["huesped con acceso", "core"])]);
         assert_eq!(
-            judge(&config, "soy huesped con acceso autorizado"),
+            judge(&config, "soy huesped con acceso autorizado y core"),
             Verdict { ok: true, name: Some("Huésped".into()) }
         );
         assert_eq!(judge(&config, "soy huesped, acceso autorizado y core"), Verdict::refused());

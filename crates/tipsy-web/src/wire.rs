@@ -139,6 +139,7 @@ mod tests {
                 voice_instructions: "Cercano.".into(),
                 greeting: "Listo, quillo.".into(),
                 wake_word: "oye compae".into(),
+                tone_floor: "Tono de prueba.".into(),
                 voices: vec![("openai_compat".into(), "alloy".into())],
             }],
             server: ServerView { bind: "127.0.0.1:7070".into(), lan: true, token: "no-es-un-secreto-real".into() },
@@ -242,7 +243,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
             })
             .unwrap(),
-            r#"{"type":"hello","token":null,"client":"web","protocol_version":1}"#
+            r#"{"type":"hello","token":null,"client":"web","protocol_version":2}"#
         );
         assert_eq!(command_to_text(&Command::ListenStart).unwrap(), r#"{"type":"listen_start"}"#);
         assert_eq!(

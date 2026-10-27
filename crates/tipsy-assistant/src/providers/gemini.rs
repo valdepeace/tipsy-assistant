@@ -601,9 +601,18 @@ mod tests {
             let config =
                 crate::config::Config { active_profile: profile.id.clone(), ..crate::config::Config::default() };
             let composed = crate::turn_profile(&config);
+            let floor = if profile.tone_floor.trim().is_empty() {
+                if profile.language.split('-').next().is_some_and(|language| language.eq_ignore_ascii_case("es")) {
+                    tipsy_ui::tone::TONE_FLOOR_ES
+                } else {
+                    tipsy_ui::tone::TONE_FLOOR_EN
+                }
+            } else {
+                &profile.tone_floor
+            };
             assert_eq!(
                 super::first_sentence(&composed.voice_instructions),
-                tipsy_ui::tone::TONE_FLOOR_ES,
+                super::first_sentence(floor),
                 "{}: the API must read the floor as the style",
                 profile.id
             );
@@ -623,7 +632,7 @@ mod tests {
             let composed = crate::turn_profile(&config);
             assert_eq!(
                 super::first_sentence(&composed.voice_instructions),
-                tipsy_ui::tone::TONE_FLOOR_ES,
+                super::first_sentence(tipsy_ui::tone::TONE_FLOOR_ES),
                 "a brief of {brief:?} must still open with the floor"
             );
         }

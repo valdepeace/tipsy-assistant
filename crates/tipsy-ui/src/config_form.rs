@@ -325,6 +325,7 @@ impl From<&ConfigForm> for ConfigView {
                     voice_instructions: profile.voice_instructions.clone(),
                     greeting: profile.greeting.clone(),
                     wake_word: profile.wake_word.clone(),
+                    tone_floor: profile.tone_floor.clone(),
                     voices: profile.voices.clone(),
                 })
                 .collect(),
@@ -388,6 +389,7 @@ impl From<&ConfigForm> for ClientConfigView {
                     voice_instructions: profile.voice_instructions.clone(),
                     greeting: profile.greeting.clone(),
                     wake_word: profile.wake_word.clone(),
+                    tone_floor: profile.tone_floor.clone(),
                     voices: profile.voices.clone(),
                 })
                 .collect(),
@@ -455,7 +457,7 @@ impl From<ConfigView> for ConfigForm {
                 voice_instructions: profile.voice_instructions,
                 greeting: profile.greeting,
                 wake_word: profile.wake_word,
-                tone_floor: String::new(),
+                tone_floor: profile.tone_floor,
                 voices: profile.voices,
             })
             .collect();

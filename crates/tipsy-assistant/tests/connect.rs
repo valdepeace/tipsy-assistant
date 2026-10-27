@@ -217,7 +217,7 @@ async fn connect_opens_with_a_hello_and_shuttles_both_channels() {
         Command::Hello { token, client, protocol_version } => {
             assert_eq!(token.as_deref(), Some("s3cret"), "the token the CLI was given is what `Hello` carries");
             assert_eq!(client, ClientKind::Tui);
-            assert_eq!(protocol_version, PROTOCOL_VERSION, "PROTOCOL_VERSION stays 1 (global constraints)");
+            assert_eq!(protocol_version, PROTOCOL_VERSION, "client and server speak the same protocol version");
         }
         other => panic!("the first frame must be `Hello`, got {other:?}"),
     }

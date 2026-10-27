@@ -170,8 +170,7 @@ fn language_mapping() {
     assert_eq!(UiLanguage::from_bcp47(""), UiLanguage::En);
 }
 
-/// The login screen's three commands and two events (spec §4). They are additive, which is why
-/// `PROTOCOL_VERSION` does not move: Plan 2B's `TestResult` and Plan 2C's `Live` did the same.
+/// The login screen's three commands and two events (spec §4).
 #[test]
 fn login_commands_and_events_roundtrip() {
     roundtrip_command(Command::LoginStart);
@@ -272,6 +271,7 @@ fn config_view() -> ConfigView {
             voice_instructions: "andaluz, tranquilo".into(),
             greeting: "¿Qué pasa, quillo?".into(),
             wake_word: "oye compae".into(),
+            tone_floor: "Tono de prueba.".into(),
             voices: vec![
                 ("elevenlabs".to_string(), "george".to_string()),
                 ("openai_compat".to_string(), "alloy".to_string()),

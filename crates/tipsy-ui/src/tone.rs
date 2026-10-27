@@ -31,24 +31,26 @@ pub fn first_sentence(text: &str) -> &str {
     &text[..pos]
 }
 
-/// Composes the delivery brief with the tone floor prepended.
-/// The profile's `voice_instructions` already contains the floor as its first sentence,
-/// so this function returns it unchanged.
-///
-/// This is the operational meaning of "the tone floor prevails": the floor is not added
-/// to an existing brief, it is baked into the brief that the profile declares.
-pub fn brief_with_floor(text: &str) -> String {
-    text.to_string()
+/// Composes the delivery brief with the tone floor first.
+pub fn brief_with_floor(text: &str, floor: &str) -> String {
+    if floor.is_empty() {
+        text.to_string()
+    } else if text.is_empty() {
+        floor.to_string()
+    } else {
+        format!("{floor} {text}")
+    }
 }
 
-/// Composes the system prompt with the tone floor appended.
-/// The profile's `prompt` already contains the floor as its last sentence,
-/// so this function returns it unchanged.
-///
-/// This ensures `composed.starts_with(prompt)` is true, which is the operational
-/// meaning of "do not corrupt a user's prompt".
-pub fn prompt_with_floor(text: &str) -> String {
-    text.to_string()
+/// Composes the system prompt with the tone floor appended, leaving the user's text intact.
+pub fn prompt_with_floor(text: &str, floor: &str) -> String {
+    if floor.is_empty() {
+        text.to_string()
+    } else if text.is_empty() {
+        floor.to_string()
+    } else {
+        format!("{text}\n\n{floor}")
+    }
 }
 
 #[cfg(test)]
@@ -73,17 +75,15 @@ mod tests {
         assert_eq!(en_first.len(), 143, "the English floor is one sentence");
     }
 
-    /// brief_with_floor returns the text unchanged.
+    /// The brief starts with the floor.
     #[test]
-    fn brief_with_floor_returns_unchanged() {
-        let text = "Hello, compadre.";
-        assert_eq!(brief_with_floor(text), text);
+    fn brief_with_floor_puts_the_floor_first() {
+        assert_eq!(brief_with_floor("Hello, compadre.", "Floor."), "Floor. Hello, compadre.");
     }
 
-    /// prompt_with_floor returns the text unchanged.
+    /// The floor follows the user's prompt without changing its text.
     #[test]
-    fn prompt_with_floor_returns_unchanged() {
-        let text = "Hello, compadre.";
-        assert_eq!(prompt_with_floor(text), text);
+    fn prompt_with_floor_appends_the_floor() {
+        assert_eq!(prompt_with_floor("Hello, compadre.", "Floor."), "Hello, compadre.\n\nFloor.");
     }
 }

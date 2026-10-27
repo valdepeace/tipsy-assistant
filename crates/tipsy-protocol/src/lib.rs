@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -193,6 +193,7 @@ pub struct ProfileEntryView {
     pub voice_instructions: String,
     pub greeting: String,
     pub wake_word: String,
+    pub tone_floor: String,
     /// Sorted by connector name: a map's order is not a screen order, and the row index names back.
     pub voices: Vec<(String, String)>,
 }

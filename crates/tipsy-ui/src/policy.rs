@@ -152,7 +152,7 @@ pub fn hit_at(hits: &[Hit], column: u16, row: u16) -> Option<Hit> {
 mod tests {
     use super::*;
 
-    use tipsy_protocol::{ClientKind, ListeningMode};
+    use tipsy_protocol::{ClientKind, ListeningMode, PROTOCOL_VERSION};
 
     #[test]
     fn a_speech_chunk_is_the_only_event_that_announces_a_rate() {
@@ -280,7 +280,7 @@ mod tests {
             Command::Reset,
             Command::SetProfile { id: "meigo".into() },
             Command::SetListeningMode { mode: ListeningMode::Push },
-            Command::Hello { token: None, client: ClientKind::Tui, protocol_version: 1 },
+            Command::Hello { token: None, client: ClientKind::Tui, protocol_version: PROTOCOL_VERSION },
         ] {
             assert!(!takes_the_floor(&command), "{command:?} is not an interruption");
         }

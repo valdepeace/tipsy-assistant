@@ -326,7 +326,7 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tipsy_protocol::{AssistantState, Capability, ClientKind, Event, ListeningMode};
+    use tipsy_protocol::{AssistantState, Capability, ClientKind, Event, ListeningMode, PROTOCOL_VERSION};
 
     /// 24 000 samples at 24 kHz is one second: the arithmetic every test below relies on.
     fn samples(ms: u64, rate: u32) -> Vec<i16> {
@@ -598,7 +598,7 @@ mod tests {
     fn command_cohort() -> Vec<(Command, bool, bool)> {
         vec![
             // (command, starts a turn, interrupts playback)
-            (Command::Hello { token: None, client: ClientKind::Web, protocol_version: 1 }, false, false),
+            (Command::Hello { token: None, client: ClientKind::Web, protocol_version: PROTOCOL_VERSION }, false, false),
             (Command::Ask { text: "¿qué pasa?".into() }, true, true),
             (Command::Ask { text: "   ".into() }, false, false),
             (Command::Say { text: "hola compadre".into() }, true, true),

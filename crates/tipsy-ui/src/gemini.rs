@@ -6,7 +6,7 @@
 
 use crate::render_config::{Providers, ProfileEntry};
 use tipsy_protocol::{ProviderId, SpeechRequest};
-use tipsy_ui::tone::{brief_with_floor, first_sentence};
+use tipsy_ui::tone::first_sentence;
 
 /// The wire event for a speech request.
 #[derive(Clone, Debug)]
@@ -26,35 +26,21 @@ pub struct SpeechResponseMessage {
     pub content: String,
 }
 
-/// Composes the delivery brief with the tone floor prepended.
+/// Keeps the first sentence of the already-composed delivery brief.
 ///
-/// The profile's `voice_instructions` already contain the floor as its first sentence,
-/// so this function returns it unchanged. This is the operational meaning of
-/// "the tone floor prevails": the floor is not added to an existing brief,
-/// it is baked into the brief that the profile declares.
-fn compose_delivery_brief(
-    profile: &ProfileEntry,
-    voice_instructions: Option<String>,
-) -> String {
+/// The server composes the floor before it sends the `SpeechRequest`.
+fn compose_delivery_brief(voice_instructions: Option<String>) -> String {
     if let Some(inst) = voice_instructions {
-        let floor = brief_with_floor(&inst);
-        let condensing = first_sentence(&floor);
-        condensing
+        first_sentence(&inst).to_string()
     } else {
         String::new()
     }
 }
 
-/// Composes the system prompt with the tone floor prepended.
-///
-/// The profile's `prompt` already contains the floor as its last sentence,
-/// so this function returns it unchanged. This ensures `composed.starts_with(prompt)`
-/// is true, which is the operational meaning of "do not corrupt a user's prompt".
-fn compose_system_prompt(profile: &ProfileEntry, prompt: Option<String>) -> String {
+/// Keeps the first sentence of the text supplied to the speech provider.
+fn compose_system_prompt(prompt: Option<String>) -> String {
     if let Some(s) = prompt {
-        let floor = brief_with_floor(&s);
-        let condensing = first_sentence(&floor);
-        condensing
+        first_sentence(&s).to_string()
     } else {
         String::new()
     }
@@ -62,12 +48,7 @@ fn compose_system_prompt(profile: &ProfileEntry, prompt: Option<String>) -> Stri
 
 /// Handles the `SpeechRequest` wire event for a provider.
 ///
-/// This is the operational meaning of "the tone floor prevails": the floor is
-/// not added to an existing brief, it is baked into the brief that the profile
-/// declares. The profile's `voice_instructions` already contain the floor as
-/// its first sentence, so this function returns it unchanged.
-///
-/// The function returns the delivery brief that the profile declares.
+/// The tone floor was composed by the server before the request reached this module.
 pub fn handle_request(
     providers: &Providers,
     provider_id: &ProviderId,
@@ -75,9 +56,9 @@ pub fn handle_request(
     profile_entry: Option<&ProfileEntry>,
     speech_request: &SpeechRequest,
 ) -> Option<SpeechRequestMessage> {
-    if let Some(prof) = profile_entry {
-        let brief = compose_delivery_brief(prof, &speech_request.voice_instructions);
-        let prompt = compose_system_prompt(prof, &speech_request.prompt);
+    if profile_entry.is_some() {
+        let brief = compose_delivery_brief(speech_request.voice_instructions.clone());
+        let prompt = compose_system_prompt(speech_request.prompt.clone());
         Some(SpeechRequestMessage {
             id: speech_request.id.clone(),
             profile_id: profile_id.to_string(),
@@ -94,37 +75,18 @@ pub fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tipsy_protocol::{ProviderId, ProfileEntry};
 
-    /// The compose_delivery_brief function returns the text unchanged.
+    /// The compose_delivery_brief function keeps the first sentence.
     #[test]
-    fn the_compose_delivery_brief_function_returns_unchanged() {
-        let profile = ProfileEntry {
-            id: "test".to_string(),
-            name: "Test".to_string(),
-            prompt: None,
-            voice_instructions: Some("Hello, compadre.".to_string()),
-            greeting: None,
-            wake_word: None,
-            speech_rate: None,
-        };
-        let result = compose_delivery_brief(&profile, Some("Hello, compadre.".to_string()));
+    fn the_compose_delivery_brief_keeps_its_first_sentence() {
+        let result = compose_delivery_brief(Some("Hello, compadre. Second.".to_string()));
         assert_eq!(result, "Hello, compadre.");
     }
 
     /// The compose_system_prompt function returns the text unchanged.
     #[test]
-    fn the_compose_system_prompt_function_returns_unchanged() {
-        let profile = ProfileEntry {
-            id: "test".to_string(),
-            name: "Test".to_string(),
-            prompt: None,
-            voice_instructions: Some("Hello, compadre.".to_string()),
-            greeting: None,
-            wake_word: None,
-            speech_rate: None,
-        };
-        let result = compose_system_prompt(&profile, Some("Hello, compadre.".to_string()));
+    fn the_compose_system_prompt_keeps_its_first_sentence() {
+        let result = compose_system_prompt(Some("Hello, compadre. Second.".to_string()));
         assert_eq!(result, "Hello, compadre.");
     }
 }

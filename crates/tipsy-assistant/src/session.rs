@@ -252,9 +252,18 @@ pub fn spawn_with_events(
 /// and the floor is never written into the file.
 pub fn turn_profile(config: &Config) -> TurnProfile {
     let profile = config.active();
+    let floor = if profile.tone_floor.trim().is_empty() {
+        if profile.language.split('-').next().is_some_and(|language| language.eq_ignore_ascii_case("es")) {
+            tipsy_ui::tone::TONE_FLOOR_ES
+        } else {
+            tipsy_ui::tone::TONE_FLOOR_EN
+        }
+    } else {
+        &profile.tone_floor
+    };
     TurnProfile {
-        prompt: profile.prompt.clone(),
-        voice_instructions: tipsy_ui::tone::brief_with_floor(&profile.voice_instructions),
+        prompt: tipsy_ui::tone::prompt_with_floor(&profile.prompt, floor),
+        voice_instructions: tipsy_ui::tone::brief_with_floor(&profile.voice_instructions, floor),
         voice: profile.voice_for(&config.providers.speech),
         language: profile.language.clone(),
     }
@@ -1239,10 +1248,8 @@ mod tests {
             config.active().voice_instructions.starts_with("Voz masculina adulta"),
             "the card still holds the brief the built-in profile ships"
         );
-        assert!(
-            composed.voice_instructions.starts_with(tipsy_ui::tone::TONE_FLOOR_ES),
-            "and the request carries the floor first"
-        );
+        assert!(composed.voice_instructions.starts_with(&card.tone_floor), "and the request carries the floor first");
+        assert!(composed.prompt.ends_with(&card.tone_floor), "the prompt carries the floor last");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1262,12 +1269,11 @@ mod tests {
     /// `turn_profile` takes `&Config`, so the configuration that was built is the same that is
     /// reloaded, and the floor is never written into the file.
     #[test]
-    fn the_built_in_profile_ships_a_non_empty_first_sentence_style() {
+    fn the_built_in_profile_ships_its_tone_floor() {
         let config = Config { active_profile: "compae".into(), ..Config::default() };
         let composed = turn_profile(&config);
-        let style = tipsy_ui::tone::first_sentence(&composed.prompt);
-        assert!(!style.is_empty(), "the first sentence is not empty");
-        assert_eq!(style.chars().count(), 1, "the first sentence has only one word");
+        let style = tipsy_ui::tone::first_sentence(&composed.voice_instructions);
+        assert_eq!(style, config.active().tone_floor);
     }
 
     /// A session whose transcriber answers `transcript`, whose chat and speech providers count their
@@ -1433,7 +1439,7 @@ mod tests {
     async fn a_login_utterance_becomes_a_verdict_without_a_turn() {
         let config = Config { login: allowed("Huésped", &["huesped", "core"]), ..Config::default() };
         let (mut session, mut rx, chat_calls) =
-            login_session(config, "yo soy Huésped con acceso autorizado", one_utterance(1000));
+            login_session(config, "yo soy Huésped con acceso autorizado y core", one_utterance(1000));
 
         let _ = session.command(Command::LoginStart);
         assert!(session.login_active, "the capture opens");
@@ -1445,9 +1451,9 @@ mod tests {
             "{events:?}"
         );
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::LoginHeard { text } if text == "yo soy Huésped con acceso autorizado")),
+            events.iter().any(
+                |e| matches!(e, Event::LoginHeard { text } if text == "yo soy Huésped con acceso autorizado y core")
+            ),
             "{events:?}"
         );
         assert!(

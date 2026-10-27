@@ -601,7 +601,7 @@ mod tests {
     fn the_commands_that_leave_are_the_protocols_own_and_the_hello_is_first() {
         assert_eq!(
             hello_json(),
-            r#"{"type":"hello","token":null,"client":"web","protocol_version":1}"#,
+            r#"{"type":"hello","token":null,"client":"web","protocol_version":2}"#,
             "Task 3.2's socket sends this before anything else"
         );
 
