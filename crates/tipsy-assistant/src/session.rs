@@ -1273,7 +1273,7 @@ mod tests {
         let config = Config { active_profile: "compae".into(), ..Config::default() };
         let composed = turn_profile(&config);
         let style = tipsy_ui::tone::first_sentence(&composed.voice_instructions);
-        assert_eq!(style, config.active().tone_floor);
+        assert_eq!(style, tipsy_ui::tone::first_sentence(&config.active().tone_floor));
     }
 
     /// A session whose transcriber answers `transcript`, whose chat and speech providers count their
